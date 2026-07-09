@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>MetaInfer Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0e1117; --panel: #161b22; --border: #30363d;
+      --fg: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+      --ok: #3fb950; --warn: #d29922; --err: #f85149;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI",
+            Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg); color: var(--fg);
+    }
+    header {
+      padding: 16px 24px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    }
+    header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+    header .meta { color: var(--muted); font-size: 12px; }
+    main {
+      padding: 20px 24px; display: grid; gap: 18px;
+      grid-template-columns: 1fr 1fr;
+      grid-template-areas:
+        "state state"
+        "perf duration"
+        "iter iter"
+        "agents agents"
+        "timeline timeline";
+    }
+    @media (max-width: 900px) {
+      main { grid-template-columns: 1fr;
+        grid-template-areas: "state" "perf" "duration" "iter" "agents" "timeline"; }
+    }
+    .panel {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 8px; padding: 14px 16px;
+    }
+    .panel h2 {
+      margin: 0 0 10px; font-size: 13px; font-weight: 600;
+      color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .state { grid-area: state; }
+    .perf-chart { grid-area: perf; }
+    .duration-chart { grid-area: duration; }
+    .iterations { grid-area: iter; }
+    .agents { grid-area: agents; }
+    .timeline { grid-area: timeline; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 7px 8px; border-bottom: 1px solid var(--border); text-align: left;
+             vertical-align: top; }
+    th { color: var(--muted); font-weight: 500; }
+    .pill {
+      display: inline-block; padding: 2px 8px; border-radius: 999px;
+      font-size: 11px; font-weight: 600;
+    }
+    .pill.running { background: #1f6feb33; color: #79c0ff; }
+    .pill.success { background: #238636; color: #fff; }
+    .pill.failed  { background: #da3633; color: #fff; }
+    .pill.interrupted { background: #d29922; color: #1a1a1a; }
+    .pill.stuck   { background: #d2992233; color: #e3b341; }
+    .pill.done    { background: #23863633; color: #3fb950; }
+    .pill.unknown { background: #30363d; color: #8b949e; }
+    .pill.idle    { background: #30363d; color: #8b949e; }
+    .pill.A_plan, .pill.B_implement, .pill.C_test,
+    .pill.D_review, .pill.E_perf_test, .pill.F_perf_plan {
+      background: #1f6feb33; color: #79c0ff;
+    }
+    .pill.finished { background: #238636; color: #fff; }
+
+    /* state graph */
+    .graph { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+             justify-content: center; padding: 10px 0; }
+    .node {
+      padding: 12px 16px; border: 1px solid var(--border); border-radius: 8px;
+      min-width: 130px; text-align: center; background: #0e1117;
+    }
+    .node.active {
+      border-color: var(--accent); box-shadow: 0 0 0 2px #1f6feb55;
+      background: #1f6feb22;
+    }
+    .node .lbl { font-weight: 600; }
+    .node .ph  { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .arrow { color: var(--muted); font-size: 18px; }
+    .arrow.fail { color: var(--err); }
+    .arrow.pass { color: var(--ok); }
+
+    code { background: #0e1117; padding: 1px 5px; border-radius: 3px;
+           font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+           font-size: 12px; color: #e6edf3; }
+    .perf-cell { font-family: ui-monospace, monospace; font-size: 12px;
+                 color: #79c0ff; }
+    .mono { font-family: ui-monospace, monospace; font-size: 12px; }
+    .fail-reason { color: var(--err); font-size: 12px; }
+    .chart-box { height: 220px; }
+    ul.timeline { max-height: 260px; overflow-y: auto; margin: 0; padding: 0;
+                  list-style: none; font-family: ui-monospace, monospace;
+                  font-size: 12px; }
+    ul.timeline li { padding: 3px 0; border-bottom: 1px dashed var(--border); }
+    .t { color: var(--muted); margin-right: 8px; }
+    .err-line { color: var(--err); }
+    .ok-line { color: var(--ok); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MetaInfer Dashboard</h1>
+    <div class="meta" id="header-meta">loading…</div>
+  </header>
+
+  <main>
+    <section class="panel state">
+      <h2>State Machine <span style="color:var(--muted); font-weight:normal; text-transform:none; letter-spacing:0;">(auto-derived from <code>metainfer/phases.py</code>)</span></h2>
+      <div class="graph" id="state-graph"></div>
+      <div id="current-state" style="text-align:center; color:var(--muted); font-size:12px; margin-bottom:8px;"></div>
+      <details>
+        <summary style="cursor:pointer; color:var(--muted); font-size:12px;">All transitions (<span id="edge-count">0</span>)</summary>
+        <table id="edges-table" style="margin-top:8px;">
+          <thead><tr><th>From</th><th>On</th><th>To</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </details>
+    </section>
+
+    <section class="panel perf-chart">
+      <h2>Performance per Iteration</h2>
+      <div class="chart-box"><canvas id="perf-chart"></canvas></div>
+    </section>
+
+    <section class="panel duration-chart">
+      <h2>Iteration Duration (seconds)</h2>
+      <div class="chart-box"><canvas id="duration-chart"></canvas></div>
+    </section>
+
+    <section class="panel iterations">
+      <h2>Iteration History</h2>
+      <table id="iter-table">
+        <thead>
+          <tr>
+            <th>#</th><th>Start</th><th>Goal</th><th>Status</th>
+            <th>Perf</th><th>Duration</th><th>Failure reason</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="panel agents">
+      <h2>Live Sub-Agents</h2>
+      <table id="agents-table">
+        <thead>
+          <tr><th>Name</th><th>Role</th><th>Phase</th><th>Attempt</th>
+              <th>Elapsed</th><th>Last output</th><th>Success</th><th>Log</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section class="panel timeline">
+      <h2>Event Timeline</h2>
+      <ul class="timeline" id="timeline-list"></ul>
+    </section>
+  </main>
+
+  <script>
+    const API = (p) => fetch(p).then(r => r.json());
+    const fmtDur = (s) => s == null ? "—" : (s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s/60)}m${Math.round(s%60)}s`);
+    const fmtAgo = (s) => s == null ? "—" : (s < 60 ? `${s.toFixed(0)}s ago` : `${Math.floor(s/60)}m ago`);
+    const fmtTs = (ts) => {
+      if (!ts) return "—";
+      const d = new Date(ts * 1000);
+      return d.toLocaleTimeString();
+    };
+
+    // Phase labels are NOT hardcoded — they are fetched from /api/state-graph
+    // (which reads them from metainfer/phases.py). labelFor() falls back to
+    // the raw id until the first fetch lands.
+    let _phaseLabels = {};
+    function labelFor(id) {
+      return _phaseLabels[id] || id;
+    }
+
+    let perfChart, durationChart;
+    function makeLineChart(ctx, label, color) {
+      return new Chart(ctx, {
+        type: "line",
+        data: { labels: [], datasets: [{ label, data: [], borderColor: color,
+                backgroundColor: color + "33", tension: 0.2, fill: true }] },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          scales: { x: { ticks: { color: "#8b949e" }, grid: { color: "#21262d" } },
+                    y: { ticks: { color: "#8b949e" }, grid: { color: "#21262d" },
+                         beginAtZero: true } },
+          plugins: { legend: { labels: { color: "#e6edf3" } } },
+        },
+      });
+    }
+
+    // Cache the most recent graph payload so other tabs can use the labels
+    // without an extra round-trip.
+    let _lastGraph = { nodes: [], edges: [], current: "idle", active_edge: null, last_outcome: null };
+
+    function renderStateGraph(graph) {
+      _lastGraph = graph;
+      // refresh label cache
+      (graph.nodes || []).forEach(n => { _phaseLabels[n.id] = n.label; });
+
+      const wrap = document.getElementById("state-graph");
+      wrap.innerHTML = "";
+      const current = graph.current;
+      const activeEdge = graph.active_edge;   // {from,to,label} or null
+      const nodes = graph.nodes || [];
+
+      // node cards in canonical order
+      nodes.forEach((n, i) => {
+        const isActive = n.id === current;
+        const div = document.createElement("div");
+        div.className = "node" + (isActive ? " active" : "");
+        div.title = n.description || "";
+        div.innerHTML = `<div class="lbl">${escapeHtml(n.label)}</div>
+                         <div class="ph">${isActive ? "● active" : ""}</div>`;
+        wrap.appendChild(div);
+
+        // forward arrow if the next node in order is a destination
+        if (i < nodes.length - 1) {
+          const next = nodes[i + 1].id;
+          const fwd = (graph.edges || []).some(e => e.from === n.id && e.to === next);
+          if (fwd) {
+            const arrow = document.createElement("div");
+            const isActiveFwd = activeEdge && activeEdge.from === n.id && activeEdge.to === next;
+            arrow.className = "arrow" + (isActiveFwd ? " pass" : "");
+            arrow.textContent = "→";
+            wrap.appendChild(arrow);
+          }
+        }
+      });
+
+      // caption
+      const cap = document.getElementById("current-state");
+      if (current === "finished") {
+        cap.textContent = "Run finished.";
+      } else if (current === "failed") {
+        cap.textContent = "Run ended in failure.";
+      } else if (current === "idle") {
+        cap.textContent = "Not started.";
+      } else if (activeEdge) {
+        cap.innerHTML = `last transition: <code>${escapeHtml(activeEdge.from)}</code>`
+          + ` <span style="color:var(--accent)">—[${escapeHtml(activeEdge.label)}]→</span> `
+          + `<code>${escapeHtml(activeEdge.to)}</code>`
+          + (graph.last_outcome ? ` (outcome: <code>${escapeHtml(graph.last_outcome)}</code>)` : "");
+      } else {
+        cap.textContent = `Current phase: ${labelFor(current)}`;
+      }
+
+      // edges table — auto-lists every transition defined in phases.py
+      const tbody = document.querySelector("#edges-table tbody");
+      const cnt = document.getElementById("edge-count");
+      tbody.innerHTML = "";
+      const edges = graph.edges || [];
+      if (cnt) cnt.textContent = String(edges.length);
+      edges.forEach(e => {
+        const isActive = activeEdge
+          && activeEdge.from === e.from && activeEdge.to === e.to
+          && e.label.split(" / ").includes(activeEdge.label);
+        const tr = document.createElement("tr");
+        if (isActive) tr.style.background = "#1f6feb22";
+        tr.innerHTML = `
+          <td><span class="pill ${e.from}">${escapeHtml(labelFor(e.from))}</span></td>
+          <td class="mono">${escapeHtml(e.label)}</td>
+          <td><span class="pill ${e.to}">${escapeHtml(labelFor(e.to))}</span></td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function renderRun(rs) {
+      const meta = document.getElementById("header-meta");
+      const phase = rs.current_phase || "idle";
+      meta.innerHTML = `task_id: <code>${rs.task_id || "?"}</code> · `
+        + `type: <code>${rs.task_type || "?"}</code> · `
+        + `iteration: <strong>${rs.current_iteration ?? 0}</strong> · `
+        + `phase: <span class="pill ${phase}">${escapeHtml(labelFor(phase))}</span> · `
+        + (rs.finished ? `final: <span class="pill ${rs.final_status}">${escapeHtml(rs.final_status || "")}</span>`
+                       : "running");
+      // re-render graph caption with the latest run info (nodes/labels cached)
+      renderStateGraph(_lastGraph);
+    }
+
+    function renderIterations(recs) {
+      const tbody = document.querySelector("#iter-table tbody");
+      tbody.innerHTML = "";
+      recs.forEach(r => {
+        const tr = document.createElement("tr");
+        const perfStr = Object.entries(r.perf || {})
+          .map(([k, v]) => `${k}=${(+v).toFixed(2)}`).join(", ");
+        // An iteration finalized retroactively after an orchestrator crash
+        // is stored as status="failed" + interrupted=true. Surface it as
+        // "interrupted" in the UI so users can distinguish a real C-step
+        // failure from an externally-killed run.
+        const statusLabel = r.interrupted ? "interrupted" : r.status;
+        const statusClass = r.interrupted ? "interrupted" : r.status;
+        tr.innerHTML = `
+          <td><strong>${r.iteration}</strong></td>
+          <td><span class="pill ${r.start_phase}">${escapeHtml(labelFor(r.start_phase))}</span></td>
+          <td>${escapeHtml(r.goal || "(no goal recorded)")}</td>
+          <td><span class="pill ${statusClass}">${statusLabel}</span></td>
+          <td class="perf-cell">${escapeHtml(perfStr) || "—"}</td>
+          <td>${fmtDur(r.duration_s)}</td>
+          <td class="fail-reason">${escapeHtml(r.failure_reason || "")}</td>`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function renderAgents(data) {
+      const tbody = document.querySelector("#agents-table tbody");
+      tbody.innerHTML = "";
+      (data.agents || []).forEach(a => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td class="mono">${escapeHtml(a.name)}</td>
+          <td>${escapeHtml(a.role)}</td>
+          <td><span class="pill ${a.phase}">${a.phase}</span></td>
+          <td>${a.attempt}</td>
+          <td>${fmtDur(a.elapsed_s)}</td>
+          <td>${fmtAgo(a.last_output_age_s)}</td>
+          <td>${a.success === null ? "—" :
+                (a.success ? `<span class="pill success">ok</span>`
+                          : `<span class="pill failed">fail</span>`)}</td>
+          <td class="mono" title="${escapeHtml(a.log_file || "")}">${escapeHtml((a.log_file||"").split("/").slice(-2).join("/"))}</td>`;
+        tbody.appendChild(tr);
+      });
+      if ((data.agents || []).length === 0) {
+        tbody.innerHTML = `<tr><td colspan="8" style="color:var(--muted)">no agents launched yet</td></tr>`;
+      }
+    }
+
+    function renderTimeline(events) {
+      const ul = document.getElementById("timeline-list");
+      ul.innerHTML = "";
+      events.slice(-60).reverse().forEach(ev => {
+        const li = document.createElement("li");
+        const cls = (ev.type || "").includes("fail") || (ev.type || "").includes("err") ? "err-line"
+                  : (ev.type || "").includes("success") || (ev.type || "").includes("end") ? "ok-line" : "";
+        li.className = cls;
+        const p = ev.payload ? JSON.stringify(ev.payload) : "";
+        li.innerHTML = `<span class="t">${fmtTs(ev.ts)}</span><strong>${escapeHtml(ev.type)}</strong> `
+                     + `<span style="color:var(--muted)">${escapeHtml(p)}</span>`;
+        ul.appendChild(li);
+      });
+    }
+
+    function renderCharts(payload) {
+      const dLabels = payload.durations.map(d => `iter ${d.x}`);
+      const dVals = payload.durations.map(d => d.y);
+      if (!durationChart) {
+        durationChart = makeLineChart(
+          document.getElementById("duration-chart").getContext("2d"),
+          "duration (s)", "#d29922");
+      }
+      durationChart.data.labels = dLabels;
+      durationChart.data.datasets[0].data = dVals;
+      durationChart.update();
+
+      // Perf chart: each point carries its own {x, y} where x is the REAL
+      // iteration number from the backend. Earlier iterations may have no
+      // perf data (failed before E_perf_test), so dataset lengths differ —
+      // mapping to plain y values would shift every series left and label
+      // iteration N as "1". Using object-form data with a linear x axis
+      // makes chart.js place each point at its true iteration, leaving
+      // gaps where no data exists.
+      if (!perfChart) {
+        perfChart = new Chart(
+          document.getElementById("perf-chart").getContext("2d"),
+          {
+            type: "line",
+            data: { datasets: [] },
+            options: {
+              responsive: true, maintainAspectRatio: false,
+              scales: {
+                x: {
+                  type: "linear",
+                  // show integer iteration ticks; let chart.js auto-skip
+                  ticks: {
+                    color: "#8b949e",
+                    precision: 0,
+                    stepSize: 1,
+                    callback: (v) => Number.isInteger(v) ? `iter ${v}` : "",
+                  },
+                  grid: { color: "#21262d" },
+                  // start at 1 (iterations are 1-indexed) even when no data
+                  // sits there, so the x axis doesn't begin at 0 or at the
+                  // first iteration that happened to have perf data.
+                  min: 1,
+                  title: { display: true, text: "iteration", color: "#8b949e" },
+                },
+                y: { ticks: { color: "#8b949e" }, grid: { color: "#21262d" },
+                     beginAtZero: true },
+              },
+              plugins: { legend: { labels: { color: "#e6edf3" } },
+                         tooltip: {
+                           callbacks: { title: (items) => `iter ${items[0].parsed.x}` },
+                         } },
+            },
+          });
+      }
+      const palette = ["#58a6ff", "#3fb950", "#d29922", "#f778ba", "#a371f7", "#79c0ff"];
+      perfChart.data.datasets = payload.perf_series.map((s, i) => ({
+        label: s.metric,
+        data: s.points.map(p => ({ x: p.x, y: p.y })),
+        borderColor: palette[i % palette.length],
+        backgroundColor: palette[i % palette.length] + "33",
+        tension: 0.2, fill: false,
+      }));
+      perfChart.update();
+    }
+
+    function escapeHtml(s) {
+      return String(s ?? "").replace(/[&<>"']/g, c => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      })[c]);
+    }
+
+    async function tick() {
+      try {
+        const [run, iters, agents, charts, timeline, graph] = await Promise.all([
+          API("/api/run"),
+          API("/api/iterations"),
+          API("/api/agents"),
+          API("/api/charts"),
+          API("/api/timeline"),
+          API("/api/state-graph"),
+        ]);
+        // Render the graph FIRST so the label cache is populated before
+        // other tabs that depend on labelFor() run.
+        renderStateGraph(graph);
+        renderRun(run);
+        renderIterations(iters);
+        renderAgents(agents);
+        renderCharts(charts);
+        renderTimeline(timeline.events || []);
+      } catch (e) {
+        console.error(e);
+      }
+    }
+    tick();
+    setInterval(tick, 2000);
+  </script>
+</body>
+</html>

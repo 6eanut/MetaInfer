@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# MetaInfer runtime artifacts (per-user, per-task)
+.metainfer/
+state/
+iterations/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store

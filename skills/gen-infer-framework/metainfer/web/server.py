@@ -64,6 +64,81 @@ def _build_app(
             raise HTTPException(404, f"iteration {n} not found")
         return rec.__dict__
 
+    @app.get("/api/iterations/{n}/retrospective")
+    def iteration_retrospective(n: int) -> Dict[str, Any]:
+        """Serve the post-E retrospective.md for the WebUI's click-to-view
+        iteration detail panel.
+
+        Returns:
+          - has_retrospective: bool
+          - markdown:           the file contents (or an explanatory
+                                placeholder when missing)
+          - path:               absolute path to the file (for debugging /
+                                "open in editor" affordances)
+          - prev_perf, this_perf: the two perf dicts the comparison was
+                                based on, so the UI can render its own
+                                table even if the markdown is missing
+
+        A missing retrospective means either (a) E hasn't run yet for this
+        iteration, or (b) the retro agent failed to write the file. We
+        return 200 with has_retrospective=false rather than 404 so the
+        frontend can render a useful "no retrospective yet" panel plus
+        the raw perf delta.
+        """
+        rec = store.load_iteration(n)
+        if rec is None:
+            raise HTTPException(404, f"iteration {n} not found")
+        prev = store.load_iteration(n - 1) if n > 1 else None
+        prev_perf: Dict[str, Any] = dict(prev.perf) if prev and prev.perf else {}
+        this_perf: Dict[str, Any] = dict(rec.perf) if rec.perf else {}
+        path = rec.retrospective_path
+        markdown = ""
+        has = False
+        if path:
+            p = Path(path)
+            if p.is_file():
+                try:
+                    markdown = p.read_text(encoding="utf-8", errors="replace")
+                    has = True
+                except OSError:
+                    markdown = ""
+        if not has:
+            # Explain WHY there's no retro so the panel isn't a mystery.
+            # Three cases: still running (no terminal phase reached), failed
+            # at some phase before E (postmortem agent didn't write the
+            # file), or reached E but the perf retro agent didn't write.
+            if rec.status == "running":
+                reason = ("This iteration is still running — no retrospective "
+                          "has been produced yet.")
+            elif rec.status == "failed":
+                reason = (
+                    "This iteration failed and the postmortem agent didn't "
+                    f"produce a retrospective file. Failure reason: "
+                    f"`{rec.failure_reason or 'unknown'}`. Check the "
+                    f"iteration's logs directory (`{path or '<unknown>'}`)."
+                )
+            elif rec.phases and "E_perf_test" not in rec.phases:
+                reason = ("This iteration hasn't reached the perf-test (E) "
+                          "phase yet, so no retrospective was written.")
+            else:
+                reason = ("The retrospective agent didn't produce a file. "
+                          "Check the iteration's logs directory.")
+            markdown = (
+                f"# Iteration {n} — no retrospective available\n\n"
+                f"{reason}\n\n"
+                f"## Raw perf data\n\n"
+                f"- this iteration: `{this_perf or 'no data'}`\n"
+                f"- previous iteration: `{prev_perf or 'no data'}`\n"
+            )
+        return {
+            "has_retrospective": has,
+            "path": path,
+            "markdown": markdown,
+            "this_perf": this_perf,
+            "prev_perf": prev_perf,
+            "iteration": n,
+        }
+
     # --- Agents -------------------------------------------------------- #
     @app.get("/api/agents")
     def agents() -> Dict[str, Any]:
@@ -137,6 +212,16 @@ def _build_app(
             "edges": edges,
             "active_edge": active_edge,
             "last_outcome": last_outcome,
+            # Terminal phases are deliberately NOT in PHASE_ORDER (they're
+            # status badges, not pipeline steps), but the graph still needs
+            # them as renderable targets so abort edges ("X → failed") have
+            # somewhere to point. Surface them separately so the frontend
+            # can position them off the main row without polluting the
+            # forward chain.
+            "terminal_nodes": [
+                {"id": m.id, "label": m.label, "description": m.description}
+                for m in P.PHASES if m.is_terminal
+            ],
             "outcome_legend": [
                 {"id": o, "label": P.outcome_label(o)} for o in P.ALL_OUTCOMES
             ],

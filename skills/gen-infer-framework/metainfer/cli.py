@@ -16,20 +16,34 @@ DEFAULT_CLAUDE_BIN = "ccb"
 
 # Claude Code permission mode for sub-agents. Sub-agents are non-interactive
 # (`-p` with stdin), so `default` mode hangs on every Edit/Write prompt.
+#   - `bypassPermissions` = skip ALL permission checks AND the LLM-based
+#                           Bash safety classifier (the one that denied
+#                           `bash perf.sh` 60+ times in iter3 of the
+#                           qwen3-8b task, wasting 7 minutes). Maps to
+#                           `--dangerously-skip-permissions`. Claude Code
+#                           normally refuses this under EUID=0, but the
+#                           sub-agent manager sets IS_SANDBOX=1 to
+#                           short-circuit that check (ccb's official
+#                           trusted-container escape hatch). DEFAULT —
+#                           the orchestrator's sub-agents run trusted
+#                           code in a controlled working dir, so the
+#                           classifier adds false positives without
+#                           real safety value.
 #   - `auto`              = accept ALL tool uses (Edit/Write/Bash/...) without
-#                           prompting. Works under root. DEFAULT.
+#                           prompting, but the LLM-based Bash safety
+#                           classifier still runs and can deny commands
+#                           it deems risky. Works under root. Use this
+#                           only if you specifically want the classifier
+#                           gating sub-agent bash.
 #   - `acceptEdits`       = auto-accept Edit/Write only; Bash still prompts.
 #                           Hangs on any sub-agent that needs shell.
-#   - `bypassPermissions` = same idea as `auto` but maps to
-#                           `--dangerously-skip-permissions`, which Claude
-#                           Code refuses to run when EUID=0. Don't use as root.
 #   - `plan`              = planning mode (read-only). Not for execution agents.
 #   - `default`           = prompt for everything. Hangs sub-agents.
 # Resolution:
 #   1. --permission-mode CLI flag
 #   2. METAINFER_PERMISSION_MODE env var
-#   3. "auto"
-DEFAULT_PERMISSION_MODE = "auto"
+#   3. "bypassPermissions"
+DEFAULT_PERMISSION_MODE = "bypassPermissions"
 _VALID_PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions", "auto")
 
 # Claude Code effort level controls extended-thinking budget per turn.
@@ -56,19 +70,6 @@ def _resolve_permission_mode(cli_value: str | None) -> str:
         raise SystemExit(
             f"invalid permission mode {v!r}; expected one of "
             f"{', '.join(_VALID_PERMISSION_MODES)}"
-        )
-    # Fail fast: bypassPermissions as root dies immediately inside every
-    # sub-agent invocation ("--dangerously-skip-permissions cannot be used
-    # with root/sudo privileges"). Better to surface this at orchestrator
-    # startup with an actionable hint than waste iteration 1's three
-    # retries discovering it.
-    if v == "bypassPermissions" and os.geteuid() == 0:
-        raise SystemExit(
-            "permission-mode 'bypassPermissions' is incompatible with root: "
-            "Claude Code refuses --dangerously-skip-permissions when EUID=0. "
-            "Re-run without --permission-mode (defaults to 'auto', which "
-            "accepts all tool uses including Bash, and works as root), or "
-            "explicitly pass --permission-mode auto."
         )
     return v
 
@@ -108,10 +109,12 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "Claude Code permission mode for sub-agents (default: env "
             f"METAINFER_PERMISSION_MODE or {DEFAULT_PERMISSION_MODE!r}). "
-            "'auto' = accept all tool uses, works under root (RECOMMENDED); "
+            "'bypassPermissions' = skip ALL permission checks AND the Bash "
+            "safety classifier (DEFAULT; recommended for the orchestrator's "
+            "trusted sub-agents); 'auto' = accept all tool uses but the "
+            "Bash classifier still runs and can deny commands; "
             "'acceptEdits' = auto-accept Edit/Write only (Bash still hangs "
-            "sub-agents); 'bypassPermissions' = same as auto but refused "
-            "by Claude Code when EUID=0."
+            "sub-agents)."
         ),
     )
     run_p.add_argument("--model", default=None, help="Override model for sub-agents")

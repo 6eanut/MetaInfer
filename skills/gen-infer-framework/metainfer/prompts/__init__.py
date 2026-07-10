@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 NOTEBOOKS_HINT = """A knowledge base of reference designs, known pitfalls, and worked
@@ -1230,3 +1230,328 @@ def optimize_prompt(
         iteration=iteration, last_perf=last_perf, review_feedback=review_feedback,
         logs_dir=logs_dir,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Post-E retrospective (human-readable iteration summary)
+# --------------------------------------------------------------------------- #
+#
+# Runs once at the end of E_perf_test. Produces a single Markdown file that
+# the WebUI renders when the user clicks an iteration row. The point is to
+# answer three questions at a glance:
+#   1. What did this iteration actually change?
+#   2. How did perf move vs the previous iteration (numbers)?
+#   3. Why did perf move that way? (root-cause analysis from the code +
+#      plan + review)
+# Plus a boiled-down summary of the D-phase review.md so the reader doesn't
+# need to open a second file.
+#
+# This is NOT a gating step — failure to produce the file is logged but
+# does not change the transition out of E. It's purely an observability
+# artifact for post-hoc browsing.
+
+
+def _perf_table_block(this_perf: Optional[Dict[str, float]],
+                      prev_perf: Optional[Dict[str, float]]) -> str:
+    """Render this-iter vs prev-iter perf as a markdown table with a delta
+    column. Returns "(no data yet)" lines when perf is missing so the
+    retro agent still has something concrete to react to."""
+    if not this_perf and not prev_perf:
+        return "(no perf data for this iteration or the previous one)"
+    keys: List[str] = []
+    for k in (this_perf or {}):
+        if k not in keys:
+            keys.append(k)
+    for k in (prev_perf or {}):
+        if k not in keys:
+            keys.append(k)
+    lines = [
+        "| metric | previous | this iteration | Δ |",
+        "| --- | --- | --- | --- |",
+    ]
+    for k in keys:
+        prev_v = prev_perf.get(k) if prev_perf else None
+        this_v = this_perf.get(k) if this_perf else None
+        prev_s = f"{prev_v:.4g}" if isinstance(prev_v, (int, float)) else "—"
+        this_s = f"{this_v:.4g}" if isinstance(this_v, (int, float)) else "—"
+        if isinstance(prev_v, (int, float)) and isinstance(this_v, (int, float)) and prev_v != 0:
+            # Show signed percentage; guard divide-by-zero.
+            pct = (this_v - prev_v) / abs(prev_v) * 100.0
+            delta_s = f"{pct:+.1f}%"
+        else:
+            delta_s = "—"
+        lines.append(f"| `{k}` | {prev_s} | {this_s} | {delta_s} |")
+    return "\n".join(lines)
+
+
+def retrospective_prompt(
+    req: Dict[str, Any],
+    iter_dir: Path,
+    notebooks_dir: Path,
+    iteration: int,
+    this_perf: Optional[Dict[str, float]] = None,
+    prev_perf: Optional[Dict[str, float]] = None,
+    review_feedback: Optional[str] = None,
+    e_ok: bool = True,
+    e_error: Optional[str] = None,
+    logs_dir: Optional[Path] = None,
+    goal: Optional[str] = None,
+) -> str:
+    """Prompt for the **post-E retrospective** writer.
+
+    The agent reads the iteration's plan.md + code + perf_report.json + the
+    D-phase review.md, then writes a single Markdown file
+    (``{logs_dir}/retrospective.md``) that explains — in plain prose — what
+    this iteration did and why perf moved vs the previous iteration. The
+    WebUI renders this file when the user clicks the iteration row.
+
+    This step does NOT modify code, does NOT gate the loop, and does NOT
+    feed into the next iteration's prompts. It is pure observability.
+    """
+    perf_table = _perf_table_block(this_perf, prev_perf)
+    review_section = (
+        f"# D-phase review (already produced this iteration)\n"
+        f"The reviewer wrote `{logs_dir}/review.md`. Read it, then SUMMARIZE\n"
+        f"it below — do NOT copy it verbatim. The retrospective is meant to\n"
+        f"be the single doc a reader opens; the raw review.md stays as the\n"
+        f"long-form backup.\n"
+        if logs_dir is not None
+        else "# D-phase review\n(read `.metainfer-logs/review.md` if present)\n"
+    )
+    e_status_line = (
+        "E (perf test) PASSED — perf numbers below are real measurements."
+        if e_ok
+        else f"E (perf test) FAILED — no fresh perf data. Error: `{e_error or 'unknown'}`"
+    )
+    goal_line = goal.strip() if goal and goal.strip() else "(no goal recorded for this iteration)"
+    return f"""You are the **RETROSPECTIVE WRITER** for MetaInfer iteration #{iteration}.
+
+The perf-test step (E) just finished. Your ONE job is to produce a single
+Markdown file — `{logs_dir}/retrospective.md` — that lets a reader understand
+this iteration at a glance: what changed, how perf moved vs the previous
+iteration, and why.
+
+You do NOT modify code. You do NOT gate anything. You only WRITE that one
+Markdown file. Be concrete and specific — cite file paths, function names,
+and metric numbers. Avoid hand-wavy claims like "the scheduler got faster";
+say WHICH function and BY HOW MUCH.
+
+# Task requirements (frozen context)
+{_render_req(req)}
+
+# Iteration goal (from planner)
+{goal_line}
+
+# E step status
+{e_status_line}
+
+# Perf comparison vs previous iteration
+{perf_table}
+
+# Working directory (the code this iteration produced)
+{iter_dir}
+
+Read for context (do NOT dump them in the output, synthesize):
+  - `{iter_dir}/plan.md`           — what the planner set out to do
+  - `{iter_dir}/perf_report.json`  — this iteration's raw perf numbers
+  - `{iter_dir}/perf_plan.md`      — (if present) the prior cycle's perf plan
+  - the code under `{iter_dir}/`    — diff mentally vs what a typical
+                                      baseline would look like
+
+{review_section}
+
+# Knowledge base (only if you need background on a technique)
+{NOTEBOOKS_HINT}
+Knowledge base path: {notebooks_dir}
+
+{NO_FRAMEWORK_REFERENCE_RULE}
+
+# Deliverable — write `{logs_dir}/retrospective.md` with EXACTLY these sections
+
+```markdown
+# Iteration {iteration} retrospective
+
+**Goal:** <one sentence paraphrasing the iteration goal above>
+**E status:** <passed / failed — one short clause>
+**Headline perf change:** <e.g. "tokens_per_sec +12.4% vs iter {max(iteration - 1, 1)}, driven by X">
+
+## What this iteration changed
+<2-4 bullet points naming the concrete code changes — file:function level.
+Reference real paths under {iter_dir}. Don't paraphrase the plan verbatim;
+describe what was ACTUALLY done, which may differ from the plan.>
+
+## Perf vs previous iteration
+<Restate the table above in prose. Call out the biggest mover(s). If a
+metric regressed, say so explicitly — do not hide bad news.>
+
+| metric | previous | this | Δ |
+| --- | --- | --- | --- |
+| ... | ... | ... | ... |
+
+## Why perf moved
+<The core analysis. Tie each notable delta to a specific code change.
+"tokens_per_sec improved because `{iter_dir}/X.py:Y` switched from Z to W,
+which removes N redundant ops per request." If you can't find a cause,
+say "unclear — possibly noise" rather than inventing one.>
+
+## Review summary
+<3-6 bullet distilled points from review.md. Focus on actionable findings
+the reader should remember: latent bugs flagged, perf cliffs predicted,
+correctness risks. NOT a copy of the review.>
+
+## Caveats / open questions
+<Anything the reader should be skeptical about: noisy measurement, tiny
+sample size, perf gained at the cost of correctness, features not yet
+exercised by the benchmark. Bullet list, may be empty.>
+```
+
+Keep the whole file under ~600 words. The reader is skimming a dashboard,
+not reading a paper. If a section has nothing to say, write "(none)" rather
+than padding.
+"""
+
+
+def failure_retrospective_prompt(
+    req: Dict[str, Any],
+    iter_dir: Path,
+    notebooks_dir: Path,
+    iteration: int,
+    failure_reason: Optional[str] = None,
+    failed_phase: Optional[str] = None,
+    phase_attempts: Optional[int] = None,
+    logs_dir: Optional[Path] = None,
+    goal: Optional[str] = None,
+) -> str:
+    """Prompt for the **postmortem writer** of a FAILED iteration.
+
+    A failed iteration never reaches E (perf test), so the regular
+    retrospective_prompt — which centers on perf deltas — doesn't apply.
+    Instead this prompt asks for a focused failure analysis: what was
+    attempted, where it broke, what the agent tried to recover, why
+    recovery didn't work, and what the next iteration should do
+    differently.
+
+    The agent reads the plan + the implementation that was tried + the
+    failing phase's diagnostic artifacts (oracle report, debugger attempt
+    events, c-repair notes, test stderr, server logs) and writes a single
+    Markdown file (``{logs_dir}/retrospective.md``). The WebUI already
+    renders this path — no UI changes needed.
+
+    Non-gating: a failure retro that itself fails is logged and swallowed
+    (a failure-within-a-failure shouldn't break the orchestrator loop).
+    """
+    goal_line = goal.strip() if goal and goal.strip() else "(no goal recorded for this iteration)"
+    failure_line = (
+        failure_reason.strip() if failure_reason and failure_reason.strip()
+        else "(no failure_reason on the iteration record)"
+    )
+    phase_line = failed_phase or "(unknown)"
+    attempts_line = (
+        f"{phase_attempts} attempt(s) at this phase before the iteration gave up"
+        if phase_attempts is not None
+        else "(attempt count not available)"
+    )
+    return f"""You are the **FAILURE POSTMORTEM WRITER** for MetaInfer iteration #{iteration}.
+
+This iteration FAILED. It never reached the perf-test (E) phase, so the
+regular "perf moved because X" retrospective does not apply. Your job is to
+write the postmortem: WHAT broke, WHERE in the loop, WHY recovery didn't
+succeed, and WHAT the next iteration should do differently.
+
+You produce ONE Markdown file: `{logs_dir}/retrospective.md`. The WebUI
+renders it when the user clicks the iteration row — make it the one doc a
+reader opens to understand why this iteration failed. Cite real file paths,
+real function names, real error messages. Do NOT hand-wave "the test had
+a bug"; quote the actual stderr line or the actual failing oracle case.
+
+You do NOT modify code. You do NOT gate anything. You only WRITE that file.
+
+# Task requirements (frozen context)
+{_render_req(req)}
+
+# Iteration goal (from planner)
+{goal_line}
+
+# Headline failure
+- **failed phase:** `{phase_line}`
+- **failure reason:** {failure_line}
+- **{attempts_line}**
+
+# Working directory (the code this iteration produced)
+{iter_dir}
+
+# Where to find failure evidence
+Read for context (do NOT dump them in the output, synthesize):
+  - `{iter_dir}/plan.md`           — what the planner set out to do
+  - the code under `{iter_dir}/`    — what was actually implemented
+  - `{iter_dir}/test.sh`           — the correctness harness (if present)
+  - `{logs_dir}/oracle-report.json`— per-case results when oracle path was used
+  - `{logs_dir}/c-repairs.jsonl`   — structured record of each repair attempt
+  - `{logs_dir}/c-repair-attempt*.md`— per-attempt debugger notes
+  - `{logs_dir}/iter{iteration}-c-debugger.attempt*.events.jsonl`
+                                    — raw ccb events from each debugger turn
+  - `{logs_dir}/server.stderr.log` — server logs (crashes, OOM, import errors)
+  - any `*.log` / `*.stderr` files under `{logs_dir}/`
+
+Many of these files may not exist (depends on which phase failed and
+whether the repair loop ran). Read what exists; skip what doesn't.
+
+# Knowledge base (only if you need background on a technique)
+{NOTEBOOKS_HINT}
+Knowledge base path: {notebooks_dir}
+
+{NO_FRAMEWORK_REFERENCE_RULE}
+
+# Deliverable — write `{logs_dir}/retrospective.md` with EXACTLY these sections
+
+```markdown
+# Iteration {iteration} postmortem (FAILED)
+
+**Goal:** <one sentence paraphrasing the iteration goal>
+**Failed phase:** `{phase_line}`
+**Headline failure:** <one-sentence summary of the failure_reason, in plain language>
+
+## What this iteration tried to do
+<2-3 bullets: the concrete plan — what code change / new component was
+attempted, citing plan.md and the actual files written under {iter_dir}.>
+
+## Where it broke
+<The single most load-bearing failure point. Be specific: "the oracle
+returned LOGIC_FAIL on 3 of 10 cases; case 'X' failed because the model's
+output didn't match the expected schema" — NOT "tests failed". Quote the
+actual error line / stderr / failing case id. If multiple things broke,
+lead with the one that aborted the iteration.>
+
+## What recovery was attempted
+<If the repair loop ran (c-repairs.jsonl exists), summarize each attempt:
+what the debugger hypothesized, what it changed, why it still didn't pass.
+If no repair was attempted (e.g. B INFRA_FAIL), say so and explain why.>
+
+## Why recovery didn't work
+<The honest analysis. Common patterns:
+  - misdiagnosis (debugger fixed the wrong thing)
+  - root cause deeper than the surface symptom
+  - test harness itself buggy / oracle flake
+  - infra failure (OOM, model timeout) that code can't fix
+  - planner asked for the impossible
+Quote evidence from the diagnostic files. If you genuinely can't tell,
+write "unclear from the available logs" rather than inventing a story.>
+
+## What the next iteration should do differently
+<Concrete, actionable recommendations the next planner/implementer should
+read. NOT "be more careful" — instead "the oracle schema check at line X
+of oracle.py rejects empty outputs; the implementer should handle the
+no-candidates case before formatting". Bullet list, 2-5 items.>
+
+## Caveats
+<Anything the reader should be skeptical about: missing logs (so the
+analysis is partial), suspected oracle flakiness, infra-only failure that
+might not reproduce. Bullet list, may be empty.>
+```
+
+Keep the whole file under ~600 words. The reader is skimming a dashboard,
+not reading a paper. If a section has nothing to say, write "(none)" rather
+than padding. Lead with the failure; do not bury the lede by walking through
+the plan in detail before saying what went wrong.
+"""
+

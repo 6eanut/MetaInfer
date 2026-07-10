@@ -52,6 +52,12 @@ class IterationRecord:
     # failed C step from an externally-interrupted attempt. The WebUI can
     # use this to render differently (e.g., "interrupted" vs "failed").
     interrupted: bool = False
+    # Absolute path to this iteration's retrospective.md (written at the
+    # end of E_perf_test). The WebUI reads this file on demand when the
+    # user clicks the iteration row. None if E never ran or the retro
+    # agent failed to produce the file. Stored as a path (not the full
+    # text) so the JSON state file stays small.
+    retrospective_path: Optional[str] = None
 
 
 @dataclass

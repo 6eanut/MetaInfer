@@ -5,6 +5,7 @@
   <title>MetaInfer Dashboard</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
   <style>
     :root {
       --bg: #0e1117; --panel: #161b22; --border: #30363d;
@@ -25,18 +26,29 @@
     header .meta { color: var(--muted); font-size: 12px; }
     main {
       padding: 20px 24px; display: grid; gap: 18px;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr;
       grid-template-areas:
-        "state state"
-        "perf duration"
-        "iter iter"
-        "agents agents"
-        "timeline timeline";
+        "state"
+        "charts"
+        "iter"
+        "agents"
+        "timeline";
     }
-    @media (max-width: 900px) {
-      main { grid-template-columns: 1fr;
-        grid-template-areas: "state" "perf" "duration" "iter" "agents" "timeline"; }
+    /* Responsive auto-grid for the perf/duration mini-charts. Each tile
+       has enough room for a readable axis + legend without wasting the
+       row, and wraps to one column on narrow screens. */
+    .charts-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+      gap: 16px;
     }
+    .mini-chart { background: #0e1117; border: 1px solid var(--border);
+                  border-radius: 6px; padding: 12px 14px; }
+    .mini-chart h3 {
+      margin: 0 0 8px; font-size: 12px; font-weight: 600;
+      color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px;
+    }
+    .chart-box-small { height: 260px; }
     .panel {
       background: var(--panel); border: 1px solid var(--border);
       border-radius: 8px; padding: 14px 16px;
@@ -46,8 +58,7 @@
       color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px;
     }
     .state { grid-area: state; }
-    .perf-chart { grid-area: perf; }
-    .duration-chart { grid-area: duration; }
+    .charts { grid-area: charts; }
     .iterations { grid-area: iter; }
     .agents { grid-area: agents; }
     .timeline { grid-area: timeline; }
@@ -73,22 +84,40 @@
     }
     .pill.finished { background: #238636; color: #fff; }
 
-    /* state graph */
-    .graph { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-             justify-content: center; padding: 10px 0; }
-    .node {
-      padding: 12px 16px; border: 1px solid var(--border); border-radius: 8px;
-      min-width: 130px; text-align: center; background: #0e1117;
+    /* state graph — the ENTIRE diagram lives inside one SVG with its
+       own viewBox coordinate system. No DOM measurement, no absolute
+       pixels in CSS, no overlay that can escape its container. The SVG
+       scales to the panel width (width:100%, height:auto via the
+       viewBox aspect ratio) and `overflow: hidden` on the wrapper
+       guarantees backward arcs can NEVER bleed into the panels below
+       (which was the bug with the previous absolute-px overlay). */
+    .graph { width: 100%; overflow: hidden; padding: 4px 0; }
+    .graph svg { display: block; width: 100%; height: auto;
+                 font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .graph svg .edge { fill: none; stroke-width: 1.5; }
+    .graph svg .edge.forward   { stroke: #8b949e; }
+    .graph svg .edge.pass      { stroke: #3fb950; }
+    .graph svg .edge.fail      { stroke: #d29922; }
+    .graph svg .edge.backward  { stroke: #d29922; }
+    .graph svg .edge.self      { stroke: #a371f7; }
+    .graph svg .edge.abort     { stroke: #f85149; stroke-dasharray: 5 3; }
+    .graph svg .edge.active    { stroke-width: 3; filter: drop-shadow(0 0 3px currentColor); }
+    .graph svg .edge-label {
+      fill: #8b949e; font-size: 11px;
+      text-anchor: middle; dominant-baseline: middle;
     }
-    .node.active {
-      border-color: var(--accent); box-shadow: 0 0 0 2px #1f6feb55;
-      background: #1f6feb22;
+    .graph svg .edge-label.active { fill: #e6edf3; font-weight: 600; }
+    .graph svg .node-rect { fill: #0e1117; stroke: #30363d; stroke-width: 1; }
+    .graph svg .node-rect.active {
+      fill: #1f6feb22; stroke: #58a6ff; stroke-width: 2;
     }
-    .node .lbl { font-weight: 600; }
-    .node .ph  { font-size: 11px; color: var(--muted); margin-top: 2px; }
-    .arrow { color: var(--muted); font-size: 18px; }
-    .arrow.fail { color: var(--err); }
-    .arrow.pass { color: var(--ok); }
+    .graph svg .node-rect.terminal.failed  { stroke: #f85149; }
+    .graph svg .node-rect.terminal.finished { stroke: #3fb950; }
+    .graph svg .node-label {
+      fill: #e6edf3; font-size: 13px; font-weight: 600;
+      text-anchor: middle; dominant-baseline: middle;
+    }
+    .graph svg .node-dot { fill: #58a6ff; }
 
     code { background: #0e1117; padding: 1px 5px; border-radius: 3px;
            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -98,6 +127,61 @@
     .mono { font-family: ui-monospace, monospace; font-size: 12px; }
     .fail-reason { color: var(--err); font-size: 12px; }
     .chart-box { height: 220px; }
+    .agents-summary { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+    /* Iteration rows are clickable to open the retrospective modal. */
+    #iter-table tbody tr { cursor: pointer; }
+    #iter-table tbody tr:hover { background: #1f6feb22; }
+    #iter-table tbody tr.selected { background: #1f6feb33; }
+    #iter-table tbody tr.loading { opacity: 0.5; }
+    /* Retrospective modal. Overlays the whole viewport so the user can
+       scroll a long retro without disturbing the dashboard layout. */
+    .modal-overlay {
+      position: fixed; inset: 0; background: #0e1117cc;
+      display: none; align-items: flex-start; justify-content: center;
+      z-index: 100; padding: 32px 16px; overflow-y: auto;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 10px; max-width: 920px; width: 100%; margin-bottom: 64px;
+      box-shadow: 0 16px 48px #0008;
+    }
+    .modal-header {
+      padding: 14px 20px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    }
+    .modal-header h3 { margin: 0; font-size: 15px; font-weight: 600; }
+    .modal-header .close {
+      background: none; border: none; color: var(--muted); cursor: pointer;
+      font-size: 20px; line-height: 1; padding: 4px 8px; border-radius: 4px;
+    }
+    .modal-header .close:hover { background: #30363d; color: var(--fg); }
+    .modal-body { padding: 18px 24px 24px; max-height: 72vh; overflow-y: auto; }
+    /* Markdown rendering inside the retro modal. */
+    .retro-md h1 { font-size: 18px; margin: 0 0 8px; }
+    .retro-md h2 { font-size: 14px; margin: 18px 0 6px; color: var(--accent);
+                   text-transform: uppercase; letter-spacing: 0.4px; }
+    .retro-md h3 { font-size: 13px; margin: 12px 0 4px; color: var(--fg); }
+    .retro-md p, .retro-md li { font-size: 13px; line-height: 1.6; }
+    .retro-md ul { margin: 4px 0 8px; padding-left: 22px; }
+    .retro-md code { background: #0e1117; padding: 1px 5px; border-radius: 3px;
+                     font-size: 12px; color: #79c0ff; }
+    .retro-md pre { background: #0e1117; padding: 10px 12px; border-radius: 6px;
+                    overflow-x: auto; border: 1px solid var(--border); }
+    .retro-md pre code { background: none; padding: 0; color: var(--fg); }
+    .retro-md table { width: 100%; border-collapse: collapse; margin: 8px 0;
+                      font-size: 12px; }
+    .retro-md th, .retro-md td { padding: 6px 8px; border-bottom: 1px solid var(--border);
+                                 text-align: left; }
+    .retro-md th { color: var(--muted); font-weight: 600; }
+    .retro-md strong { color: var(--fg); }
+    .retro-md em { color: var(--muted); font-style: normal; }
+    .retro-flag {
+      display: inline-block; padding: 2px 8px; border-radius: 999px;
+      font-size: 11px; font-weight: 600; margin-left: 8px;
+      background: #30363d; color: var(--muted);
+    }
+    .retro-flag.missing { background: #d2992233; color: #e3b341; }
     ul.timeline { max-height: 260px; overflow-y: auto; margin: 0; padding: 0;
                   list-style: none; font-family: ui-monospace, monospace;
                   font-size: 12px; }
@@ -127,18 +211,13 @@
       </details>
     </section>
 
-    <section class="panel perf-chart">
-      <h2>Performance per Iteration</h2>
-      <div class="chart-box"><canvas id="perf-chart"></canvas></div>
-    </section>
-
-    <section class="panel duration-chart">
-      <h2>Iteration Duration (seconds)</h2>
-      <div class="chart-box"><canvas id="duration-chart"></canvas></div>
+    <section class="panel charts">
+      <h2>Performance &amp; Duration per Iteration</h2>
+      <div class="charts-grid" id="charts-grid"></div>
     </section>
 
     <section class="panel iterations">
-      <h2>Iteration History</h2>
+      <h2>Iteration History <span style="color:var(--muted); font-weight:normal; text-transform:none; letter-spacing:0;">(click a row to open the retrospective)</span></h2>
       <table id="iter-table">
         <thead>
           <tr>
@@ -152,6 +231,7 @@
 
     <section class="panel agents">
       <h2>Live Sub-Agents</h2>
+      <div class="agents-summary" id="agents-summary"></div>
       <table id="agents-table">
         <thead>
           <tr><th>Name</th><th>Role</th><th>Phase</th><th>Attempt</th>
@@ -166,6 +246,16 @@
       <ul class="timeline" id="timeline-list"></ul>
     </section>
   </main>
+
+  <div class="modal-overlay" id="retro-modal" onclick="if(event.target===this)closeRetroModal()">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="retro-title">Iteration retrospective</h3>
+        <button class="close" onclick="closeRetroModal()" title="close (Esc)">×</button>
+      </div>
+      <div class="modal-body retro-md" id="retro-body">loading…</div>
+    </div>
+  </div>
 
   <script>
     const API = (p) => fetch(p).then(r => r.json());
@@ -185,83 +275,226 @@
       return _phaseLabels[id] || id;
     }
 
-    let perfChart, durationChart;
-    function makeLineChart(ctx, label, color) {
-      return new Chart(ctx, {
-        type: "line",
-        data: { labels: [], datasets: [{ label, data: [], borderColor: color,
-                backgroundColor: color + "33", tension: 0.2, fill: true }] },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          scales: { x: { ticks: { color: "#8b949e" }, grid: { color: "#21262d" } },
-                    y: { ticks: { color: "#8b949e" }, grid: { color: "#21262d" },
-                         beginAtZero: true } },
-          plugins: { legend: { labels: { color: "#e6edf3" } } },
-        },
-      });
-    }
-
     // Cache the most recent graph payload so other tabs can use the labels
     // without an extra round-trip.
     let _lastGraph = { nodes: [], edges: [], current: "idle", active_edge: null, last_outcome: null };
 
+    // Classify an edge so we can route + color it consistently.
+    function _edgeClass(e, nodeOrder) {
+      if (e.to === "failed" || e.from === "failed") return "abort";
+      if (e.from === e.to) return "self";
+      const i = nodeOrder.indexOf(e.from);
+      const j = nodeOrder.indexOf(e.to);
+      if (i === -1 || j === -1) return "forward";
+      if (j < i) return "backward";
+      const lbl = (e.label || "").toLowerCase();
+      if (lbl === "ok" || lbl === "pass" || lbl === "c ok → perf") return "pass";
+      if (lbl.includes("fail") || lbl.includes("redo") || lbl.includes("replan")) return "fail";
+      return "forward";
+    }
+
+    // ----------------------------------------------------------------- //
+    // State-graph geometry
+    // ----------------------------------------------------------------- //
+    //
+    // Everything lives inside ONE SVG with its own viewBox. The wrapper
+    // has `overflow: hidden`, so it's physically impossible for an elbow
+    // to bleed into the panels below.
+    //
+    // All connectors are orthogonal (elbow) polylines: horizontal and
+    // vertical segments only, sharp 90° corners. This matches what the
+    // user asked for ("方方正正" / boxy) and reads as a traditional
+    // state-machine diagram.
+    //
+    // The layout is DERIVED from a few base dimensions plus the node
+    // list the backend sends — no per-node hardcoded x, no hardcoded
+    // viewBox size. If a phase is added or removed in phases.py, the
+    // diagram resizes itself.
+    const SVG_NS = "http://www.w3.org/2000/svg";
+    const GEO = {
+      // Base dimensions — the only tunables. Everything else follows.
+      nodeW: 150, nodeH: 50,
+      gapX: 20,           // horizontal gap between adjacent node rects
+      arcClearance: 110,  // vertical space above main row for elbows + self-loops
+      labelSpace: 50,     // vertical space below main row for forward labels
+      margin: 20,         // outer padding
+    };
+
+    // Compute the full layout (viewBox W/H, per-node center X, Y bands)
+    // from GEO + the node list. Called once per render.
+    function _layout(nodes) {
+      const n = nodes.length;
+      const innerW = n * GEO.nodeW + Math.max(0, n - 1) * GEO.gapX;
+      const W = 2 * GEO.margin + innerW;
+      const arcTop = GEO.margin;
+      const mainTopY = arcTop + GEO.arcClearance;
+      const mainY = mainTopY + GEO.nodeH / 2;
+      const mainBottomY = mainTopY + GEO.nodeH;
+      const H = mainBottomY + GEO.labelSpace + GEO.margin;
+      const mainX = {};
+      nodes.forEach((node, i) => {
+        mainX[node.id] = GEO.margin + GEO.nodeW/2 + i * (GEO.nodeW + GEO.gapX);
+      });
+      // Edge-routing bands, all relative to the geometry above. The
+      // exact offsets inside the arc zone keep long/short backward
+      // elbows + self-loops in separate lanes so they don't overlap.
+      const band = {
+        backwardHigh: arcTop + 15,                  // F→A (longest jump)
+        backwardLow:  arcTop + 60,                  // D→B (shorter jump)
+        selfLoopTop:  arcTop + 30,                  // self-loops live between here and mainTopY
+        forwardLabel: mainBottomY + 18,             // forward-edge labels just under the row
+      };
+      return { W, H, mainX, mainY, band };
+    }
+
+    // Module-level current layout, set by renderStateGraph and read by
+    // _nodeAnchor / _elbowPath / _svgNode. Graph rendering is sync and
+    // single-threaded so this is safe.
+    let _LAYOUT = null;
+
+    function _svgEl(tag, attrs) {
+      const el = document.createElementNS(SVG_NS, tag);
+      for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
+      return el;
+    }
+
+    // Build the orthogonal polyline for one edge. Each case returns a
+    // "M ... L ... L ..." path with only H/V segments.
+    function _elbowPath(cls, fromId, toId, nodeOrder) {
+      const s = _nodeAnchor(fromId);
+      const t = _nodeAnchor(toId);
+      const band = _LAYOUT.band;
+      if (cls === "self") {
+        // Rectangular bump above the node. Enter from top-edge slightly
+        // right of center, exit slightly left, so the arrowhead points
+        // back into the node clearly.
+        const cx = s.cx;
+        const topY = s.top;
+        const w = 30, h = topY - band.selfLoopTop;
+        const xR = cx + w/2, xL = cx - w/2, yT = topY - h;
+        return `M ${xR} ${topY} L ${xR} ${yT} L ${xL} ${yT} L ${xL} ${topY}`;
+      }
+      if (cls === "abort") {
+        // Abort edges are filtered out before rendering, but keep a
+        // sane fallback in case the filter is removed later.
+        return `M ${s.cx} ${s.bottom} L ${t.cx} ${t.top}`;
+      }
+      if (cls === "backward") {
+        // Up from source top → horizontal at an apex Y → down into target top.
+        // Longer jumps (F→A) use the higher band so they clear shorter
+        // backward elbows (D→B) and the self-loops.
+        const hops = Math.abs(nodeOrder.indexOf(fromId) - nodeOrder.indexOf(toId));
+        const apexY = hops >= 3 ? band.backwardHigh : band.backwardLow;
+        return `M ${s.cx} ${s.top} L ${s.cx} ${apexY} L ${t.cx} ${apexY} L ${t.cx} ${t.top}`;
+      }
+      // forward (and pass/fail variants) — straight horizontal between
+      // adjacent node edges. The arrow itself sits in the inter-node gap.
+      return `M ${s.right} ${s.cy} L ${t.left} ${s.cy}`;
+    }
+
+    // Per-node anchor points (center, top/bottom/left/right edges).
+    // Only main-row nodes are reachable here — the terminal row was
+    // removed when the Fail path got filtered out.
+    function _nodeAnchor(id) {
+      const cx = _LAYOUT.mainX[id];
+      const cy = _LAYOUT.mainY;
+      const hw = GEO.nodeW / 2, hh = GEO.nodeH / 2;
+      return { cx, cy, top: cy - hh, bottom: cy + hh,
+               left: cx - hw, right: cx + hw };
+    }
+
     function renderStateGraph(graph) {
       _lastGraph = graph;
-      // refresh label cache
       (graph.nodes || []).forEach(n => { _phaseLabels[n.id] = n.label; });
+      (graph.terminal_nodes || []).forEach(n => { _phaseLabels[n.id] = n.label; });
 
       const wrap = document.getElementById("state-graph");
       wrap.innerHTML = "";
       const current = graph.current;
-      const activeEdge = graph.active_edge;   // {from,to,label} or null
-      const nodes = graph.nodes || [];
+      const activeEdge = graph.active_edge;
+      const mainNodes = graph.nodes || [];
+      const termNodes = graph.terminal_nodes || [];
+      const edges = graph.edges || [];
+      const nodeOrder = mainNodes.map(n => n.id);
 
-      // node cards in canonical order
-      nodes.forEach((n, i) => {
-        const isActive = n.id === current;
-        const div = document.createElement("div");
-        div.className = "node" + (isActive ? " active" : "");
-        div.title = n.description || "";
-        div.innerHTML = `<div class="lbl">${escapeHtml(n.label)}</div>
-                         <div class="ph">${isActive ? "● active" : ""}</div>`;
-        wrap.appendChild(div);
+      // Derive the full geometry from base dimensions + node count.
+      // Stash it on _LAYOUT so _nodeAnchor / _elbowPath / _svgNode can
+      // read it without each taking layout as a parameter.
+      _LAYOUT = _layout(mainNodes);
 
-        // forward arrow if the next node in order is a destination
-        if (i < nodes.length - 1) {
-          const next = nodes[i + 1].id;
-          const fwd = (graph.edges || []).some(e => e.from === n.id && e.to === next);
-          if (fwd) {
-            const arrow = document.createElement("div");
-            const isActiveFwd = activeEdge && activeEdge.from === n.id && activeEdge.to === next;
-            arrow.className = "arrow" + (isActiveFwd ? " pass" : "");
-            arrow.textContent = "→";
-            wrap.appendChild(arrow);
-          }
+      const svg = _svgEl("svg", { viewBox: `0 0 ${_LAYOUT.W} ${_LAYOUT.H}`,
+                                  preserveAspectRatio: "xMidYMid meet" });
+      // Arrowhead markers, one per color (markers can't inherit stroke).
+      const colors = { forward: "#8b949e", pass: "#3fb950", fail: "#d29922",
+                       backward: "#d29922", self: "#a371f7", abort: "#f85149" };
+      const defs = _svgEl("defs");
+      Object.entries(colors).forEach(([cls, color]) => {
+        const m = _svgEl("marker", {
+          id: `arrow-${cls}`, viewBox: "0 0 10 10",
+          refX: "9", refY: "5", markerWidth: "8", markerHeight: "8",
+          orient: "auto-start-reverse",
+        });
+        m.appendChild(_svgEl("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: color }));
+        defs.appendChild(m);
+      });
+      svg.appendChild(defs);
+
+      // Edges first (so nodes paint on top of the arrowheads that
+      // terminate at node borders).
+      //
+      // Filter out abort edges (every X→failed transition). The user
+      // asked to drop the Fail path from the diagram — it's visually
+      // noisy (6 dashed-red lines fanning into a single "failed" node)
+      // and the run-level failure is already surfaced in the header
+      // ("final: failed"). Recovery paths (D→B, self-loop retries) are
+      // NOT considered "fail paths" — they're part of the normal flow,
+      // so they stay.
+      const visibleEdges = edges.filter(e => _edgeClass(e, nodeOrder) !== "abort");
+      visibleEdges.forEach(e => {
+        const cls = _edgeClass(e, nodeOrder);
+        const isActive = activeEdge
+          && activeEdge.from === e.from && activeEdge.to === e.to
+          && e.label.split(" / ").includes(activeEdge.label);
+        svg.appendChild(_svgEl("path", {
+          class: `edge ${cls}` + (isActive ? " active" : ""),
+          stroke: colors[cls],
+          "marker-end": `url(#arrow-${cls})`,
+          d: _elbowPath(cls, e.from, e.to, nodeOrder),
+        }));
+        // Labels on forward + backward edges only. Self-loops are
+        // identifiable by their position; abort edges are filtered out.
+        if (cls === "forward" || cls === "pass" || cls === "fail" || cls === "backward") {
+          const lp = _labelPos(cls, e.from, e.to, nodeOrder);
+          svg.appendChild(_svgEl("text", {
+            class: "edge-label" + (isActive ? " active" : ""),
+            x: lp.x, y: lp.y,
+          })).textContent = e.label;
         }
       });
 
-      // caption
+      // Main-row nodes only. With abort edges gone, the terminal row
+      // (failed/finished) has no incoming arrows — leaving it would
+      // show two floating islands. The header's "final:" pill already
+      // reports end-of-run status, so dropping the row loses nothing.
+      mainNodes.forEach(n => svg.appendChild(_svgNode(n, current)));
+
+      wrap.appendChild(svg);
+
+      // caption + edges table (unchanged)
       const cap = document.getElementById("current-state");
-      if (current === "finished") {
-        cap.textContent = "Run finished.";
-      } else if (current === "failed") {
-        cap.textContent = "Run ended in failure.";
-      } else if (current === "idle") {
-        cap.textContent = "Not started.";
-      } else if (activeEdge) {
+      if (current === "finished") cap.textContent = "Run finished.";
+      else if (current === "failed") cap.textContent = "Run ended in failure.";
+      else if (current === "idle") cap.textContent = "Not started.";
+      else if (activeEdge) {
         cap.innerHTML = `last transition: <code>${escapeHtml(activeEdge.from)}</code>`
           + ` <span style="color:var(--accent)">—[${escapeHtml(activeEdge.label)}]→</span> `
           + `<code>${escapeHtml(activeEdge.to)}</code>`
           + (graph.last_outcome ? ` (outcome: <code>${escapeHtml(graph.last_outcome)}</code>)` : "");
-      } else {
-        cap.textContent = `Current phase: ${labelFor(current)}`;
-      }
+      } else cap.textContent = `Current phase: ${labelFor(current)}`;
 
-      // edges table — auto-lists every transition defined in phases.py
       const tbody = document.querySelector("#edges-table tbody");
       const cnt = document.getElementById("edge-count");
       tbody.innerHTML = "";
-      const edges = graph.edges || [];
       if (cnt) cnt.textContent = String(edges.length);
       edges.forEach(e => {
         const isActive = activeEdge
@@ -275,6 +508,58 @@
           <td><span class="pill ${e.to}">${escapeHtml(labelFor(e.to))}</span></td>`;
         tbody.appendChild(tr);
       });
+    }
+
+    // Build a node as a <g> with rect + label text + (optional) active dot.
+    function _svgNode(n, current) {
+      const cx = _LAYOUT.mainX[n.id];
+      const cy = _LAYOUT.mainY;
+      const isActive = n.id === current;
+      const g = _svgEl("g");
+      const rectCls = ["node-rect"];
+      if (isActive) rectCls.push("active");
+      g.appendChild(_svgEl("rect", {
+        class: rectCls.join(" "),
+        x: cx - GEO.nodeW / 2, y: cy - GEO.nodeH / 2,
+        width: GEO.nodeW, height: GEO.nodeH, rx: 8,
+      }));
+      // Split "A: Plan" labels into two lines so even the longest ones
+      // ("C: Correctness Test") fit inside a 150px-wide rect.
+      const lines = _splitNodeLabel(n.label);
+      lines.forEach((line, i) => {
+        const y = cy + (i - (lines.length - 1) / 2) * 16;
+        g.appendChild(_svgEl("text", {
+          class: "node-label", x: cx, y: y,
+        })).textContent = line;
+      });
+      if (isActive) {
+        g.appendChild(_svgEl("circle", {
+          class: "node-dot", cx: cx - GEO.nodeW / 2 + 10, cy: cy - GEO.nodeH / 2 + 10, r: 4,
+        }));
+      }
+      return g;
+    }
+
+    function _splitNodeLabel(label) {
+      const idx = label.indexOf(":");
+      if (idx === -1) return [label];
+      const head = label.slice(0, idx);          // "A"
+      const tail = label.slice(idx + 1).trim();  // "Plan"
+      return [head, tail];
+    }
+
+    // Label position for an edge, matching the elbow routing.
+    function _labelPos(cls, fromId, toId, nodeOrder) {
+      const s = _nodeAnchor(fromId), t = _nodeAnchor(toId);
+      const band = _LAYOUT.band;
+      if (cls === "backward") {
+        const hops = Math.abs(nodeOrder.indexOf(fromId) - nodeOrder.indexOf(toId));
+        const apexY = hops >= 3 ? band.backwardHigh : band.backwardLow;
+        return { x: (s.cx + t.cx) / 2, y: apexY - 8 };
+      }
+      // forward / pass / fail — label sits in the inter-node gap,
+      // just under the main row.
+      return { x: (s.right + t.left) / 2, y: band.forwardLabel };
     }
 
     function renderRun(rs) {
@@ -303,22 +588,99 @@
         // failure from an externally-killed run.
         const statusLabel = r.interrupted ? "interrupted" : r.status;
         const statusClass = r.interrupted ? "interrupted" : r.status;
+        // Mark rows that have a retrospective available with a subtle dot
+        // so the user knows which iterations have a story to read. Rows
+        // without one are still clickable — the modal explains why.
+        const hasRetro = !!r.retrospective_path;
         tr.innerHTML = `
           <td><strong>${r.iteration}</strong></td>
           <td><span class="pill ${r.start_phase}">${escapeHtml(labelFor(r.start_phase))}</span></td>
           <td>${escapeHtml(r.goal || "(no goal recorded)")}</td>
           <td><span class="pill ${statusClass}">${statusLabel}</span></td>
-          <td class="perf-cell">${escapeHtml(perfStr) || "—"}</td>
+          <td class="perf-cell">${escapeHtml(perfStr) || "—"}${hasRetro ? ' <span style="color:var(--accent)">●</span>' : ''}</td>
           <td>${fmtDur(r.duration_s)}</td>
           <td class="fail-reason">${escapeHtml(r.failure_reason || "")}</td>`;
+        tr.onclick = () => openRetroModal(r.iteration, tr);
         tbody.appendChild(tr);
       });
     }
 
+    // --- Retrospective modal ----------------------------------------- //
+    //
+    // Fetches /api/iterations/<n>/retrospective and renders the returned
+    // markdown inside a modal. The backend already supplies a useful
+    // placeholder when no retro file exists (E didn't run, or the retro
+    // agent crashed), so the modal is always informative.
+    let _selectedIterRow = null;
+    async function openRetroModal(n, row) {
+      const modal = document.getElementById("retro-modal");
+      const title = document.getElementById("retro-title");
+      const body = document.getElementById("retro-body");
+      if (_selectedIterRow) _selectedIterRow.classList.remove("selected");
+      row.classList.add("loading", "selected");
+      _selectedIterRow = row;
+      title.innerHTML = `Iteration ${n} retrospective`;
+      body.textContent = "loading…";
+      modal.classList.add("open");
+      try {
+        const data = await API(`/api/iterations/${n}/retrospective`);
+        title.innerHTML = `Iteration ${n} retrospective`
+          + (data.has_retrospective ? ""
+             : ` <span class="retro-flag missing">no retro file</span>`);
+        // marked is loaded from CDN; fall back to <pre> if unavailable.
+        if (window.marked) {
+          body.innerHTML = marked.parse(data.markdown || "");
+        } else {
+          body.innerHTML = `<pre style="white-space:pre-wrap">${
+            escapeHtml(data.markdown || "")}</pre>`;
+        }
+      } catch (e) {
+        body.innerHTML = `<p style="color:var(--err)">failed to load retrospective: ${
+          escapeHtml(String(e))}</p>`;
+      } finally {
+        row.classList.remove("loading");
+      }
+    }
+    function closeRetroModal() {
+      const modal = document.getElementById("retro-modal");
+      modal.classList.remove("open");
+      if (_selectedIterRow) {
+        _selectedIterRow.classList.remove("selected");
+        _selectedIterRow = null;
+      }
+    }
+    // Esc closes the modal; ⌘/Ctrl+W would conflict with the browser, so
+    // we don't bind that. This is the conventional pattern.
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") closeRetroModal();
+    });
+
     function renderAgents(data) {
       const tbody = document.querySelector("#agents-table tbody");
+      const summary = document.getElementById("agents-summary");
       tbody.innerHTML = "";
-      (data.agents || []).forEach(a => {
+      const all = data.agents || [];
+      // Finished agents (success !== null) accumulate in the manager's
+      // internal map for the whole run, which would drown the "Live"
+      // table. Show:
+      //   - every currently running agent (success === null), no cap
+      //   - the N most-recently-finished agents, capped at MAX_SHOWN_FINISHED
+      //     so the panel keeps a useful "what just happened" tail without
+      //     growing unbounded. Sort by last_output_age ascending (smallest
+      //     = most recent) so the cap keeps the freshest results.
+      // Older finished agents are hidden; we surface the hidden count so
+      // the user knows there's history they can dig into via the logs.
+      const MAX_SHOWN_FINISHED = 5;
+      const nowRunning = all.filter(a => a.success === null);
+      const finished = all
+        .filter(a => a.success !== null)
+        .slice()
+        .sort((a, b) => (a.last_output_age_s ?? Infinity) - (b.last_output_age_s ?? Infinity));
+      const shownFinished = finished.slice(0, MAX_SHOWN_FINISHED);
+      const hiddenFinished = finished.length - shownFinished.length;
+      const visible = nowRunning.concat(shownFinished);
+
+      visible.forEach(a => {
         const tr = document.createElement("tr");
         tr.innerHTML = `
           <td class="mono">${escapeHtml(a.name)}</td>
@@ -333,8 +695,14 @@
           <td class="mono" title="${escapeHtml(a.log_file || "")}">${escapeHtml((a.log_file||"").split("/").slice(-2).join("/"))}</td>`;
         tbody.appendChild(tr);
       });
-      if ((data.agents || []).length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" style="color:var(--muted)">no agents launched yet</td></tr>`;
+      if (visible.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="8" style="color:var(--muted)">no active agents</td></tr>`;
+      }
+      if (summary) {
+        const parts = [`${nowRunning.length} running`];
+        if (shownFinished.length) parts.push(`${shownFinished.length} recent finished`);
+        if (hiddenFinished > 0) parts.push(`${hiddenFinished} older (hidden)`);
+        summary.textContent = parts.join(" · ");
       }
     }
 
@@ -353,69 +721,94 @@
       });
     }
 
-    function renderCharts(payload) {
-      const dLabels = payload.durations.map(d => `iter ${d.x}`);
-      const dVals = payload.durations.map(d => d.y);
-      if (!durationChart) {
-        durationChart = makeLineChart(
-          document.getElementById("duration-chart").getContext("2d"),
-          "duration (s)", "#d29922");
-      }
-      durationChart.data.labels = dLabels;
-      durationChart.data.datasets[0].data = dVals;
-      durationChart.update();
+    // Mini-chart registry. Duration lives at index "duration"; each perf
+    // metric is keyed by its metric name. Charts are created lazily inside
+    // the #charts-grid container and reused across ticks; if a metric
+    // disappears from the payload its tile is destroyed and removed.
+    const _charts = {};
+    const PALETTE = ["#58a6ff", "#3fb950", "#d29922", "#f778ba", "#a371f7", "#79c0ff"];
 
-      // Perf chart: each point carries its own {x, y} where x is the REAL
-      // iteration number from the backend. Earlier iterations may have no
-      // perf data (failed before E_perf_test), so dataset lengths differ —
-      // mapping to plain y values would shift every series left and label
-      // iteration N as "1". Using object-form data with a linear x axis
-      // makes chart.js place each point at its true iteration, leaving
-      // gaps where no data exists.
-      if (!perfChart) {
-        perfChart = new Chart(
-          document.getElementById("perf-chart").getContext("2d"),
-          {
-            type: "line",
-            data: { datasets: [] },
-            options: {
-              responsive: true, maintainAspectRatio: false,
-              scales: {
-                x: {
-                  type: "linear",
-                  // show integer iteration ticks; let chart.js auto-skip
-                  ticks: {
-                    color: "#8b949e",
-                    precision: 0,
-                    stepSize: 1,
-                    callback: (v) => Number.isInteger(v) ? `iter ${v}` : "",
-                  },
-                  grid: { color: "#21262d" },
-                  // start at 1 (iterations are 1-indexed) even when no data
-                  // sits there, so the x axis doesn't begin at 0 or at the
-                  // first iteration that happened to have perf data.
-                  min: 1,
-                  title: { display: true, text: "iteration", color: "#8b949e" },
-                },
-                y: { ticks: { color: "#8b949e" }, grid: { color: "#21262d" },
-                     beginAtZero: true },
-              },
-              plugins: { legend: { labels: { color: "#e6edf3" } },
-                         tooltip: {
-                           callbacks: { title: (items) => `iter ${items[0].parsed.x}` },
-                         } },
-            },
-          });
-      }
-      const palette = ["#58a6ff", "#3fb950", "#d29922", "#f778ba", "#a371f7", "#79c0ff"];
-      perfChart.data.datasets = payload.perf_series.map((s, i) => ({
-        label: s.metric,
-        data: s.points.map(p => ({ x: p.x, y: p.y })),
-        borderColor: palette[i % palette.length],
-        backgroundColor: palette[i % palette.length] + "33",
-        tension: 0.2, fill: false,
-      }));
-      perfChart.update();
+    function _linearAxisOptions() {
+      return {
+        type: "linear",
+        ticks: {
+          color: "#8b949e",
+          precision: 0,
+          stepSize: 1,
+          callback: (v) => Number.isInteger(v) ? `iter ${v}` : "",
+        },
+        grid: { color: "#21262d" },
+        min: 1,
+      };
+    }
+    function _miniChartOptions(color, yLabel) {
+      return {
+        responsive: true, maintainAspectRatio: false,
+        scales: {
+          x: _linearAxisOptions(),
+          y: { ticks: { color: "#8b949e" }, grid: { color: "#21262d" },
+               beginAtZero: true, title: { display: !!yLabel, text: yLabel || "",
+                                            color: "#8b949e" } },
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { title: (items) => `iter ${items[0].parsed.x}` } },
+        },
+      };
+    }
+    function _ensureChart(key, title, color, yLabel) {
+      if (_charts[key]) return _charts[key];
+      const grid = document.getElementById("charts-grid");
+      const wrap = document.createElement("div");
+      wrap.className = "mini-chart";
+      wrap.dataset.chartKey = key;
+      wrap.innerHTML = `<h3>${escapeHtml(title)}</h3>`
+                     + `<div class="chart-box-small"><canvas></canvas></div>`;
+      grid.appendChild(wrap);
+      const ctx = wrap.querySelector("canvas").getContext("2d");
+      _charts[key] = new Chart(ctx, {
+        type: "line",
+        data: { datasets: [{ label: title, data: [],
+                borderColor: color, backgroundColor: color + "33",
+                tension: 0.2, fill: false, pointRadius: 3 }] },
+        options: _miniChartOptions(color, yLabel),
+      });
+      return _charts[key];
+    }
+    function _dropChart(key) {
+      if (!_charts[key]) return;
+      _charts[key].destroy();
+      delete _charts[key];
+      const el = document.querySelector(`.mini-chart[data-chart-key="${CSS.escape(key)}"]`);
+      if (el) el.remove();
+    }
+
+    function renderCharts(payload) {
+      const grid = document.getElementById("charts-grid");
+      // Build the set of keys we want this tick: duration always, plus
+      // each perf metric that currently appears in the data.
+      const wanted = new Set(["duration"]);
+      payload.perf_series.forEach(s => wanted.add(s.metric));
+
+      // Drop any chart we previously rendered but no longer want.
+      Object.keys(_charts).forEach(k => { if (!wanted.has(k)) _dropChart(k); });
+
+      // Duration tile: y is wall-clock seconds per iteration. Use object-
+      // form {x,y} too so the x axis stays honest when early iterations
+      // were interrupted before recording a duration.
+      const dur = _ensureChart("duration", "Iteration duration (s)", "#d29922", "seconds");
+      dur.data.datasets[0].data = payload.durations.map(d => ({ x: d.x, y: d.y }));
+      dur.update();
+
+      // One tile per perf metric. Order matches backend order (insertion
+      // order of metric keys across iterations), and the palette assigns a
+      // stable color per index so a metric keeps its color across ticks.
+      payload.perf_series.forEach((s, i) => {
+        const color = PALETTE[i % PALETTE.length];
+        const ch = _ensureChart(s.metric, s.metric, color);
+        ch.data.datasets[0].data = s.points.map(p => ({ x: p.x, y: p.y }));
+        ch.update();
+      });
     }
 
     function escapeHtml(s) {

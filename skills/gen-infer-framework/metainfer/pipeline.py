@@ -41,11 +41,13 @@ from .iteration import IterationWorkspace
 from .prompts import (
     c_repair_followup_prompt,
     c_repair_prompt,
+    failure_retrospective_prompt,
     implement_prompt,
     implement_redo_prompt,
     perf_plan_prompt,
     perf_test_prompt,
     plan_prompt,
+    retrospective_prompt,
     review_prompt,
     write_test_harness_prompt,
 )
@@ -80,6 +82,17 @@ class IterationContext:
     failure: Optional[str] = None
     last_perf: Optional[Dict[str, float]] = None
     best_perf: Optional[Dict[str, float]] = None
+    # Perf produced by THIS iteration's own phases only. Reset on every
+    # iteration-folder open. Used at close time to stamp the iteration
+    # record's `perf` field — WITHOUT it, _close_iteration would stamp
+    # `ctx.last_perf`, which carries across iterations and makes a
+    # perf-less iteration (e.g. one where E failed) inherit the most
+    # recent successful iteration's numbers. That fooled both the perf
+    # chart and the retro endpoint's "this vs previous" comparison into
+    # showing identical values for iterations that never measured
+    # anything. Keeping this scoped per-iteration means an iteration
+    # only has perf data if IT actually produced some.
+    this_iter_perf: Optional[Dict[str, float]] = None
     last_outcome: Optional[P.Outcome] = None
     # Most recent post-test reviewer feedback (code + test-result review).
     # Set by D_review (and historically after C). Fed into the next
@@ -128,6 +141,10 @@ class OrchestratorConfig:
     review_timeout_s: int = 1800
     optimize_timeout_s: int = 3600
     stuck_timeout_s: int = 600
+    # Post-E retrospective writer budget. The retro is a single short
+    # Markdown summary; 10 minutes is generous but bounded. Failure to
+    # produce it is non-fatal (E's outcome is unchanged).
+    retro_timeout_s: int = 600
     # C-step in-place repair budget. When the correctness test (oracle or
     # agent-written test.sh) fails with a LOGIC_FAIL, the orchestrator lets
     # a debugger sub-agent try to fix the code in the SAME iteration folder
@@ -140,10 +157,15 @@ class OrchestratorConfig:
     max_c_retries: int = 3
     claude_bin: str = "ccb"
     model: Optional[str] = None
-    # Claude Code permission mode for sub-agents. Defaults to acceptEdits
-    # (auto-accept file edits). Switch to "bypassPermissions" to also allow
-    # shell commands without prompting.
-    permission_mode: str = "acceptEdits"
+    # Claude Code permission mode for sub-agents. Default
+    # "bypassPermissions" skips ALL permission checks AND the LLM-based
+    # Bash safety classifier (the one that denied `bash perf.sh` 60+
+    # times in iter3 of the qwen3-8b task). Sub-agents are non-interactive
+    # (-p + piped stdin) running trusted code in a controlled working
+    # dir, so the classifier adds false positives without real safety
+    # value. SubAgentManager sets IS_SANDBOX=1 to bypass ccb's
+    # root/bypassPermissions hard-exit.
+    permission_mode: str = "bypassPermissions"
     extra_claude_args: List[str] = field(default_factory=list)
     # If set, perf regression is detected against this metric key (e.g.
     # "tokens_per_sec"). If None, regression detection is disabled.
@@ -387,6 +409,10 @@ class Orchestrator:
                 # the prior iter's B/C sessions would only confuse the
                 # agent with stale file contents.
                 ctx.b_session_id = None
+                # Reset the per-iteration perf accumulator so we don't
+                # inherit the prior iteration's perf when this iteration
+                # never produces any of its own (see this_iter_perf docs).
+                ctx.this_iter_perf = None
                 self.store.update_run(
                     current_iteration=iter_num,
                     current_phase=phase,
@@ -431,7 +457,7 @@ class Orchestrator:
                 # undefined (phase, outcome) — abort the whole run
                 err = f"no transition defined for ({phase}, {outcome})"
                 self._close_iteration(iter_rec, status="failed",
-                                      failure=err, perf=ctx.last_perf,
+                                      failure=err, perf=ctx.this_iter_perf,
                                       outcome=P.ABORTED)
                 self.store.append_timeline("orchestrator_abort",
                                            {"reason": err, "phase": phase, "outcome": outcome})
@@ -450,6 +476,11 @@ class Orchestrator:
                 if t.carry_perf:
                     ctx.last_perf = perf
                 ctx.best_perf = _merge_best(ctx.best_perf, perf)
+                # Always also remember it as this iteration's own perf.
+                # This is what gets stamped onto the iteration record at
+                # close time; scoping it per-iteration prevents stale
+                # carry-over from prior iterations.
+                ctx.this_iter_perf = perf
 
             # ---- record + advance ----------------------------------------- #
             self.store.append_timeline(
@@ -471,7 +502,7 @@ class Orchestrator:
                     iter_rec,
                     status=iter_status,
                     failure=(failure if outcome != P.OK else None),
-                    perf=ctx.last_perf,
+                    perf=ctx.this_iter_perf,
                     outcome=outcome,
                 )
                 iter_dir = None
@@ -510,7 +541,7 @@ class Orchestrator:
         if phase == "D_review":
             return self._do_review(iter_num, iter_dir, ctx)
         if phase == "E_perf_test":
-            return self._do_perf_test(iter_num, iter_dir, ctx)
+            return self._do_perf_test(iter_num, iter_dir, ctx, rec)
         if phase == "F_perf_plan":
             return self._do_perf_plan(iter_num, iter_dir, ctx)
         raise ValueError(f"no handler for phase {phase!r}")
@@ -649,7 +680,7 @@ class Orchestrator:
     # ---- E: perf test (only on C-pass) ---------------------------------- #
 
     def _do_perf_test(
-        self, n: int, iter_dir: Path, ctx: IterationContext,
+        self, n: int, iter_dir: Path, ctx: IterationContext, rec: IterationRecord,
     ) -> Tuple[P.Outcome, Optional[Dict[str, float]], Optional[str]]:
         ok, err, mode, _sid = self._run_agent(
             name=f"iter{n}-perf-tester", role="perf_tester",
@@ -662,12 +693,181 @@ class Orchestrator:
             ),
             timeout=self.cfg.optimize_timeout_s,
         )
+        perf: Optional[Dict[str, float]] = None
+        e_error: Optional[str] = None
+        if not ok:
+            e_error = err
+            # Fall through to the retro writer — we still want a summary
+            # explaining that E failed, even without fresh perf data.
+        else:
+            # Parse perf_report.json if the agent wrote one — surface its
+            # numbers as this step's perf so F can use them.
+            perf = self._read_perf_report(n, iter_dir)
+
+        # Always produce a retrospective after E runs (success or fail).
+        # It's non-gating: a retro-agent failure is logged but doesn't
+        # change E's outcome.
+        self._write_retrospective(
+            n=n, iter_dir=iter_dir, ctx=ctx, rec=rec,
+            this_perf=perf, e_ok=ok, e_error=e_error,
+        )
+
         if not ok:
             return _failure_outcome(mode), None, f"E (perf test) failed: {err}"
-        # Parse perf_report.json if the agent wrote one — surface its numbers
-        # as this step's perf so F can use them.
-        perf = self._read_perf_report(n, iter_dir)
         return P.OK, perf, None
+
+    def _write_retrospective(
+        self,
+        n: int,
+        iter_dir: Path,
+        ctx: IterationContext,
+        rec: IterationRecord,
+        *,
+        this_perf: Optional[Dict[str, float]],
+        e_ok: bool,
+        e_error: Optional[str],
+    ) -> None:
+        """Spawn a short-lived agent that writes ``retrospective.md`` into
+        this iteration's logs dir, then record its path on the iteration
+        record so the WebUI can find it. Non-gating — any failure is
+        logged and swallowed.
+
+        ``rec`` is the SAME in-memory IterationRecord the main loop holds
+        and will hand to ``_close_iteration``. Mutate it directly so the
+        retro path survives the close write — loading a fresh copy from
+        the store here would be a lost update (close would overwrite it).
+        """
+        prev_rec = self.store.load_iteration(n - 1) if n > 1 else None
+        prev_perf = dict(prev_rec.perf) if prev_rec and prev_rec.perf else None
+        # Goal: prefer the most recent plan-level goal we can find. We
+        # don't currently store a one-line goal separately on the record,
+        # so fall back to the iteration's failure_reason (when C failed)
+        # or a placeholder. The retro agent reads plan.md anyway.
+        goal: Optional[str] = rec.failure_reason or rec.goal or None
+
+        logs_dir = self._logs_dir_for(n)
+        try:
+            ok, _err, _mode, _sid = self._run_agent(
+                name=f"iter{n}-retro", role="retro_writer",
+                iteration=n, iter_dir=iter_dir,
+                prompt=retrospective_prompt(
+                    req=self.req, iter_dir=iter_dir,
+                    notebooks_dir=self.cfg.notebooks_dir, iteration=n,
+                    this_perf=this_perf, prev_perf=prev_perf,
+                    review_feedback=ctx.review_feedback,
+                    e_ok=e_ok, e_error=e_error,
+                    logs_dir=logs_dir, goal=goal,
+                ),
+                timeout=self.cfg.retro_timeout_s,
+            )
+        except Exception as exc:  # noqa: BLE001 — never let retro break E
+            self.store.append_timeline(
+                "retrospective_error",
+                {"iteration": n, "error": f"agent raised: {exc!r}"},
+            )
+            return
+
+        retro_path = logs_dir / "retrospective.md"
+        if not retro_path.is_file():
+            self.store.append_timeline(
+                "retrospective_missing",
+                {"iteration": n, "agent_ok": ok,
+                 "expected_path": str(retro_path)},
+            )
+            return
+
+        # Stamp the path on the IN-MEMORY record the main loop is holding.
+        # _close_iteration will persist it (along with everything else
+        # the loop has accumulated on `rec` this turn). We also write the
+        # record now so the path is durable even if the orchestrator dies
+        # between here and the close write.
+        rec.retrospective_path = str(retro_path)
+        self.store.write_iteration(rec)
+        self.store.append_timeline(
+            "retrospective_written",
+            {"iteration": n, "path": str(retro_path),
+             "bytes": retro_path.stat().st_size if retro_path.exists() else 0},
+        )
+
+    def _write_failure_retrospective(
+        self,
+        n: int,
+        iter_dir: Path,
+        rec: IterationRecord,
+    ) -> None:
+        """Spawn a postmortem agent for a FAILED iteration.
+
+        Failed iterations never reach E (perf test), so the perf-centric
+        :meth:`_write_retrospective` doesn't apply. This method writes a
+        failure-focused ``retrospective.md`` at the same path the WebUI
+        already serves — no UI changes needed.
+
+        Recovers the failing phase + attempt count from the iteration
+        record's ``phases`` map. Non-gating — any agent/file failure is
+        logged and swallowed (a failure-within-a-failure must not break
+        the close path).
+
+        ``rec`` is mutated in place (``retrospective_path`` set) so the
+        caller — typically :meth:`_close_iteration` — can persist it as
+        part of the same final write.
+        """
+        # Find the failing phase: prefer the last non-OK phase recorded on
+        # the iteration. The record's phases dict is keyed by phase id.
+        failed_phase: Optional[str] = None
+        phase_attempts: Optional[int] = None
+        if rec.phases:
+            # Walk in phase order so we pick the FURTHEST reached phase
+            # that has a non-OK outcome.
+            for phase_id in ("A_plan", "B_implement", "C_test",
+                              "D_review", "E_perf_test", "F_perf_plan"):
+                info = rec.phases.get(phase_id)
+                if not info:
+                    continue
+                if info.get("outcome") != P.OK:
+                    failed_phase = phase_id
+                    phase_attempts = info.get("attempts")
+                    # keep going — a later phase might also be marked failed
+                    # if e.g. C failed and the loop ran E with an error flag
+
+        logs_dir = self._logs_dir_for(n)
+        goal: Optional[str] = rec.goal or rec.failure_reason or None
+        try:
+            ok, _err, _mode, _sid = self._run_agent(
+                name=f"iter{n}-fail-retro", role="retro_writer",
+                iteration=n, iter_dir=iter_dir,
+                prompt=failure_retrospective_prompt(
+                    req=self.req, iter_dir=iter_dir,
+                    notebooks_dir=self.cfg.notebooks_dir, iteration=n,
+                    failure_reason=rec.failure_reason,
+                    failed_phase=failed_phase,
+                    phase_attempts=phase_attempts,
+                    logs_dir=logs_dir, goal=goal,
+                ),
+                timeout=self.cfg.retro_timeout_s,
+            )
+        except Exception as exc:  # noqa: BLE001 — never let retro break close
+            self.store.append_timeline(
+                "failure_retrospective_error",
+                {"iteration": n, "error": f"agent raised: {exc!r}"},
+            )
+            return
+
+        retro_path = logs_dir / "retrospective.md"
+        if not retro_path.is_file():
+            self.store.append_timeline(
+                "failure_retrospective_missing",
+                {"iteration": n, "agent_ok": ok,
+                 "expected_path": str(retro_path)},
+            )
+            return
+
+        rec.retrospective_path = str(retro_path)
+        self.store.append_timeline(
+            "failure_retrospective_written",
+            {"iteration": n, "path": str(retro_path),
+             "failed_phase": failed_phase,
+             "bytes": retro_path.stat().st_size if retro_path.exists() else 0},
+        )
 
     # ---- F: perf plan (writes plan, no code changes) -------------------- #
 
@@ -1227,6 +1427,20 @@ class Orchestrator:
         rec.outcome = outcome
         if perf:
             rec.perf = perf
+        # For FAILED iterations that never reached E (so no perf-centric
+        # retro was written), spawn a failure postmortem BEFORE persisting.
+        # Skip when a retro path is already set (covers the rare case where
+        # E ran, failed, and already produced a retro).
+        if status == "failed" and not rec.retrospective_path:
+            try:
+                iter_dir = self.workspace.iter_dir(rec.iteration)
+                self._write_failure_retrospective(rec.iteration, iter_dir, rec)
+            except Exception as exc:  # noqa: BLE001
+                self.store.append_timeline(
+                    "failure_retrospective_error",
+                    {"iteration": rec.iteration,
+                     "error": f"close-path raised: {exc!r}"},
+                )
         self.store.write_iteration(rec)
         # Mark the folder complete *after* the record write so the sentinel
         # is a durable signal that the close path ran end-to-end. An

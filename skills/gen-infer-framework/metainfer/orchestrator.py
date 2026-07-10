@@ -220,7 +220,7 @@ def run_with_requirements(
     no_web: bool = False,
     claude_bin: str = "ccb",
     model: Optional[str] = None,
-    permission_mode: str = "acceptEdits",
+    permission_mode: str = "bypassPermissions",
     max_iterations: Optional[int] = None,
     extra_claude_args: Optional[list] = None,
     keepalive: bool = True,

@@ -7,7 +7,7 @@ PLUGIN = TaskPlugin(
     task_type="calc-theoretical-value",
     name="Theoretical Value Calculator",
     description=(
-        "Linear 4-step pipeline (analyze→graph→calculate→visualize). "
+        "Linear 5-step pipeline (rough→analyze→graph→calculate→visualize). "
         "Computes theoretical FLOPs / memory traffic for a model on "
         "target hardware."
     ),

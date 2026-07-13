@@ -35,6 +35,13 @@ class OracleCaseResult:
     elapsed_s: float = 0.0
     http_status: Optional[int] = None
     error: Optional[str] = None
+    # Whether this case gates the overall pass verdict. ``"soft"`` cases
+    # are recorded + surfaced in failure_reason for visibility but do
+    # NOT flip OracleResult.passed to False on their own. Use for cases
+    # whose failure reflects a model-quality limitation (e.g. 8B model
+    # can't reliably do arithmetic) rather than a code defect in the
+    # framework under test.
+    gating: str = "hard"              # hard | soft
 
 
 @dataclass
@@ -51,6 +58,8 @@ class OracleResult:
     report_path: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
+        hard_cases = [c for c in self.cases if c.gating != "soft"]
+        soft_cases = [c for c in self.cases if c.gating == "soft"]
         return {
             "passed": self.passed,
             "failure_reason": self.failure_reason,
@@ -62,6 +71,16 @@ class OracleResult:
             "cases_total": len(self.cases),
             "cases_passed": sum(1 for c in self.cases if c.judge_verdict == "pass"),
             "cases_failed": sum(1 for c in self.cases if c.judge_verdict == "fail"),
+            # Soft-gate visibility: hard failures gate the pass verdict;
+            # soft failures are surfaced in the report but don't flip
+            # passed=False. Useful for model-quality probes (math on an
+            # 8B model, etc.) that aren't the framework's fault.
+            "hard_total": len(hard_cases),
+            "hard_passed": sum(1 for c in hard_cases if c.judge_verdict == "pass"),
+            "hard_failed": sum(1 for c in hard_cases if c.judge_verdict != "pass"),
+            "soft_total": len(soft_cases),
+            "soft_passed": sum(1 for c in soft_cases if c.judge_verdict == "pass"),
+            "soft_failed": sum(1 for c in soft_cases if c.judge_verdict != "pass"),
         }
 
 

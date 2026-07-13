@@ -1,7 +1,11 @@
 // Task detail view. The dashboard for a single task. Aggregates:
 //   - Header strip: task id / type / phase pill / final status / control btns
-//   - Left rail: state graph + live agents
-//   - Right rail: iterations table + perf charts + timeline
+//   - For calc-theoretical-value tasks: 3 sub-tabs (Rough / Detailed Audit / Status)
+//   - For other task types: panel grid (no tabs)
+//
+// Tab content for "Status" is the legacy 5-panel grid. "Rough" and
+// "Detailed Audit" are calc-value-specific components that read the
+// S0 / S3 streaming state files.
 //
 // Pulls everything from files via the per-task API endpoints. SSE drives
 // refreshes — when a task_changed event for this id arrives, we refetch
@@ -19,7 +23,12 @@ import { Charts } from "app/charts";
 import { AgentsPanel } from "app/agents-panel";
 import { Timeline } from "app/timeline";
 import { RetrospectiveModal } from "app/retrospective-modal";
+import { CalcRoughPanel } from "app/calc-rough-panel";
+import { CalcAuditPanel } from "app/calc-audit-panel";
+import { CalcVizTab } from "app/calc-viz-tab";
 import { labelFor } from "app/utils";
+
+const CALC_TYPE = "calc-theoretical-value";
 
 export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro }) {
   const [iterations, setIterations] = useState([]);
@@ -30,17 +39,14 @@ export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro }) {
   const [selectedIter, setSelectedIter] = useState(null);
   const [loadState, setLoadState] = useState("loading"); // loading | ok | error
   const [lastErr, setLastErr] = useState(null);
+  const [activeTab, setActiveTab] = useState("rough");
 
-  // Wrap each fetch with a timeout so one stuck endpoint can't freeze the
-  // whole panel. 8s is generous; file reads return in <50ms normally.
   const withTimeout = (p, ms = 8000) =>
     Promise.race([
       p,
       new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms)),
     ]);
 
-  // Initial fetch + polling fallback (in case SSE drops). Task detail
-  // polls itself every 5s — SSE is an optimization, not the only path.
   const refreshAll = useCallback(async () => {
     if (!taskId) return;
     setLastErr(null);
@@ -81,15 +87,11 @@ export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro }) {
     refreshAll();
   }, [taskId, refreshAll]);
 
-  // Caller signals refresh via `onChange` (from SSE dispatch).
   useEffect(() => {
     if (onChange == null) return;
     refreshAll();
   }, [onChange, refreshAll]);
 
-  // Self-poll fallback: refresh every 5s whether or not SSE fires. SSE
-  // is best-effort; polling guarantees the panel updates for tasks that
-  // are still running even if the event stream is wedged.
   useEffect(() => {
     if (!taskId) return;
     const id = setInterval(refreshAll, 5000);
@@ -109,10 +111,81 @@ export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro }) {
   const finished = !!run?.finished;
   const finalStatus = run?.final_status;
   const running = !!status?.running;
+  const isCalc = (run?.task_type || "") === CALC_TYPE;
 
   const retroIter = selectedIter != null
     ? (typeof selectedIter === "number" ? selectedIter : null)
     : null;
+
+  const renderTabs = () => {
+    if (!isCalc) return null;
+    const tabs = [
+      { id: "rough",   label: "粗略评估" },
+      { id: "audit",   label: "详细审计" },
+      { id: "viz",     label: "可视化" },
+      { id: "runtime", label: "运行状态" },
+    ];
+    return html`
+      <nav class="task-tabs">
+        ${tabs.map((t) => html`
+          <button
+            key=${t.id}
+            class=${`task-tab ${activeTab === t.id ? "active" : ""}`}
+            onClick=${() => setActiveTab(t.id)}>
+            ${t.label}
+          </button>
+        `)}
+      </nav>
+    `;
+  };
+
+  const renderRuntimePanels = () => html`
+    <div class="task-grid">
+      <section class="panel">
+        <h2>State machine</h2>
+        <${StateGraph} graph=${graph} />
+      </section>
+
+      <section class="panel">
+        <h2>Iterations <span class="muted">(click for retrospective)</span></h2>
+        <${IterationsTable}
+          iterations=${iterations}
+          selectedN=${retroIter}
+          onSelect=${(n) => setSelectedIter(n)} />
+      </section>
+
+      <section class="panel">
+        <h2>Live sub-agents</h2>
+        <${AgentsPanel} agents=${agents} />
+      </section>
+
+      <section class="panel">
+        <h2>Performance &amp; duration</h2>
+        <${Charts} payload=${charts} />
+      </section>
+
+      <section class="panel timeline-panel">
+        <h2>Event timeline</h2>
+        <${Timeline} events=${timeline.events} />
+      </section>
+    </div>
+  `;
+
+  const renderBody = () => {
+    if (!isCalc) {
+      return renderRuntimePanels();
+    }
+    if (activeTab === "rough") {
+      return html`<${CalcRoughPanel} taskId=${taskId} phase=${phase} />`;
+    }
+    if (activeTab === "audit") {
+      return html`<${CalcAuditPanel} taskId=${taskId} phase=${phase} timelineEvents=${timeline.events} />`;
+    }
+    if (activeTab === "viz") {
+      return html`<${CalcVizTab} taskId=${taskId} />`;
+    }
+    return renderRuntimePanels();
+  };
 
   return html`
     <div class="task-detail">
@@ -154,35 +227,8 @@ export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro }) {
         </div>
       </header>
 
-      <div class="task-grid">
-        <section class="panel">
-          <h2>State machine</h2>
-          <${StateGraph} graph=${graph} />
-        </section>
-
-        <section class="panel">
-          <h2>Iterations <span class="muted">(click for retrospective)</span></h2>
-          <${IterationsTable}
-            iterations=${iterations}
-            selectedN=${retroIter}
-            onSelect=${(n) => setSelectedIter(n)} />
-        </section>
-
-        <section class="panel">
-          <h2>Live sub-agents</h2>
-          <${AgentsPanel} agents=${agents} />
-        </section>
-
-        <section class="panel">
-          <h2>Performance &amp; duration</h2>
-          <${Charts} payload=${charts} />
-        </section>
-
-        <section class="panel timeline-panel">
-          <h2>Event timeline</h2>
-          <${Timeline} events=${timeline.events} />
-        </section>
-      </div>
+      ${renderTabs()}
+      ${renderBody()}
 
       ${selectedIter != null ? html`
         <${RetrospectiveModal}

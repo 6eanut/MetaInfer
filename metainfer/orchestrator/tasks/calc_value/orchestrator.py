@@ -20,9 +20,10 @@ Differences from the gen-infer-framework orchestrator:
       ├── run.json
       ├── timeline.jsonl
       ├── agents.json
+      ├── step0/{agent_rough/, per_node/, rough_graph.json, rough_results.json}
       ├── step1/{agent_a,agent_b,agent_c}/, memory.json
       ├── step2/{graph.json, rounds/<n>/node_<id>/}
-      ├── step3/{rounds/<n>/, final/}
+      ├── step3/{rounds/<n>/, cells/, final/}
       └── step4/viz.html
 """
 
@@ -52,11 +53,12 @@ from .pipeline import run_pipeline
 def _task_subdirs(state_dir: Path) -> Dict[str, Path]:
     """Create and return the canonical paths under ``state_dir``."""
     state_dir.mkdir(parents=True, exist_ok=True)
+    step0 = state_dir / "step0"
     step1 = state_dir / "step1"
     step2 = state_dir / "step2"
     step3 = state_dir / "step3"
     step4 = state_dir / "step4"
-    for p in (step1, step2, step3, step4):
+    for p in (step0, step1, step2, step3, step4):
         p.mkdir(parents=True, exist_ok=True)
     return {
         "state_dir": state_dir,
@@ -66,6 +68,7 @@ def _task_subdirs(state_dir: Path) -> Dict[str, Path]:
         "run_file": state_dir / "run.json",
         "timeline_file": state_dir / "timeline.jsonl",
         "agents_file": state_dir / "agents.json",
+        "step0_dir": step0,
         "step1_dir": step1,
         "step2_dir": step2,
         "step3_dir": step3,
@@ -187,6 +190,7 @@ def run_with_requirements(
         effort=effort,
         extra_add_dirs=extra_add_dirs,
         snapshot_file=paths["agents_file"],
+        max_concurrent=5,
     )
 
     print(f"[calc-value] task_id        = {task_id}")
@@ -194,7 +198,7 @@ def run_with_requirements(
     print(f"[calc-value] model dir      = {model_dir}")
     print(f"[calc-value] framework dir  = {framework_dir}")
     print(f"[calc-value] resume         = {is_resume}")
-    print(f"[calc-value] starting 4-step pipeline.")
+    print(f"[calc-value] starting 5-step pipeline (S0 rough → S1 → S2 → S3 → S4).")
 
     restore_signals = install_subagent_shutdown_handlers(
         manager, pid_file=paths["pid_file"]

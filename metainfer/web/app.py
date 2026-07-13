@@ -338,8 +338,9 @@ def create_app() -> FastAPI:
     @app.get("/api/tasks/{task_id}/calc/compute")
     def calc_compute(task_id: str, batch_size: int = 1, seq_len: int = 1) -> Dict[str, Any]:
         """Run every per-compound calc.py at the given shape and return
-        per-instance ``{tflops, access_gb}`` keyed by compound_id, plus
-        totals aggregated as ``Σ per_compound * section.repeat_count``.
+        per-instance numbers keyed by compound_id, split into prefill and
+        decode phases. Totals are aggregated as
+        ``Σ per_compound.{phase} * section.repeat_count``.
 
         Deterministic — no LLM in the loop. ``compound_id`` is the
         section-prefixed filename stem (``<section_id>__<node_id>``),
@@ -360,10 +361,12 @@ def create_app() -> FastAPI:
         # Import the calc_value deterministic helpers lazily so the
         # WebUI doesn't pay the import cost for non-calc tasks.
         from ..orchestrator.tasks.calc_value import deterministic as _det
-        per_compound: Dict[str, Dict[str, float]] = {}
+        per_compound: Dict[str, Dict[str, Any]] = {}
         per_compound_meta: Dict[str, Dict[str, Any]] = {}
-        total_tflops = 0.0
-        total_gb = 0.0
+        total_pre_tflops = 0.0
+        total_pre_gb = 0.0
+        total_dec_tflops = 0.0
+        total_dec_gb = 0.0
         errors: Dict[str, str] = {}
         # Walk *.py scripts; resolve each script's repeat_count from its
         # sibling .meta.json (defaults to 1 if meta missing or unset).
@@ -391,13 +394,27 @@ def create_app() -> FastAPI:
                 mod = _det.load_calc_module(
                     script, module_name=f"_calc_web_{compound_id}",
                 )
-                tflops, gb = _det.call_calc(mod, batch_size, seq_len)
-                per_compound[compound_id] = {"tflops": tflops, "access_gb": gb}
-                total_tflops += tflops * repeat
-                total_gb += gb * repeat
+                phases = _det.call_calc(mod, batch_size, seq_len)
+                pre = phases["prefill"]
+                dec = phases["decode"]
+                per_compound[compound_id] = {
+                    "prefill": pre,
+                    "decode": dec,
+                    # Legacy aliases (prefill-derived) for older consumers.
+                    "tflops": pre["tflops"],
+                    "access_gb": pre["access_gb"],
+                }
+                total_pre_tflops += pre["tflops"] * repeat
+                total_pre_gb += pre["access_gb"] * repeat
+                total_dec_tflops += dec["tflops"] * repeat
+                total_dec_gb += dec["access_gb"] * repeat
             except Exception as exc:  # noqa: BLE001
                 errors[compound_id] = f"{type(exc).__name__}: {exc}"
-                per_compound[compound_id] = {"tflops": 0.0, "access_gb": 0.0}
+                per_compound[compound_id] = {
+                    "prefill": {"tflops": 0.0, "access_gb": 0.0},
+                    "decode":  {"tflops": 0.0, "access_gb": 0.0},
+                    "tflops": 0.0, "access_gb": 0.0,
+                }
         # approximate_compounds: read flags from each meta file.
         approximate_compounds: List[str] = []
         for compound_id, meta in per_compound_meta.items():
@@ -409,6 +426,8 @@ def create_app() -> FastAPI:
                     approximate_compounds.append(compound_id)
             except (ValueError, OSError):
                 pass
+        pre_ai = (total_pre_tflops / total_pre_gb) if total_pre_gb > 0 else 0.0
+        dec_ai = (total_dec_tflops / total_dec_gb) if total_dec_gb > 0 else 0.0
         return {
             "batch_size": batch_size,
             "seq_len": seq_len,
@@ -417,11 +436,20 @@ def create_app() -> FastAPI:
             "per_node": per_compound,
             "compound_meta": per_compound_meta,
             "totals": {
-                "tflops": total_tflops,
-                "access_gb": total_gb,
-                "arithmetic_intensity": (
-                    total_tflops / total_gb if total_gb > 0 else 0.0
-                ),
+                "prefill": {
+                    "tflops": total_pre_tflops,
+                    "access_gb": total_pre_gb,
+                    "arithmetic_intensity": pre_ai,
+                },
+                "decode": {
+                    "tflops": total_dec_tflops,
+                    "access_gb": total_dec_gb,
+                    "arithmetic_intensity": dec_ai,
+                },
+                # Legacy aliases (prefill-derived).
+                "tflops": total_pre_tflops,
+                "access_gb": total_pre_gb,
+                "arithmetic_intensity": pre_ai,
             },
             "approximate_compounds": approximate_compounds,
             "approximate_nodes": approximate_compounds,
@@ -743,6 +771,192 @@ def create_app() -> FastAPI:
             out["s3_calculate"] = nodes
 
         return out
+
+    # ------------------------------------------------------------------ #
+    # S0 rough estimate + S3 streaming cells
+    # ------------------------------------------------------------------ #
+
+    @app.get("/api/tasks/{task_id}/calc/rough")
+    def calc_rough(task_id: str) -> Dict[str, Any]:
+        """Return the S0 rough-pass estimate.
+
+        Reads ``step0/rough_results.json``. Returns an empty placeholder
+        shape if S0 hasn't run yet.
+        """
+        entry = _task_or_404(task_id)
+        if entry.type != "calc-theoretical-value":
+            raise HTTPException(409, "task is not a calc-theoretical-value task")
+        sd = _state_dir_for(entry)
+        rough = sd / "step0" / "rough_results.json"
+        if not rough.exists():
+            return {"ok": False, "pending": True, "results": [], "graph": {"sections": []}}
+        try:
+            return json.loads(rough.read_text(encoding="utf-8"))
+        except ValueError:
+            return {"ok": False, "pending": False, "error": "corrupt rough_results.json",
+                    "results": [], "graph": {"sections": []}}
+
+    @app.get("/api/tasks/{task_id}/calc/cells")
+    def calc_cells(task_id: str, request: Request) -> Dict[str, Any]:
+        """Return the S3 streaming cell-state grid.
+
+        Reads ``step3/cells/_state.json`` written by the new angle-serial
+        / node-parallel S3. The UI renders the live audit table directly
+        from this document. Returns an empty shell if S3 hasn't started.
+
+        Optional query params ``batch_size`` and ``seq_len`` override the
+        default picked combo (B=1, S=512) shown in each cell: when either
+        is present we walk every cell's ``grid.json`` and pick the
+        matching combo, overriding ``tflops`` / ``gb`` in the response.
+        The on-disk ``_state.json`` is never modified — re-pick runs
+        per-request. Falls back silently to the stored picked value if a
+        cell's grid.json is missing or doesn't contain the requested combo.
+        """
+        entry = _task_or_404(task_id)
+        if entry.type != "calc-theoretical-value":
+            raise HTTPException(409, "task is not a calc-theoretical-value task")
+        sd = _state_dir_for(entry)
+        state = sd / "step3" / "cells" / "_state.json"
+        if not state.exists():
+            return {"round": 0, "nodes": {}, "pending": True}
+        try:
+            data = json.loads(state.read_text(encoding="utf-8"))
+        except ValueError:
+            return {"round": 0, "nodes": {}, "error": "corrupt _state.json"}
+
+        qp = request.query_params
+        bs_str = qp.get("batch_size")
+        sl_str = qp.get("seq_len")
+        if bs_str is None and sl_str is None:
+            return data  # default picked values, no override
+
+        try:
+            bs = int(bs_str) if bs_str is not None else 1
+            sl = int(sl_str) if sl_str is not None else 512
+        except ValueError:
+            raise HTTPException(400, "batch_size / seq_len must be integers")
+        if bs < 1 or sl < 1:
+            raise HTTPException(400, "batch_size / seq_len must be >= 1")
+
+        cells_root = sd / "step3" / "cells"
+        nodes = data.get("nodes") or {}
+        for compound, node in nodes.items():
+            cells = node.get("cells") or {}
+            for angle, c in cells.items():
+                if not isinstance(c, dict):
+                    continue
+                # status must be a "produced grid" state to re-pick.
+                if c.get("status") not in ("ok", "approximate"):
+                    continue
+                round_idx = c.get("round")
+                if round_idx is None:
+                    continue
+                grid_path = (
+                    cells_root / compound / angle
+                    / f"round_{int(round_idx):02d}" / "grid.json"
+                )
+                if not grid_path.exists():
+                    continue
+                try:
+                    grid = json.loads(grid_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                for row in grid:
+                    if row.get("batch_size") == bs and row.get("seq_len") == sl:
+                        pre = row.get("prefill") or {}
+                        dec = row.get("decode") or {}
+                        c["prefill"] = {
+                            "tflops": pre.get("tflops", 0.0),
+                            "access_gb": pre.get("access_gb", 0.0),
+                        }
+                        c["decode"] = {
+                            "tflops": dec.get("tflops", 0.0),
+                            "access_gb": dec.get("access_gb", 0.0),
+                        }
+                        # Legacy aliases stay in sync with prefill.
+                        c["tflops"] = pre.get("tflops", 0.0)
+                        c["gb"] = pre.get("access_gb", 0.0)
+                        c["picked_combo"] = {"batch_size": bs, "seq_len": sl}
+                        break
+        data["combo"] = {"batch_size": bs, "seq_len": sl}
+        return data
+
+    @app.get("/api/tasks/{task_id}/calc/cell/{compound}/{angle}/{round_idx}")
+    def calc_cell_detail(
+        task_id: str, compound: str, angle: str, round_idx: int,
+    ) -> Dict[str, Any]:
+        """Return one cell's full detail: calc.py source, response.txt
+        (agent thinking), grid.json, and the writer's events.jsonl path
+        so the UI can launch a QA session against this cell.
+
+        Path params map directly to the on-disk layout::
+
+            step3/cells/<compound>/<angle>/round_<NN>/
+                writer/calc.py
+                writer/response.txt
+                grid.json
+                logs/<spec_name>.attempt<M>.events.jsonl
+        """
+        entry = _task_or_404(task_id)
+        if entry.type != "calc-theoretical-value":
+            raise HTTPException(409, "task is not a calc-theoretical-value task")
+        if angle not in ("a", "b", "c"):
+            raise HTTPException(400, "angle must be one of a / b / c")
+        sd = _state_dir_for(entry)
+        cell_dir = sd / "step3" / "cells" / compound / angle / f"round_{round_idx:02d}"
+        if not cell_dir.exists():
+            raise HTTPException(404, f"cell not found: {compound}/{angle}/round_{round_idx:02d}")
+
+        calc_path = cell_dir / "writer" / "calc.py"
+        response_path = cell_dir / "writer" / "response.txt"
+        grid_path = cell_dir / "grid.json"
+
+        calc_py = calc_path.read_text(encoding="utf-8") if calc_path.exists() else ""
+        response = response_path.read_text(encoding="utf-8") if response_path.exists() else ""
+        grid: Any = []
+        if grid_path.exists():
+            try:
+                grid = json.loads(grid_path.read_text(encoding="utf-8"))
+            except ValueError:
+                grid = []
+
+        # Locate the writer's events.jsonl (attempt-agnostic — pick the
+        # highest attempt number that exists).
+        events_file: Optional[str] = None
+        logs_dir = cell_dir / "logs"
+        if logs_dir.is_dir():
+            candidates = sorted(logs_dir.rglob("*.events.jsonl"))
+            if candidates:
+                events_file = str(candidates[-1])
+
+        # Read sibling cells (other angles at same round) for mismatch
+        # context if all 3 exist.
+        siblings: Dict[str, Any] = {}
+        for a in ("a", "b", "c"):
+            sib_grid_path = sd / "step3" / "cells" / compound / a / f"round_{round_idx:02d}" / "grid.json"
+            if sib_grid_path.exists():
+                try:
+                    siblings[a] = json.loads(sib_grid_path.read_text(encoding="utf-8"))
+                except ValueError:
+                    pass
+        mismatches: List[Dict[str, Any]] = []
+        if len(siblings) == 3:
+            from ..orchestrator.tasks.calc_value import deterministic as _det
+            cmp = _det.compare_calc_grids([siblings[a] for a in ("a", "b", "c")])
+            mismatches = cmp.get("mismatches") or []
+
+        return {
+            "compound": compound,
+            "angle": angle,
+            "round": round_idx,
+            "calc_py": calc_py,
+            "response": response,
+            "grid": grid,
+            "events_file": events_file,
+            "workdir": str(cell_dir / "writer"),
+            "siblings_present": sorted(siblings.keys()),
+            "mismatches": mismatches,
+        }
 
     # ------------------------------------------------------------------ #
     # Offline QA over agent conversation history

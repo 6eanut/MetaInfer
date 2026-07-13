@@ -159,10 +159,12 @@ def make_subagent_manager(
     effort: str,
     extra_add_dirs: List[Path],
     snapshot_file: Path,
+    max_concurrent: int = 4,
 ) -> SubAgentManager:
     """Build a SubAgentManager with the standard settings shared by every
     orchestrator. Per-orchestrator customization happens via
-    ``extra_add_dirs`` (paths agents may Read)."""
+    ``extra_add_dirs`` (paths agents may Read) and ``max_concurrent``
+    (how many sub-agents may run in parallel)."""
     return SubAgentManager(
         claude_bin=claude_bin,
         default_model=model,
@@ -170,6 +172,7 @@ def make_subagent_manager(
         effort=effort,
         extra_add_dirs=list(extra_add_dirs),
         snapshot_file=snapshot_file,
+        max_concurrent=max_concurrent,
     )
 
 

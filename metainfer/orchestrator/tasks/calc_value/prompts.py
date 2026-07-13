@@ -287,6 +287,118 @@ ENV VARS:
 
 
 # --------------------------------------------------------------------------- #
+# Step 0 — rough single-pass estimate
+# --------------------------------------------------------------------------- #
+
+STEP0_ROUGH_PROMPT = """\
+You are doing a FAST rough-pass estimate of an LLM's theoretical FLOPs
+and HBM traffic per forward pass. Goal: produce SOMETHING reasonable
+within minutes that the user can look at while the detailed audit runs.
+Do NOT get bogged down in edge cases or precise kernel accounting.
+
+STRATEGY: CONFIG-DRIVEN — read MODEL_DIR/config.json, extract the
+headline constants, derive back-of-envelope formulas for each major
+operator type, and emit one simplified calc.py per node.
+
+Steps:
+1. Read MODEL_DIR/config.json. Extract: architecture, num_layers (N),
+   hidden_size (H), num_attention_heads, num_key_value_heads (0 if not
+   GQA), head_dim (= H / num_attention_heads), intermediate_size (I),
+   vocab_size (V), context_length, quantization config (bits, group_size).
+   For DeepSeek-style MoE: also extract n_routed_experts (E),
+   num_experts_per_tok (K), moe_intermediate_size, routed_scaling_factor.
+2. Identify the operator nodes a single forward pass invokes. Use a
+   STANDARD DECODER-ONLY LLM SKELETON — you do NOT need to read the
+   framework's forward() in detail. The standard nodes per layer:
+     - input_layernorm / rmsnorm
+     - attention.q_proj, k_proj, v_proj (or QKV fused)
+     - attention.rope (rotary embedding)
+     - attention.score = Q @ K^T
+     - attention.context = score @ V
+     - attention.o_proj
+     - post_attention_layernorm / rmsnorm
+     - mlp.gate_proj, mlp.up_proj (or gate_up fused)
+     - mlp.activation (silu/swiglu)
+     - mlp.down_proj
+   For MoE layers (DeepSeek-V2+): replace the 3 MLP linears with:
+     - moe.router_gate (linear over hidden_size to n_experts)
+     - moe.routed_experts (K selected experts, each gate/up/down)
+     - moe.shared_expert (if config has a shared_expert)
+   Plus the embedding lookup + final norm + lm_head.
+3. For EACH node, write a SIMPLIFIED calc.py that derives FLOPs and HBM
+   bytes from the config constants + (batch_size, seq_len). Return TWO
+   phases per call — prefill (process all S tokens) and decode (1 new
+   token with S cached). Use the STANDARD textbook formulas:
+     - Linear [in,out] @ [out]:
+         prefill FLOPs = 2*B*S*in*out; bytes = weight + 2*B*S*in*dtype + 2*B*S*out*dtype
+         decode  FLOPs = 2*B*1*in*out; bytes = weight + 2*B*1*in*dtype + 2*B*1*out*dtype
+       (weight bytes are the same in both — read once per call regardless
+       of token count)
+     - RMSNorm:
+         prefill FLOPs ~ 5*B*S*H; bytes ~ 3*B*S*H*dtype
+         decode  FLOPs ~ 5*B*1*H; bytes ~ 3*B*1*H*dtype
+     - RoPE:
+         prefill FLOPs ~ 6*B*S*H; bytes ~ 2*B*S*H*dtype
+         decode  FLOPs ~ 6*B*1*H; bytes ~ 2*B*1*H*dtype
+     - Attention:
+         prefill score = 2*B*Hh*Hd*S*S; context = 2*B*Hh*Hd*S*S
+         decode  score = 2*B*Hh*Hd*1*S; context = 2*B*Hh*Hd*1*S
+         decode  bytes MUST include reading all S cached K and V:
+                 + 2 * B*Hh*Hd*S*dtype  (read K, read V)
+                 + 2 * B*Hh*Hd*1*dtype  (write new K, write new V)
+       (this KV-cache read is what makes decode memory-bound at large S)
+     - MoE routed_experts: only K experts active per token,
+         prefill FLOPs = 6*K*H*I*B*S; decode FLOPs = 6*K*H*I*B*1
+         weight bytes = sum over ALL E experts (full table in HBM), same
+         in both phases.
+   DO NOT include fine-grained terms (e.g. scaling-factor multiply,
+   weighted-combine scatter-add, dequantization overhead). Keep it
+   crude — the detailed audit will refine.
+4. Write each node's calc.py to its own file using the Write tool:
+       {workdir}/per_node/<section>__<node_id>.py
+   Where <section> is one of: input, layer (or moe_layer for MoE
+   sections), output. Use the compound filename so two sections with
+   same-named nodes don't collide.
+   Each file MUST define `def calc(batch_size, seq_len) -> dict` returning
+   {{"prefill": {{"tflops", "access_gb"}}, "decode": {{"tflops", "access_gb"}}}}
+   (per the contract below). Decode covers generating 1 new token with
+   `seq_len` tokens already in KV cache — include the KV cache read in
+   decode bytes for attention nodes (this is the dominant decode cost).
+5. Write a manifest JSON to {workdir}/rough_graph.json listing every
+   node you produced. Schema:
+   {{
+     "sections": [
+       {{"id": "input", "kind": "input", "repeat_count": 1,
+         "graph": {{"nodes": [{{"id": "embedding", "op": "embedding", "compound": "input__embedding"}}]}}}},
+       {{"id": "layer", "kind": "layer_template", "repeat_count": <N from config>,
+         "graph": {{"nodes": [{{...}}, ...]}}}},
+       {{"id": "output", "kind": "output", "repeat_count": 1, ...}}
+     ],
+     "config_summary": {{... a copy of the key config constants ...}},
+     "notes": "rough pass; refined by detailed audit later"
+   }}
+
+CRITICAL — speed over precision. If you are unsure about an exact
+formula, use the textbook version and add a comment noting the
+uncertainty. The detailed audit (which runs after you) will refine the
+numbers. Your goal is to get a defensible number on screen FAST.
+
+{readonly}
+
+CLI ARGS the user gave:
+{cmdline}
+
+ENV VARS the user gave:
+{env_block}
+
+{calc_contract}
+
+Output your workdir as: {workdir}
+Write per_node/*.py and rough_graph.json there.
+"""
+
+
+# --------------------------------------------------------------------------- #
 # Step 2 — execution graph build + per-node validation
 # --------------------------------------------------------------------------- #
 
@@ -593,19 +705,61 @@ Your output MUST be a single Python file that defines a top-level function:
 
     def calc(batch_size: int, seq_len: int) -> dict:
 
-The function must return a dict with EXACTLY two keys (both floats):
+The function must return a dict with EXACTLY two phase keys, each holding
+a {{tflops, access_gb}} pair:
 
-    {{"tflops": <float>, "access_gb": <float>}}
+    {{
+      "prefill": {{"tflops": <float>, "access_gb": <float>}},
+      "decode":  {{"tflops": <float>, "access_gb": <float>}},
+    }}
 
-where:
-* `tflops` is the theoretical FLOP count of this node for ONE forward
-  pass at the given batch_size and seq_len, expressed in units of 10^12
-  FLOPs (tera-FLOPs). Use exact arithmetic — do NOT round.
-* `access_gb` is the total bytes this node reads from or writes to GPU
-  HBM (global memory) for ONE forward pass at the given shape, expressed
-  in GiB (2^30 bytes). Include both input reads AND output writes.
+PHASE SEMANTICS:
 
-Rules:
+* **prefill**: the model processes the full `seq_len` tokens in one forward
+  pass (the prompt). All weights, all token activations, no KV cache reuse.
+
+* **decode**: the model generates ONE new token given a KV cache that
+  already contains `seq_len` prior tokens. Decode FLOPs cover ONLY the
+  single new token's compute. Decode HBM bytes MUST include:
+    - weight reads (always — same total weight bytes as prefill per call,
+      independent of token count)
+    - new token's input/output activations (B*1 vectors, not B*S)
+    - READ of the S cached K and V tensors from HBM (this is the whole
+      reason decode is memory-bound — at large S the KV cache read dwarfs
+      everything else)
+    - WRITE of the new K and V being appended to the cache
+
+QUICK DECODE FORMULAS BY OP TYPE (H=hidden, I=intermediate, Hh=num heads,
+Hd=head dim, S=seq_len, B=batch, E=n_experts, K=top_k):
+
+* Linear / matmul (Q proj, K/V proj, O proj, MLP gate/up/down, lm_head):
+    FLOPs  = 2 * B * 1 * in * out
+    HBM    = weight_bytes + B*1*in*dtype + B*1*out*dtype
+  (vs prefill: prefill replaces `1` with `S`)
+
+* Attention score = Q @ K^T (decode):
+    FLOPs  = 2 * B * Hh * Hd * 1 * S        # Q is [B,Hh,1,Hd], K is [B,Hh,S,Hd]
+    HBM-Q  = B * Hh * 1 * Hd * dtype        # new Q
+    HBM-K  = B * Hh * S * Hd * dtype        # READ all S cached K — this dominates
+
+* Attention context = score @ V (decode):
+    FLOPs  = 2 * B * Hh * 1 * S * Hd
+    HBM-V  = B * Hh * S * Hd * dtype        # READ all S cached V
+
+* Attention K/V proj output write:
+    HBM-write = 2 * B * Hh * 1 * Hd * dtype # new K and V appended to cache
+
+* RMSNorm / layernorm (decode):
+    FLOPs ~ 5 * B * 1 * H
+    HBM   ~ 3 * B * 1 * H * dtype (read x, read weight, write y)
+
+* MoE routed experts (decode, top-K routing):
+    FLOPs  = B * 1 * 6 * K * H * I          # only K experts per token
+    HBM    = weight_bytes_of_selected_experts + B*1*H*dtype + B*1*I*dtype
+  (vs prefill: prefill multiplies both FLOPs and activation bytes by S,
+   but weight bytes are the same per call)
+
+GENERAL RULES:
 * `1 GB = 1024**3 bytes` (binary GB / GiB).
 * `1 TFLOP = 1e12 FLOPs`.
 * For matmul-shaped ops: FLOPs = 2 * (output_elements) when the matmul
@@ -623,17 +777,34 @@ Rules:
   (read from your understanding of memory.json); only batch_size and
   seq_len come from the function arguments.
 
-Example skeleton:
+Example skeleton (dense MLP up-projection):
 
 ```python
 def calc(batch_size: int, seq_len: int):
-    # GEMM: shape (B*S, H) x (H, 4H) — typical MLP up-projection
     H = 4096
-    bs_times_seq = batch_size * seq_len
-    flops = 2 * bs_times_seq * H * (4 * H)
-    bytes_in = bs_times_seq * H * 2  # fp16 read
-    bytes_out = bs_times_seq * 4 * H * 2  # fp16 write
-    return {{"tflops": flops / 1e12, "access_gb": (bytes_in + bytes_out) / (1024**3)}}
+    out_dim = 4 * H
+    weight_bytes = H * out_dim * 2  # fp16 weight, read once per call
+
+    # Prefill: process all S tokens.
+    pre_flops = 2 * batch_size * seq_len * H * out_dim
+    pre_bytes = (weight_bytes
+                 + batch_size * seq_len * H * 2      # fp16 input
+                 + batch_size * seq_len * out_dim * 2)  # fp16 output
+
+    # Decode: 1 new token.
+    dec_flops = 2 * batch_size * 1 * H * out_dim
+    dec_bytes = (weight_bytes
+                 + batch_size * 1 * H * 2
+                 + batch_size * 1 * out_dim * 2)
+    # NOTE: this is a linear op — no KV cache. Attention nodes have an
+    # extra + batch_size*Hh*S*Hd*2*2 term in decode bytes (read K and V).
+
+    return {{
+        "prefill": {{"tflops": pre_flops / 1e12,
+                     "access_gb": pre_bytes / (1024**3)}},
+        "decode":  {{"tflops": dec_flops / 1e12,
+                     "access_gb": dec_bytes / (1024**3)}},
+    }}
 ```
 
 Write your file as calc.py.
@@ -842,9 +1013,10 @@ with ``nodes`` / ``edges`` representing ONE occurrence.
 
 The final calc scripts are in this directory (one per compound
 ``<section_id>__<node_id>.py``, each exposes
-calc(batch_size, seq_len) -> {{"tflops":..., "access_gb":...}} — these
-are PER-OCCURRENCE numbers; multiply by section.repeat_count for the
-section's total contribution):
+calc(batch_size, seq_len) -> {{"prefill": {{"tflops", "access_gb"}},
+"decode": {{"tflops", "access_gb"}}}} — these are PER-OCCURRENCE
+numbers; multiply by section.repeat_count for the section's total
+contribution):
 
   {calc_dir}
 
@@ -865,16 +1037,21 @@ Produce a single self-contained HTML file with these requirements:
 2. Between section cards, draw an arrow indicating execution order
    (driven by ``inter_section_edges``).
 3. Two input controls at the top: batch_size and seq_len (both default
-   1), and a "Recalculate" button.
+   1), and a "Recalculate" button. Each per-node badge and the totals
+   bar must show BOTH prefill and decode numbers side by side (e.g. two
+   TFLOPs columns: "prefill.tf" and "decode.tf").
 4. The Recalculate button fetches:
      {compute_url}?batch_size=<b>&seq_len=<s>
-   and expects a JSON response keyed by compound id
-   (``per_compound["<section_id>__<node_id>"] = {{"tflops":..., "access_gb":...}}``).
+   and expects a JSON response keyed by compound id with both phases
+   (``per_compound["<section_id>__<node_id>"] = {{"prefill": {{"tflops", "access_gb"}},
+   "decode": {{"tflops", "access_gb"}}}}``).
    JS fills in the per-instance badges AND multiplies by repeat_count
    for the section subtotals and the grand totals.
-5. A totals bar at the bottom: sum of TFLOPs (sum of per-instance ×
+5. A totals bar at the bottom: show TWO sets of totals — one for
+   prefill, one for decode. Each set: sum of TFLOPs (per-instance ×
    repeat_count across all sections), sum of GB, and arithmetic
-   intensity (TFLOPs / GB).
+   intensity (TFLOPs / GB). Decode arithmetic intensity should be
+   visibly lower than prefill (decode is memory-bound).
 6. Style: dark background (#0e1117), light text (#e6edf3), monospace
    font for numbers, compact (12-14px base). Match the MetaInfer WebUI
    palette.

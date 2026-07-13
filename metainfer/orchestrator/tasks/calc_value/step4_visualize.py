@@ -132,6 +132,8 @@ window.addEventListener("message", (ev) => {{
 
 function categoryClass(cat) {{ return "cat-" + cat; }}
 
+function fmt(n) {{ return (n || 0).toFixed(4); }}
+
 function renderEmpty() {{
   document.getElementById("sections").innerHTML = SECTIONS.map(sec => `
     <div class="section" data-section="${{sec.id}}">
@@ -143,7 +145,9 @@ function renderEmpty() {{
       </div>
       <table>
         <thead><tr><th>Node</th><th>Op</th><th>Category</th><th>Purpose</th>
-                <th>TFLOPs/inst</th><th>GB/inst</th><th>×N TFLOPs</th></tr></thead>
+                <th>pre.tflops/inst</th><th>pre.gb/inst</th>
+                <th>dec.tflops/inst</th><th>dec.gb/inst</th>
+                <th>×N pre.tf</th></tr></thead>
         <tbody>
           ${{sec.nodes.map(n => `
             <tr>
@@ -151,9 +155,11 @@ function renderEmpty() {{
               <td>${{n.op}}</td>
               <td><span class="badge ${{categoryClass(n.category)}}">${{n.category}}</span></td>
               <td>${{n.purpose}}</td>
-              <td data-node="${{n.compound_id}}" data-field="tflops">—</td>
-              <td data-node="${{n.compound_id}}" data-field="access_gb">—</td>
-              <td data-node="${{n.compound_id}}" data-field="tflops_total">—</td>
+              <td data-node="${{n.compound_id}}" data-field="pre_tflops">—</td>
+              <td data-node="${{n.compound_id}}" data-field="pre_gb">—</td>
+              <td data-node="${{n.compound_id}}" data-field="dec_tflops">—</td>
+              <td data-node="${{n.compound_id}}" data-field="dec_gb">—</td>
+              <td data-node="${{n.compound_id}}" data-field="pre_tflops_total">—</td>
             </tr>
           `).join("")}}
         </tbody>
@@ -174,34 +180,48 @@ async function recompute() {{
     if (!r.ok) throw new Error("HTTP " + r.status);
     const data = await r.json();
     const approx = new Set(data.approximate_compounds || []);
-    let grandT = 0, grandG = 0;
+    let grandPreT = 0, grandPreG = 0;
+    let grandDecT = 0, grandDecG = 0;
     for (const sec of SECTIONS) {{
-      let secT = 0, secG = 0;
+      let secPreT = 0, secPreG = 0, secDecT = 0, secDecG = 0;
       for (const n of sec.nodes) {{
         const v = (data.per_compound || {{}})[n.compound_id] ||
                   (data.per_node || {{}})[n.id] ||
-                  {{tflops: 0, access_gb: 0}};
-        const t = v.tflops || 0, g = v.access_gb || 0;
-        const tTotal = t * sec.repeat_count;
-        const gTotal = g * sec.repeat_count;
-        secT += tTotal; secG += gTotal;
+                  {{prefill: {{tflops: 0, access_gb: 0}},
+                    decode:  {{tflops: 0, access_gb: 0}}}};
+        // Backward-compat: legacy per_compound has top-level tflops/access_gb.
+        const pre = v.prefill || {{tflops: v.tflops || 0, access_gb: v.access_gb || 0}};
+        const dec = v.decode  || {{tflops: 0, access_gb: 0}};
+        const preT = pre.tflops || 0, preG = pre.access_gb || 0;
+        const decT = dec.tflops || 0, decG = dec.access_gb || 0;
+        const rc = sec.repeat_count;
+        secPreT += preT * rc; secPreG += preG * rc;
+        secDecT += decT * rc; secDecG += decG * rc;
         const ap = approx.has(n.compound_id) ? '<span class="approx">approx</span>' : "";
         document.querySelectorAll(`td[data-node="${{n.compound_id}}"]`).forEach(cell => {{
           const f = cell.getAttribute("data-field");
-          if (f === "tflops") cell.textContent = t.toFixed(4) + (ap ? " " + ap : "");
-          if (f === "access_gb") cell.textContent = g.toFixed(4);
-          if (f === "tflops_total") cell.textContent = tTotal.toFixed(4);
+          if (f === "pre_tflops") cell.textContent = fmt(preT) + (ap ? " " + ap : "");
+          if (f === "pre_gb") cell.textContent = fmt(preG);
+          if (f === "dec_tflops") cell.textContent = fmt(decT);
+          if (f === "dec_gb") cell.textContent = fmt(decG);
+          if (f === "pre_tflops_total") cell.textContent = fmt(preT * rc);
         }});
       }}
-      grandT += secT; grandG += secG;
+      grandPreT += secPreT; grandPreG += secPreG;
+      grandDecT += secDecT; grandDecG += secDecG;
       const sub = document.querySelector(`span[data-subtotal="${{sec.id}}"]`);
       if (sub) {{
-        sub.textContent = `section: ${{secT.toFixed(4)}} TFLOPs / ${{secG.toFixed(4)}} GB`;
+        sub.textContent = `pre: ${{fmt(secPreT)}} TF / ${{fmt(secPreG)}} GB · `
+                        + `dec: ${{fmt(secDecT)}} TF / ${{fmt(secDecG)}} GB`;
       }}
     }}
-    document.getElementById("total_tflops").textContent = grandT.toFixed(4);
-    document.getElementById("total_gb").textContent = grandG.toFixed(4);
-    document.getElementById("total_ai").textContent = grandG > 0 ? (grandT/grandG).toFixed(3) : "—";
+    const ai = (t, g) => g > 0 ? (t/g).toFixed(3) : "—";
+    document.getElementById("total_tflops").textContent =
+      `pre ${{fmt(grandPreT)}} · dec ${{fmt(grandDecT)}}`;
+    document.getElementById("total_gb").textContent =
+      `pre ${{fmt(grandPreG)}} · dec ${{fmt(grandDecG)}}`;
+    document.getElementById("total_ai").textContent =
+      `pre ${{ai(grandPreT, grandPreG)}} · dec ${{ai(grandDecT, grandDecG)}}`;
   }} catch (e) {{
     err.textContent = "compute failed: " + e.message;
   }}

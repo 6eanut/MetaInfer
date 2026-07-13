@@ -1,30 +1,33 @@
-"""Step 3: per-node FLOPs / mem-traffic calc with 3-agent agreement.
+"""Step 3: per-node FLOPs / mem-traffic calc with 3-angle agreement.
 
-Algorithm (per node):
+Algorithm (angle-serial, node-parallel, streaming):
 
-1. Spawn 3 INDEPENDENT writer agents (different prompts / angles) that
-   each produce a ``calc.py`` file defining ``calc(batch_size, seq_len)
-   -> {"tflops": float, "access_gb": float}``.
-2. Deterministic comparator (:func:`deterministic.compare_calc_grids`)
-   runs each script on the 42-combo cartesian product
-   (seq_len x batch_size) and checks agreement within rel-tol 1e-6.
-3. If all 42 combos agree across 3 writers → accept that node.
-4. Otherwise, re-spawn the disagreeing writers with the diff feedback
-   (their previous script + the numeric mismatches, NOT the other
-   writers' source code). Iterate.
-5. Hard cap 15 rounds per node. After cap → take median of the 3
-   outputs for each combo, mark ``approximate: true`` in the meta file,
-   move on.
+1. For each round (up to MAX_ROUNDS_PER_NODE):
+   - For each angle in [a, b, c] STRICTLY SERIALLY:
+     - Launch ALL pending nodes IN PARALLEL (max_concurrent caps it).
+     - As each agent finishes, write its cell
+       (calc.py / response.txt / grid.json) + update _state.json +
+       emit timeline. UI sees cells stream in.
+   - After all 3 angles done for this round: find nodes whose 3 angles
+     disagree > REL_TOL. Those become the pending set for next round.
+2. Converged nodes: pick the median angle's script as canonical, write
+   to final/<compound>.py + .meta.json.
+3. Nodes still disputed after MAX_ROUNDS_PER_NODE: mark approximate,
+   use median fallback (same as before).
 
 Output layout::
 
     step3/
-    ├── rounds/<node_id>/<round_idx>/{writer_0, writer_1, writer_2}/calc.py
-    ├── rounds/<node_id>/<round_idx>/grid_<i>.json
-    ├── rounds/<node_id>/<round_idx>/comparison.json
-    └── final/
-        ├── <node_id>.py          # final winning calc.py
-        └── <node_id>.meta.json   # {approximate, source_agent, rounds, ...}
+    ├── cells/
+    │   ├── _state.json                # UI-facing live state
+    │   └── <compound>/
+    │       ├── a/round_NN/{calc.py, response.txt, grid.json, meta.json}
+    │       ├── b/round_NN/...
+    │       └── c/round_NN/...
+    ├── final/
+    │   ├── <compound>.py              # final winning calc.py
+    │   └── <compound>.meta.json       # {approximate, source_agent, ...}
+    └── _summary.json
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ import re
 import time
 import traceback
 from pathlib import Path
+from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...subagent_manager import AgentSpec
@@ -41,16 +45,14 @@ from . import deterministic as det
 from . import prompts as P
 
 
-MAX_ROUNDS_PER_NODE = 15
+MAX_ROUNDS_PER_NODE = 5
 PER_AGENT_TIMEOUT_S = 900  # 15 min per writer
-WRITER_COUNT = 3
+ANGLES = ("a", "b", "c")  # maps to STEP3_WRITER_PROMPTS[0/1/2]
 
 
-def _format_env_block(env_vars: str) -> str:
-    if not env_vars:
-        return "(none)"
-    return "\n".join(f"  {ln}" for ln in env_vars.splitlines() if ln.strip())
-
+# --------------------------------------------------------------------------- #
+# Filesystem helpers
+# --------------------------------------------------------------------------- #
 
 def _safe_node_id(node_id: str) -> str:
     """Filesystem-safe node id (used for dir names)."""
@@ -65,44 +67,165 @@ def _write_prompt(workdir: Path, name: str, text: str) -> Path:
 
 
 def _extract_python_source(text: str) -> str:
-    """Pull a Python code block out of an LLM response.
-
-    Handles:
-    * ```python\n...\n``` fenced
-    * ```\n...\n``` bare-fenced (only if contents look like Python)
-    * bare source (whole text starts with `def` / `import` / comment)
-    """
+    """Pull a Python code block out of an LLM response."""
     if not text:
         return ""
-    # Fenced python first.
     m = re.search(r"```python\s*\n(.*?)\n```", text, re.DOTALL)
     if m:
         return m.group(1)
-    # Bare fenced: contents must contain 'def calc'.
     for m in re.finditer(r"```\s*\n(.*?)\n```", text, re.DOTALL):
         if "def calc" in m.group(1):
             return m.group(1)
-    # Bare: full text contains def calc.
     if "def calc" in text:
         return text.strip()
     return ""
 
 
-def _spawn_writers(
+# --------------------------------------------------------------------------- #
+# Cell-state writer (atomic-ish, locked)
+# --------------------------------------------------------------------------- #
+
+class CellStateStore:
+    """Thread-safe writer for step3/cells/_state.json.
+
+    Holds the live grid of (compound × angle) cells that the WebUI reads
+    to render the streaming audit table.
+    """
+
+    def __init__(self, state_path: Path):
+        self.path = state_path
+        self._lock = Lock()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.exists():
+            try:
+                self._doc = json.loads(self.path.read_text(encoding="utf-8"))
+            except ValueError:
+                self._doc = self._fresh_doc()
+        else:
+            self._doc = self._fresh_doc()
+
+    @staticmethod
+    def _fresh_doc() -> Dict[str, Any]:
+        return {"round": 0, "updated_at": time.time(), "nodes": {}}
+
+    def init_node(self, compound: str, *, node_id: str, section_id: str,
+                  section_kind: Optional[str], section_repeat_count: int) -> None:
+        with self._lock:
+            if compound not in self._doc["nodes"]:
+                self._doc["nodes"][compound] = {
+                    "node_id": node_id,
+                    "section_id": section_id,
+                    "section_kind": section_kind,
+                    "section_repeat_count": section_repeat_count,
+                    "cells": {
+                        a: {
+                            # Legacy aliases — equal to prefill.tflops / prefill.access_gb.
+                            "tflops": None, "gb": None,
+                            # Authoritative phase-split values.
+                            "prefill": None, "decode": None,
+                            "round": None, "status": "pending",
+                            "elapsed_s": None, "error": None,
+                            "script_path": None,
+                        }
+                        for a in ANGLES
+                    },
+                    "converged": None,
+                    "spread_pct": None,
+                    "round": 0,
+                }
+                self._flush_locked()
+
+    def update_cell(self, compound: str, angle: str, *,
+                    prefill: Optional[Dict[str, float]],
+                    decode: Optional[Dict[str, float]],
+                    round_idx: int, status: str,
+                    elapsed_s: Optional[float], error: Optional[str] = None,
+                    script_path: Optional[str] = None) -> None:
+        with self._lock:
+            node = self._doc["nodes"].setdefault(compound, {
+                "node_id": compound, "section_id": "", "cells": {a: {} for a in ANGLES},
+            })
+            pre = prefill or {"tflops": 0.0, "access_gb": 0.0}
+            dec = decode  or {"tflops": 0.0, "access_gb": 0.0}
+            node["cells"][angle] = {
+                # Legacy aliases (prefill-derived).
+                "tflops": pre.get("tflops"),
+                "gb": pre.get("access_gb"),
+                # Authoritative.
+                "prefill": pre,
+                "decode": dec,
+                "round": round_idx,
+                "status": status,
+                "elapsed_s": elapsed_s,
+                "error": error,
+                "script_path": script_path,
+            }
+            # Recompute convergence if all 3 angles have values.
+            self._recompute_locked(compound)
+            self._flush_locked()
+
+    def mark_round(self, round_idx: int) -> None:
+        with self._lock:
+            self._doc["round"] = round_idx
+            self._flush_locked()
+
+    def _recompute_locked(self, compound: str) -> None:
+        node = self._doc["nodes"].get(compound)
+        if not node:
+            return
+        cells = node["cells"]
+        # Convergence is based on prefill.tflops — same convention as the
+        # 5% relative tolerance was originally calibrated for.
+        vals = [cells[a] for a in ANGLES
+                if isinstance(cells.get(a), dict)
+                and cells[a].get("tflops") is not None]
+        if len(vals) < len(ANGLES):
+            node["converged"] = None
+            node["spread_pct"] = None
+            return
+        tflops = [v["tflops"] for v in vals]
+        if max(tflops) <= 0:
+            spread_pct = 0.0
+        else:
+            spread_pct = (max(tflops) - min(tflops)) / max(abs(x) for x in tflops)
+        node["spread_pct"] = round(spread_pct, 6)
+        node["converged"] = spread_pct <= det.REL_TOL
+
+    def _flush_locked(self) -> None:
+        self._doc["updated_at"] = time.time()
+        tmp = self.path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(self._doc, indent=2, ensure_ascii=False),
+                       encoding="utf-8")
+        tmp.replace(self.path)
+
+
+# --------------------------------------------------------------------------- #
+# Per-cell writer
+# --------------------------------------------------------------------------- #
+
+def _run_writer_for_cell(
+    *,
     manager,
-    work_root: Path,
+    cells_root: Path,
+    compound: str,
+    angle: str,
+    angle_idx: int,
+    round_idx: int,
     node: Dict[str, Any],
     memory_json: str,
     req: Dict[str, Any],
-    prev_scripts: Optional[List[Optional[str]]] = None,
-    mismatches: Optional[List[Dict[str, Any]]] = None,
-) -> List[Tuple[AgentSpec, str]]:
-    """Launch 3 writers in parallel. Returns list of (spec, source_text).
+    prev_script: Optional[str],
+    mismatches: List[Dict[str, Any]],
+) -> Tuple[str, Optional[Path], Optional[List[Dict[str, Any]]], Optional[str], float]:
+    """Launch ONE writer agent for one (compound, angle, round) cell.
 
-    On round 0: all 3 use the angle-specific writer prompts.
-    On round >=1: only WRITER_COUNT writers re-launch, each using the
-    STEP3_FIX_PROMPT with their own previous script.
+    Returns (status, calc_path_or_None, grid_or_None, error_or_None, elapsed_s).
     """
+    cell_dir = cells_root / compound / angle / f"round_{round_idx:02d}"
+    cell_dir.mkdir(parents=True, exist_ok=True)
+    workdir = cell_dir / "writer"
+    log_dir = cell_dir / "logs"
+
     node_json = json.dumps(node, indent=2, ensure_ascii=False)
     readonly = P.READONLY_WARNING.format(
         model_dir=req["model_dir"],
@@ -115,290 +238,443 @@ def _spawn_writers(
         "readonly": readonly,
         "calc_contract": calc_contract,
     }
-
-    nid = _safe_node_id(node.get("id", "node"))
-    specs_and_sources: List[Tuple[AgentSpec, str]] = []
-
-    threads: List = []
-    spec_list: List[AgentSpec] = []
-
-    for i in range(WRITER_COUNT):
-        name = f"writer_{i}"
-        workdir = work_root / name
-        log_dir = work_root / "logs" / name
-        if prev_scripts is None:
-            text = P.STEP3_WRITER_PROMPTS[i].format(**common)
-        else:
-            prev = prev_scripts[i] if i < len(prev_scripts) else None
-            if prev is None:
-                # Writer that produced no script last round — use the
-                # standard angle prompt to start fresh.
-                text = P.STEP3_WRITER_PROMPTS[i].format(**common)
-            else:
-                text = P.STEP3_FIX_PROMPT.format(
-                    **common,
-                    your_script=prev,
-                    mismatches=det.format_mismatches_for_prompt(mismatches or []),
-                )
-        prompt_file = _write_prompt(workdir, name, text)
-        spec = AgentSpec(
-            name=f"{nid}_{name}",  # globally unique for manager.result lookup
-            role="calc_writer",
-            prompt_file=prompt_file, workdir=workdir, log_dir=log_dir,
-            timeout_s=PER_AGENT_TIMEOUT_S, stuck_timeout_s=300, max_retries=2,
+    if round_idx == 0 or prev_script is None:
+        text = P.STEP3_WRITER_PROMPTS[angle_idx].format(**common)
+    else:
+        text = P.STEP3_FIX_PROMPT.format(
+            **common,
+            your_script=prev_script,
+            mismatches=det.format_mismatches_for_prompt(mismatches or []),
         )
-        spec_list.append(spec)
+    prompt_file = _write_prompt(workdir, "writer", text)
+    spec_name = f"s3_{compound}_{angle}_r{round_idx}"
+    spec = AgentSpec(
+        name=spec_name,
+        role="calc_writer",
+        prompt_file=prompt_file,
+        workdir=workdir,
+        log_dir=log_dir,
+        timeout_s=PER_AGENT_TIMEOUT_S,
+        stuck_timeout_s=300,
+        max_retries=2,
+    )
 
-    # Parallel launch.
-    for spec in spec_list:
-        t = manager.launch_async(spec)
-        threads.append(t)
-    for t in threads:
-        t.join()
+    t0 = time.time()
+    thread = manager.launch_async(spec)
+    thread.join()
+    elapsed = time.time() - t0
 
-    # Collect results.
-    for spec in spec_list:
-        result = manager.result(spec.name)
-        if result is None or not result.success:
-            err = result.error if result else "no result"
-            print(f"[calc-value.S3] writer {spec.name} failed: {err}", flush=True)
-            (spec.workdir / "error.txt").write_text(str(err), encoding="utf-8")
-            specs_and_sources.append((spec, ""))
-            continue
-        text = result.final_text or ""
-        (spec.workdir / "response.txt").write_text(text, encoding="utf-8")
-        # File-first: prefer calc.py the agent Wrote directly; only fall
-        # back to scraping response.txt if the file is missing/empty.
-        src, source = det.load_agent_text_file(
-            spec.workdir, "calc.py", text, _extract_python_source,
+    result = manager.result(spec.name)
+    if result is None or not result.success:
+        err = result.error if result else "no result"
+        (workdir / "error.txt").write_text(str(err), encoding="utf-8")
+        return "failed", None, None, str(err), elapsed
+
+    text_out = result.final_text or ""
+    (workdir / "response.txt").write_text(text_out, encoding="utf-8")
+    src, _source = det.load_agent_text_file(
+        workdir, "calc.py", text_out, _extract_python_source,
+    )
+    if not src:
+        (workdir / "parse_error.txt").write_text(
+            "No `def calc` block found.\n"
+            f"Response first 500 chars:\n{text_out[:500]}",
+            encoding="utf-8",
         )
-        if src:
-            if source == "response":
-                # Agent inlined the source instead of Writing — preserve
-                # what we scraped to the canonical filename so downstream
-                # sees a consistent layout.
-                (spec.workdir / "calc.py").write_text(src, encoding="utf-8")
-        else:
-            (spec.workdir / "parse_error.txt").write_text(
-                "No `def calc` block found in calc.py or response.txt.\n"
-                f"Response first 500 chars:\n{text[:500]}",
-                encoding="utf-8",
-            )
-        specs_and_sources.append((spec, src))
-    return specs_and_sources
+        return "no_source", None, None, "no def calc in response", elapsed
 
+    calc_path = workdir / "calc.py"
+    if not calc_path.exists():
+        # Agent inlined source — persist what we scraped.
+        calc_path.write_text(src, encoding="utf-8")
 
-def _run_one_calc(script_path: Path) -> Optional[List[Dict[str, Any]]]:
-    """Run a calc.py on the 42-combo grid. Returns None on script error."""
     try:
-        return det.run_calc_on_grid(script_path)
+        grid = det.run_calc_on_grid(calc_path)
     except Exception as exc:  # noqa: BLE001
-        return None
+        (workdir / "runtime_error.txt").write_text(
+            f"{type(exc).__name__}: {exc}", encoding="utf-8",
+        )
+        return "runtime_error", str(calc_path), None, str(exc), elapsed
+
+    (cell_dir / "grid.json").write_text(
+        json.dumps(grid, indent=2, ensure_ascii=False), encoding="utf-8",
+    )
+    return "ok", str(calc_path), grid, None, elapsed
 
 
-def _process_one_node(
+# --------------------------------------------------------------------------- #
+# Angle-stage: run one angle for all pending nodes in parallel
+# --------------------------------------------------------------------------- #
+
+def _run_angle_stage(
     *,
-    node: Dict[str, Any],
     manager,
-    step3_dir: Path,
+    cells_root: Path,
+    angle: str,
+    angle_idx: int,
+    pending: List[Dict[str, Any]],
+    round_idx: int,
     memory_json: str,
     req: Dict[str, Any],
+    prev_scripts_by_node: Dict[str, Optional[str]],
+    mismatches_by_node: Dict[str, List[Dict[str, Any]]],
+    cell_state: CellStateStore,
     store,
-    compound_id: Optional[str] = None,
-) -> Tuple[Path, Dict[str, Any]]:
-    """Run the 3-writer iterative convergence for ONE node.
+) -> None:
+    """Launch all pending nodes for one angle in parallel.
 
-    Returns (final_calc_script_path, meta). ``compound_id`` overrides
-    the on-disk filename — used by the sectioned-graph flow so two
-    sections with same-named nodes (e.g. ``input_norm`` in both dense
-    and MoE templates) don't collide in ``final/``.
+    Blocks until all of this angle's cells finish. Each cell is written
+    + timeline-emitted as its agent completes (polled every 1s).
     """
-    nid_raw = node.get("id", "node")
-    nid = compound_id or _safe_node_id(nid_raw)
-    node_root = step3_dir / "rounds" / nid
-    node_root.mkdir(parents=True, exist_ok=True)
-    final_dir = step3_dir / "final"
-    final_dir.mkdir(parents=True, exist_ok=True)
+    # Launch all specs up front. manager.max_concurrent gates actual
+    # parallelism (the launch_async thread waits on the semaphore
+    # internally before invoking the subprocess).
+    inflight: Dict[str, Tuple[Dict[str, Any], object, float]] = {}
+    for node_meta in pending:
+        compound = node_meta["compound"]
+        prev = prev_scripts_by_node.get(compound)
+        mm = mismatches_by_node.get(compound, [])
 
-    prev_scripts: Optional[List[Optional[str]]] = None
-    prev_mismatches: Optional[List[Dict[str, Any]]] = None
-    last_grids: Optional[List[List[Dict[str, Any]]]] = None
-
-    final_round = 0
-    approximate = False
-
-    for round_idx in range(MAX_ROUNDS_PER_NODE):
-        round_dir = node_root / f"round_{round_idx:02d}"
+        # We can't run launch_async synchronously here because we need
+        # the spec.name for later result lookup. Build spec inline.
+        cell_dir = cells_root / compound / angle / f"round_{round_idx:02d}"
+        cell_dir.mkdir(parents=True, exist_ok=True)
+        workdir = cell_dir / "writer"
+        log_dir = cell_dir / "logs"
+        node_json = json.dumps(node_meta["node"], indent=2, ensure_ascii=False)
+        readonly = P.READONLY_WARNING.format(
+            model_dir=req["model_dir"],
+            framework_dir=req["framework_source_dir"],
+        )
+        common = {
+            "node_json": node_json,
+            "memory_json": memory_json,
+            "readonly": readonly,
+            "calc_contract": P.STEP3_CALC_FUNC_CONTRACT,
+        }
+        if round_idx == 0 or prev is None:
+            text = P.STEP3_WRITER_PROMPTS[angle_idx].format(**common)
+        else:
+            text = P.STEP3_FIX_PROMPT.format(
+                **common,
+                your_script=prev,
+                mismatches=det.format_mismatches_for_prompt(mm),
+            )
+        prompt_file = _write_prompt(workdir, "writer", text)
+        spec_name = f"s3_{compound}_{angle}_r{round_idx}"
+        spec = AgentSpec(
+            name=spec_name,
+            role="calc_writer",
+            prompt_file=prompt_file,
+            workdir=workdir,
+            log_dir=log_dir,
+            timeout_s=PER_AGENT_TIMEOUT_S,
+            stuck_timeout_s=300,
+            max_retries=2,
+        )
         t0 = time.time()
-        results = _spawn_writers(
-            manager, round_dir, node, memory_json, req,
-            prev_scripts=prev_scripts, mismatches=prev_mismatches,
-        )
-        scripts = [src for (_, src) in results]
-        script_paths: List[Optional[Path]] = []
-        for (spec, src) in results:
-            if src:
-                script_paths.append(spec.workdir / "calc.py")
-            else:
-                script_paths.append(None)
+        thread = manager.launch_async(spec)
+        inflight[spec.name] = (node_meta, thread, t0)
 
-        # Run each script on the grid.
-        grids: List[List[Dict[str, Any]]] = []
-        usable_paths: List[Path] = []
-        for p in script_paths:
-            if p is None:
-                continue
-            grid = _run_one_calc(p)
-            if grid is None:
-                # Script failed at runtime.
-                continue
-            grids.append(grid)
-            usable_paths.append(p)
-
-        # Persist grids.
-        for i, grid in enumerate(grids):
-            (round_dir / f"grid_{i}.json").write_text(
-                json.dumps(grid, indent=2, ensure_ascii=False), encoding="utf-8",
-            )
-
-        if len(grids) < WRITER_COUNT:
-            store.append_timeline(
-                "calc_value.s3.node.round.partial",
-                {"node": nid, "round": round_idx,
-                 "usable_scripts": len(grids),
-                 "note": "some writer scripts failed; retrying"},
-            )
-
-        if len(grids) == 0:
-            # No usable scripts this round. Give up after the cap.
-            if round_idx == MAX_ROUNDS_PER_NODE - 1:
-                approximate = True
-                break
-            prev_scripts = [s or None for s in scripts]
-            prev_mismatches = []
+    # Poll until all done. As each finishes, process its cell.
+    while inflight:
+        done_names = [n for (n, (_, t, _)) in inflight.items() if not t.is_alive()]
+        if not done_names:
+            time.sleep(1.0)
             continue
+        for name in done_names:
+            node_meta, _thread, t0 = inflight.pop(name)
+            compound = node_meta["compound"]
+            elapsed = time.time() - t0
+            cell_dir = cells_root / compound / angle / f"round_{round_idx:02d}"
+            workdir = cell_dir / "writer"
 
-        last_grids = grids
-        comparison = det.compare_calc_grids(grids)
-        (round_dir / "comparison.json").write_text(
-            json.dumps(comparison, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        elapsed = time.time() - t0
-        store.append_timeline(
-            "calc_value.s3.node.round.done",
-            {"node": nid, "round": round_idx,
-             "ok": comparison["ok"],
-             "mismatches": len(comparison.get("mismatches") or []),
-             "elapsed_s": round(elapsed, 1)},
-        )
+            result = manager.result(name)
+            status = "failed"
+            calc_path_str: Optional[str] = None
+            grid: Optional[List[Dict[str, Any]]] = None
+            err: Optional[str] = None
+            prefill_picked: Optional[Dict[str, float]] = None
+            decode_picked: Optional[Dict[str, float]] = None
 
-        if comparison["ok"] and len(grids) >= WRITER_COUNT:
-            # Converged. Accept the FIRST writer's script as canonical
-            # (all 3 agree, so choice is arbitrary).
-            final_script = usable_paths[0]
-            final_round = round_idx
-            (final_dir / f"{nid}.py").write_text(
-                final_script.read_text(encoding="utf-8"), encoding="utf-8",
-            )
-            (final_dir / f"{nid}.meta.json").write_text(
-                json.dumps({
-                    "node_id": nid_raw,
-                    "approximate": False,
-                    "source_agent": "unanimous",
-                    "rounds": round_idx + 1,
-                    "writer_scripts": [str(p) for p in usable_paths],
-                }, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            return (final_dir / f"{nid}.py"), {"approximate": False,
-                                                "rounds": round_idx + 1}
+            if result is None or not result.success:
+                err = result.error if result else "no result"
+                (workdir / "error.txt").write_text(str(err), encoding="utf-8")
+            else:
+                text_out = result.final_text or ""
+                (workdir / "response.txt").write_text(text_out, encoding="utf-8")
+                src, _src_kind = det.load_agent_text_file(
+                    workdir, "calc.py", text_out, _extract_python_source,
+                )
+                if not src:
+                    (workdir / "parse_error.txt").write_text(
+                        "No `def calc` block found.\n"
+                        f"Response first 500 chars:\n{text_out[:500]}",
+                        encoding="utf-8",
+                    )
+                    status = "no_source"
+                    err = "no def calc in response"
+                else:
+                    calc_path = workdir / "calc.py"
+                    if not calc_path.exists():
+                        calc_path.write_text(src, encoding="utf-8")
+                    try:
+                        grid = det.run_calc_on_grid(calc_path)
+                        status = "ok"
+                        calc_path_str = str(calc_path)
+                        # Pick a representative combo for quick UI display.
+                        for r in grid:
+                            if r["batch_size"] == 1 and r["seq_len"] == 512:
+                                prefill_picked = {
+                                    "tflops": (r.get("prefill") or {}).get("tflops", 0.0),
+                                    "access_gb": (r.get("prefill") or {}).get("access_gb", 0.0),
+                                }
+                                decode_picked = {
+                                    "tflops": (r.get("decode") or {}).get("tflops", 0.0),
+                                    "access_gb": (r.get("decode") or {}).get("access_gb", 0.0),
+                                }
+                                break
+                    except Exception as exc:  # noqa: BLE001
+                        (workdir / "runtime_error.txt").write_text(
+                            f"{type(exc).__name__}: {exc}", encoding="utf-8",
+                        )
+                        status = "runtime_error"
+                        err = str(exc)
 
-        if round_idx == MAX_ROUNDS_PER_NODE - 1:
-            # Hard cap — median fallback.
-            print(f"[calc-value.S3] node {nid} did not converge after "
-                  f"{MAX_ROUNDS_PER_NODE} rounds; using median fallback.",
-                  flush=True)
-            approximate = True
-            median_grid = det.median_fallback(grids)
-            (round_dir / "median_fallback.json").write_text(
-                json.dumps(median_grid, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            # Synthesize a "median" calc script that delegates to a small
-            # lookup function — but since calc() must accept arbitrary
-            # (batch_size, seq_len), we cannot use a lookup. Instead, pick
-            # the writer whose grid is closest to the median on the most
-            # combos.
-            from statistics import median
-            best_writer_idx = _pick_most_median_writer(grids, median_grid)
-            final_script = usable_paths[best_writer_idx]
-            (final_dir / f"{nid}.py").write_text(
-                final_script.read_text(encoding="utf-8"), encoding="utf-8",
-            )
-            (final_dir / f"{nid}.meta.json").write_text(
-                json.dumps({
-                    "node_id": nid_raw,
-                    "approximate": True,
-                    "source_agent": f"median_fallback_from_writer_{best_writer_idx}",
-                    "rounds": MAX_ROUNDS_PER_NODE,
-                    "mismatch_count_at_cap": len(comparison.get("mismatches") or []),
-                    "writer_scripts": [str(p) for p in usable_paths],
-                }, indent=2, ensure_ascii=False),
-                encoding="utf-8",
+            if grid is not None:
+                (cell_dir / "grid.json").write_text(
+                    json.dumps(grid, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+
+            cell_state.update_cell(
+                compound, angle,
+                prefill=prefill_picked, decode=decode_picked,
+                round_idx=round_idx, status=status,
+                elapsed_s=round(elapsed, 1),
+                error=err, script_path=calc_path_str,
             )
             store.append_timeline(
-                "calc_value.s3.node.median_fallback",
-                {"node": nid,
-                 "mismatches_at_cap": len(comparison.get("mismatches") or [])},
+                "calc_value.s3.cell.done",
+                {"node": node_meta["node_id"],
+                 "section_id": node_meta["section_id"],
+                 "compound": compound,
+                 "angle": angle, "round": round_idx,
+                 "status": status,
+                 "tflops": (prefill_picked or {}).get("tflops"),
+                 "gb": (prefill_picked or {}).get("access_gb"),
+                 "prefill": prefill_picked,
+                 "decode": decode_picked,
+                 "elapsed_s": round(elapsed, 1),
+                 "error": err},
             )
-            return (final_dir / f"{nid}.py"), {"approximate": True,
-                                                "rounds": MAX_ROUNDS_PER_NODE}
 
-        # Not converged, not at cap —> prepare diff feedback.
-        prev_scripts = [s or None for s in scripts]
-        prev_mismatches = comparison["mismatches"]
-        final_round = round_idx
 
-    # Unreachable: every loop branch either returns or hits the cap branch.
-    # But just in case, write a degenerate result.
-    print(f"[calc-value.S3] node {nid} exited loop unexpectedly", flush=True)
-    fallback_script = (last_grids is not None and len(grids) > 0 and usable_paths)
-    if fallback_script:
-        (final_dir / f"{nid}.py").write_text(
-            usable_paths[0].read_text(encoding="utf-8"), encoding="utf-8",
+# --------------------------------------------------------------------------- #
+# Dispute detection
+# --------------------------------------------------------------------------- #
+
+def _find_disputed(
+    *,
+    pending: List[Dict[str, Any]],
+    cells_root: Path,
+    round_idx: int,
+) -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]], Dict[str, Optional[str]]]:
+    """For each pending node, read back the 3 angles' grids from this round
+    and check agreement. Returns:
+
+      bad_pending           — nodes that still disagree > REL_TOL
+      mismatches_by_node    — for each disputed node, the mismatch list
+      prev_scripts_by_node  — each node's most-recent (any-angle) script path
+    """
+    bad: List[Dict[str, Any]] = []
+    mismatches_by_node: Dict[str, List[Dict[str, Any]]] = {}
+    prev_scripts_by_node: Dict[str, Optional[str]] = {}
+
+    for node_meta in pending:
+        compound = node_meta["compound"]
+        grids: List[List[Dict[str, Any]]] = []
+        script_for_node: Optional[str] = None
+        ok = True
+        for angle in ANGLES:
+            cell_dir = cells_root / compound / angle / f"round_{round_idx:02d}"
+            grid_path = cell_dir / "grid.json"
+            calc_path = cell_dir / "writer" / "calc.py"
+            if not grid_path.exists():
+                ok = False
+                break
+            try:
+                g = json.loads(grid_path.read_text(encoding="utf-8"))
+            except ValueError:
+                ok = False
+                break
+            grids.append(g)
+            if calc_path.exists() and script_for_node is None:
+                script_for_node = calc_path.read_text(encoding="utf-8")
+        prev_scripts_by_node[compound] = script_for_node
+        if not ok or len(grids) < len(ANGLES):
+            bad.append(node_meta)
+            mismatches_by_node[compound] = []
+            continue
+        comparison = det.compare_calc_grids(grids)
+        if not comparison["ok"]:
+            bad.append(node_meta)
+            mismatches_by_node[compound] = comparison["mismatches"]
+    return bad, mismatches_by_node, prev_scripts_by_node
+
+
+# --------------------------------------------------------------------------- #
+# Finalize: pick canonical script per node + write step3/final/
+# --------------------------------------------------------------------------- #
+
+def _finalize_node(
+    *,
+    compound: str,
+    node_meta: Dict[str, Any],
+    cells_root: Path,
+    final_dir: Path,
+    last_round: int,
+    cell_state: CellStateStore,
+) -> Tuple[Path, Dict[str, Any]]:
+    """Pick the canonical script for a node and emit final/<compound>.py.
+
+    Strategy: read all 3 angles' scripts from the last completed round.
+    If cell_state says converged → take writer_0 (arbitrary, all agree).
+    Else → take the writer whose grid is closest to the median (same as
+    the legacy median fallback).
+    """
+    # Find the latest round where all 3 angles produced a grid.
+    chosen_round = -1
+    grids_by_angle: Dict[str, List[Dict[str, Any]]] = {}
+    calc_by_angle: Dict[str, str] = {}
+    for r in range(last_round, -1, -1):
+        ok = True
+        trial: Dict[str, List[Dict[str, Any]]] = {}
+        trial_calc: Dict[str, str] = {}
+        for angle in ANGLES:
+            grid_path = cells_root / compound / angle / f"round_{r:02d}" / "grid.json"
+            calc_path = cells_root / compound / angle / f"round_{r:02d}" / "writer" / "calc.py"
+            if not grid_path.exists():
+                ok = False
+                break
+            try:
+                trial[angle] = json.loads(grid_path.read_text(encoding="utf-8"))
+            except ValueError:
+                ok = False
+                break
+            if calc_path.exists():
+                trial_calc[angle] = calc_path.read_text(encoding="utf-8")
+        if ok and len(trial) == len(ANGLES):
+            chosen_round = r
+            grids_by_angle = trial
+            calc_by_angle = trial_calc
+            break
+
+    if chosen_round < 0:
+        # No usable cells at all — degenerate fallback.
+        script_text = ("def calc(batch_size, seq_len):\n"
+                       "    return {'prefill': {'tflops': 0.0, 'access_gb': 0.0}, 'decode': {'tflops': 0.0, 'access_gb': 0.0}}\n")
+        (final_dir / f"{compound}.py").write_text(script_text, encoding="utf-8")
+        meta = {
+            "node_id": node_meta["node_id"],
+            "section_id": node_meta["section_id"],
+            "compound_id": compound,
+            "approximate": True,
+            "source_agent": "degenerate_fallback",
+            "rounds": last_round + 1,
+        }
+        (final_dir / f"{compound}.meta.json").write_text(
+            json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8",
         )
+        return final_dir / f"{compound}.py", {"approximate": True,
+                                               "rounds": last_round + 1}
+
+    # Decide: converged or median fallback.
+    comparison = det.compare_calc_grids(list(grids_by_angle.values()))
+    node_state = cell_state._doc["nodes"].get(compound, {})
+    converged = node_state.get("converged", False)
+
+    if converged or comparison["ok"]:
+        # All agree — pick angle a arbitrarily.
+        chosen_angle = ANGLES[0]
+        approximate = False
+        source_agent = "unanimous"
     else:
-        (final_dir / f"{nid}.py").write_text(
-            "def calc(batch_size, seq_len):\n    return {'tflops': 0.0, 'access_gb': 0.0}\n",
-            encoding="utf-8",
-        )
-    (final_dir / f"{nid}.meta.json").write_text(
-        json.dumps({"node_id": nid_raw, "approximate": True,
-                    "source_agent": "degenerate_fallback"},
-                   indent=2),
-        encoding="utf-8",
+        # Median fallback: pick the angle whose grid is closest to the
+        # per-combo median.
+        median_grid = det.median_fallback(list(grids_by_angle.values()))
+        chosen_angle = _pick_most_median_angle(grids_by_angle, median_grid)
+        approximate = True
+        source_agent = f"median_fallback_from_angle_{chosen_angle}"
+
+    script_text = calc_by_angle.get(chosen_angle, "")
+    if not script_text:
+        # Edge case: angle had grid.json but calc.py missing — fall back.
+        script_text = ("def calc(batch_size, seq_len):\n"
+                       "    return {'prefill': {'tflops': 0.0, 'access_gb': 0.0}, 'decode': {'tflops': 0.0, 'access_gb': 0.0}}\n")
+        approximate = True
+        source_agent = "degenerate_fallback_missing_script"
+
+    (final_dir / f"{compound}.py").write_text(script_text, encoding="utf-8")
+    meta = {
+        "node_id": node_meta["node_id"],
+        "section_id": node_meta["section_id"],
+        "section_kind": node_meta.get("section_kind"),
+        "section_repeat_count": node_meta.get("section_repeat_count", 1),
+        "section_applies_to": node_meta.get("section_applies_to"),
+        "compound_id": compound,
+        "approximate": approximate,
+        "source_agent": source_agent,
+        "rounds": chosen_round + 1,
+        "chosen_angle": chosen_angle,
+        "writer_scripts": [
+            str(cells_root / compound / a / f"round_{chosen_round:02d}" / "writer" / "calc.py")
+            for a in ANGLES
+        ],
+        "mismatch_count_at_cap": len(comparison.get("mismatches") or []),
+    }
+    (final_dir / f"{compound}.meta.json").write_text(
+        json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8",
     )
-    return (final_dir / f"{nid}.py"), {"approximate": True, "rounds": final_round + 1}
+    return final_dir / f"{compound}.py", {
+        "approximate": approximate, "rounds": chosen_round + 1,
+    }
 
 
-def _pick_most_median_writer(grids: List[List[Dict[str, Any]]],
-                              median_grid: List[Dict[str, Any]]) -> int:
-    """Pick the writer whose values are closest to the median grid overall."""
-    if not grids:
-        return 0
-    best_idx = 0
+def _pick_most_median_angle(
+    grids_by_angle: Dict[str, List[Dict[str, Any]]],
+    median_grid: List[Dict[str, Any]],
+) -> str:
+    if not grids_by_angle:
+        return ANGLES[0]
+
+    def _pick(rec: Dict[str, Any], phase: str, field: str) -> float:
+        """Extract a numeric field from a grid record. Handles both the
+        new prefill/decode shape and legacy top-level {tflops, access_gb}."""
+        if phase in rec:
+            return (rec.get(phase) or {}).get(field, 0.0)
+        # Legacy — only prefill.tflops / prefill.access_gb exist.
+        if phase == "prefill":
+            return rec.get(field, 0.0)
+        return 0.0
+
+    best_angle = ANGLES[0]
     best_err = float("inf")
-    for i, g in enumerate(grids):
+    for angle, g in grids_by_angle.items():
         err = 0.0
         for r1, r2 in zip(g, median_grid):
-            err += abs(r1["tflops"] - r2["tflops"])
-            err += abs(r1["access_gb"] - r2["access_gb"])
+            for phase in ("prefill", "decode"):
+                err += abs(_pick(r1, phase, "tflops") - _pick(r2, phase, "tflops"))
+                err += abs(_pick(r1, phase, "access_gb") - _pick(r2, phase, "access_gb"))
         if err < best_err:
             best_err = err
-            best_idx = i
-    return best_idx
+            best_angle = angle
+    return best_angle
 
+
+# --------------------------------------------------------------------------- #
+# Top-level entry point (signature preserved for pipeline.py)
+# --------------------------------------------------------------------------- #
 
 def run_step3_calculate(
     *,
@@ -408,14 +684,9 @@ def run_step3_calculate(
     paths: Dict[str, Path],
     graph_path: Path,
 ) -> Path:
-    """Iterate over every (section, node) in graph.json. Returns final/ dir.
+    """Run the angle-serial / node-parallel / cell-streaming audit.
 
-    For each node inside each section we produce a calc.py that computes
-    ONE occurrence's FLOPs / bytes (if the section is a ``layer_template``
-    with ``repeat_count=N``, the calc result represents one of the N
-    layers — the aggregator in S4 + /compute multiplies by N). Meta
-    files are stamped with section context (section_id, kind,
-    repeat_count) so downstream can find them and aggregate correctly.
+    Returns the final/ directory path.
     """
     raw = json.loads(graph_path.read_text(encoding="utf-8"))
     graph = det.normalize_graph(raw)
@@ -424,15 +695,40 @@ def run_step3_calculate(
         if memory_path.exists() else "{}"
 
     step3_dir = paths["step3_dir"]
+    cells_root = step3_dir / "cells"
+    cells_root.mkdir(parents=True, exist_ok=True)
     final_dir = step3_dir / "final"
     final_dir.mkdir(parents=True, exist_ok=True)
 
-    # Flatten (section, node) targets so we still get deterministic order.
-    targets: List[Tuple[Dict[str, Any], Dict[str, Any], int]] = []
+    cell_state = CellStateStore(cells_root / "_state.json")
+
+    # Flatten (section, node) targets.
+    targets: List[Dict[str, Any]] = []
     for sec in graph.get("sections") or []:
-        for i, node in enumerate((sec.get("graph") or {}).get("nodes") or []):
-            if isinstance(node, dict):
-                targets.append((sec, node, i))
+        sid = sec.get("id", "section")
+        sec_kind = sec.get("kind")
+        sec_rc = sec.get("repeat_count") if sec_kind == "layer_template" else 1
+        for node in (sec.get("graph") or {}).get("nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            nid_raw = node.get("id", "node")
+            compound_raw = f"{sid}__{nid_raw}"
+            compound = _safe_node_id(compound_raw)
+            targets.append({
+                "node": node,
+                "node_id": nid_raw,
+                "section_id": sid,
+                "section_kind": sec_kind,
+                "section_repeat_count": sec_rc if isinstance(sec_rc, int) and sec_rc >= 1 else 1,
+                "section_applies_to": sec.get("applies_to"),
+                "compound": compound,
+            })
+            cell_state.init_node(
+                compound, node_id=nid_raw, section_id=sid,
+                section_kind=sec_kind,
+                section_repeat_count=sec_rc if isinstance(sec_rc, int) and sec_rc >= 1 else 1,
+            )
+
     total = len(targets)
     store.append_timeline(
         "calc_value.s3.start",
@@ -441,85 +737,104 @@ def run_step3_calculate(
          "sections": len(graph.get("sections") or [])},
     )
 
+    pending = list(targets)
+    round_idx = 0
+    last_round_completed = -1
+    while pending and round_idx < MAX_ROUNDS_PER_NODE:
+        cell_state.mark_round(round_idx)
+        store.append_timeline(
+            "calc_value.s3.round.start",
+            {"round": round_idx, "pending": len(pending)},
+        )
+        # Build prev_scripts / mismatches for round >= 1 from previous round's cells.
+        if round_idx == 0:
+            prev_scripts: Dict[str, Optional[str]] = {m["compound"]: None for m in pending}
+            mismatches: Dict[str, List[Dict[str, Any]]] = {m["compound"]: [] for m in pending}
+        # else: prev_scripts / mismatches filled in by _find_disputed at the end of last iter
+
+        for angle_idx, angle in enumerate(ANGLES):
+            store.append_timeline(
+                "calc_value.s3.angle.start",
+                {"round": round_idx, "angle": angle, "pending": len(pending)},
+            )
+            _run_angle_stage(
+                manager=manager, cells_root=cells_root,
+                angle=angle, angle_idx=angle_idx,
+                pending=pending, round_idx=round_idx,
+                memory_json=memory_json, req=req,
+                prev_scripts_by_node=prev_scripts,
+                mismatches_by_node=mismatches,
+                cell_state=cell_state, store=store,
+            )
+            store.append_timeline(
+                "calc_value.s3.angle.done",
+                {"round": round_idx, "angle": angle},
+            )
+
+        last_round_completed = round_idx
+        # Check disputes.
+        bad, mismatches, prev_scripts = _find_disputed(
+            pending=pending, cells_root=cells_root, round_idx=round_idx,
+        )
+        store.append_timeline(
+            "calc_value.s3.round.done",
+            {"round": round_idx, "disputed": len(bad), "converged": len(pending) - len(bad)},
+        )
+        if not bad:
+            break
+        pending = bad
+        round_idx += 1
+
+    # Finalize every node.
     summary = []
-    for i, (sec, node, idx_in_sec) in enumerate(targets):
-        nid_raw = node.get("id", f"node_{idx_in_sec}")
-        sid = sec.get("id", "section")
-        # Globally-unique calc filename = section_id + node_id, so two
-        # sections with a same-named node (e.g. "input_norm" appearing
-        # in both dense + MoE templates) don't collide.
-        compound = f"{sid}__{nid_raw}"
-        safe = _safe_node_id(compound)
-        t0 = time.time()
+    for node_meta in targets:
+        compound = node_meta["compound"]
         try:
-            script_path, meta = _process_one_node(
-                node=node, manager=manager, step3_dir=step3_dir,
-                memory_json=memory_json, req=req, store=store,
-                compound_id=safe,
+            _script_path, meta = _finalize_node(
+                compound=compound, node_meta=node_meta,
+                cells_root=cells_root, final_dir=final_dir,
+                last_round=max(last_round_completed, 0),
+                cell_state=cell_state,
             )
         except Exception as exc:  # noqa: BLE001
             tb = traceback.format_exc()
-            print(f"[calc-value.S3] node {compound} crashed: {exc}\n{tb}",
+            print(f"[calc-value.S3] finalize {compound} crashed: {exc}\n{tb}",
                   flush=True)
             store.append_timeline(
                 "calc_value.s3.node.crashed",
-                {"node": nid_raw, "section_id": sid, "error": str(exc)},
+                {"node": node_meta["node_id"], "section_id": node_meta["section_id"],
+                 "error": str(exc)},
             )
-            (final_dir / f"{safe}.py").write_text(
+            (final_dir / f"{compound}.py").write_text(
                 "def calc(batch_size, seq_len):\n"
-                "    return {'tflops': 0.0, 'access_gb': 0.0}\n",
+                "    return {'prefill': {'tflops': 0.0, 'access_gb': 0.0}, 'decode': {'tflops': 0.0, 'access_gb': 0.0}}\n",
                 encoding="utf-8",
             )
-            (final_dir / f"{safe}.meta.json").write_text(
-                json.dumps({"node_id": nid_raw, "section_id": sid,
+            (final_dir / f"{compound}.meta.json").write_text(
+                json.dumps({"node_id": node_meta["node_id"],
+                            "section_id": node_meta["section_id"],
+                            "compound_id": compound,
                             "approximate": True,
                             "source_agent": "crash_fallback",
                             "error": str(exc)}, indent=2),
                 encoding="utf-8",
             )
-            meta = {"approximate": True, "crashed": True}
-            script_path = final_dir / f"{safe}.py"
-        # Stamp section context into meta so downstream aggregation
-        # (S4 viz + /compute endpoint) can multiply by repeat_count.
-        meta_path = final_dir / f"{safe}.meta.json"
-        if meta_path.exists():
-            try:
-                existing = json.loads(meta_path.read_text(encoding="utf-8"))
-            except ValueError:
-                existing = {}
-        else:
-            existing = {}
-        existing.update({
-            "node_id": nid_raw,
-            "section_id": sid,
-            "section_kind": sec.get("kind"),
-            "section_repeat_count": (
-                sec.get("repeat_count") if sec.get("kind") == "layer_template"
-                else 1
-            ),
-            "section_applies_to": sec.get("applies_to"),
-            "compound_id": safe,
-        })
-        meta_path.write_text(
-            json.dumps(existing, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        elapsed = time.time() - t0
+            meta = {"approximate": True, "crashed": True, "rounds": 0}
         summary.append({
-            "node_id": nid_raw, "section_id": sid,
-            "compound_id": safe,
-            "section_kind": sec.get("kind"),
-            "repeat_count": existing["section_repeat_count"],
+            "node_id": node_meta["node_id"],
+            "section_id": node_meta["section_id"],
+            "compound_id": compound,
+            "section_kind": node_meta.get("section_kind"),
+            "repeat_count": node_meta.get("section_repeat_count", 1),
             "approximate": meta.get("approximate"),
             "rounds": meta.get("rounds"),
-            "elapsed_s": round(elapsed, 1),
         })
         store.append_timeline(
             "calc_value.s3.node.done",
-            {"node": nid_raw, "section_id": sid, "i": i, "total": total,
+            {"node": node_meta["node_id"], "section_id": node_meta["section_id"],
+             "compound": compound,
              "approximate": meta.get("approximate"),
-             "rounds": meta.get("rounds"),
-             "elapsed_s": round(elapsed, 1)},
+             "rounds": meta.get("rounds")},
         )
 
     (final_dir / "_summary.json").write_text(
@@ -527,7 +842,7 @@ def run_step3_calculate(
     )
     store.append_timeline(
         "calc_value.s3.all_nodes_done",
-        {"total": total,
+        {"total": len(summary),
          "approximate_count": sum(1 for s in summary if s["approximate"])},
     )
     return final_dir

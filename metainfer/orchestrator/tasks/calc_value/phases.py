@@ -2,7 +2,7 @@
 
 Linear state machine::
 
-    idle → S1_analyze → S2_graph → S3_calculate → S4_visualize → finished
+    idle → S0_rough → S1_analyze → S2_graph → S3_calculate → S4_visualize → finished
 
 Each step retries forever on failure (see ``pipeline._run_step_with_retry``);
 there is NO ``failed`` phase. The only terminal phase is ``finished``,
@@ -22,6 +22,7 @@ from typing import List
 # Literal) so that the rest of the orchestrator package, which shares
 # state.py with the ABCDEF pipeline, doesn't need its Phase Literal
 # extended. state.py treats current_phase as opaque.
+S0_ROUGH = "S0_rough"
 S1_ANALYZE = "S1_analyze"
 S2_GRAPH = "S2_graph"
 S3_CALCULATE = "S3_calculate"
@@ -35,12 +36,13 @@ IDLE = "idle"
 FAILED = "finished"
 
 # Linear ordering (idle / finished are bookkeeping, not steps).
-STEP_ORDER: List[str] = [S1_ANALYZE, S2_GRAPH, S3_CALCULATE, S4_VISUALIZE]
+STEP_ORDER: List[str] = [S0_ROUGH, S1_ANALYZE, S2_GRAPH, S3_CALCULATE, S4_VISUALIZE]
 
 HUMAN_LABEL = {
+    S0_ROUGH: "S0: Rough single-pass estimate",
     S1_ANALYZE: "S1: Analyze code (3 agents)",
     S2_GRAPH: "S2: Build & validate execution graph",
-    S3_CALCULATE: "S3: Calculate FLOPs / mem-traffic (3 agents × 42 combos)",
+    S3_CALCULATE: "S3: Calculate FLOPs / mem-traffic (3 angles × 5-way parallel)",
     S4_VISUALIZE: "S4: Generate HTML visualization",
     FINISHED: "finished",
     IDLE: "idle",

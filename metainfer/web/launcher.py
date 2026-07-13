@@ -275,7 +275,61 @@ class LocalLauncher:
         self._kill_subagents(task_id, sig, force=force)
         # Then kill the orchestrator itself, with PID-reuse validation.
         ok = _proc.kill_pid_validated(pid, sig=sig, expected_started_at=started_at)
+        if not ok:
+            # Orchestrator is already dead (crashed / SIGKILLed / OOM-killed)
+            # but its pid file + run.json still show "running". The user
+            # clicking Kill wants this task to STOP, so clean up the zombie
+            # state: stamp finished_at on the pid file and mark the task
+            # as not running in the registry. Without this the UI keeps
+            # showing the task as alive but the kill button does nothing.
+            self._reap_dead_pid_file(task_id, pid, started_at)
         return ok
+
+    def _reap_dead_pid_file(
+        self, task_id: str, pid: int, started_at: Optional[float],
+    ) -> None:
+        """Best-effort cleanup when an orchestrator pid is gone but its
+        bookkeeping files still claim it's running.
+
+        - Stamp ``finished_at`` in orchestrator.pid so ``status()`` reports
+          not-running.
+        - Clear the live pid in the task registry so the list view's
+          status pill flips.
+        - Append a timeline marker so the audit trail explains why the
+          task transitioned to stopped without a clean shutdown.
+        """
+        import json
+        import time
+        try:
+            sd = _paths.task_dir(task_id)
+            pf = sd / "orchestrator.pid"
+            if pf.exists():
+                d = _read_pid_file(task_id)
+                d.setdefault("pid", pid)
+                d.setdefault("started_at", started_at)
+                d["finished_at"] = time.time()
+                d["exit_hint"] = "reaped-by-kill-on-dead-pid"
+                pf.write_text(
+                    json.dumps(d, indent=2), encoding="utf-8",
+                )
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            pass
+        try:
+            _tasks.update_task(
+                task_id, pid=None, started_at=started_at,
+                finished_at=time.time(),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from . import state_reader as _sr
+            _sr.append_timeline_event(
+                _paths.task_dir(task_id), "kill_reaped_dead_pid",
+                {"task_id": task_id, "dead_pid": pid,
+                 "started_at": started_at},
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def _kill_subagents(
         self, task_id: str, sig: int, force: bool = False,

@@ -61,6 +61,21 @@ def _scan_task(task_id: str) -> Dict[str, float]:
                 out[f"iterations/{p.name}"] = p.stat().st_mtime
             except OSError:
                 pass
+    # calc-theoretical-value streaming artifacts. S0's rough_results.json
+    # and S3's cells/_state.json are written every time a cell completes,
+    # so the audit panel can refresh incrementally.
+    rough = state_dir / "step0" / "rough_results.json"
+    if rough.exists():
+        try:
+            out["step0/rough_results.json"] = rough.stat().st_mtime
+        except OSError:
+            pass
+    cell_state = state_dir / "step3" / "cells" / "_state.json"
+    if cell_state.exists():
+        try:
+            out["step3/cells/_state.json"] = cell_state.stat().st_mtime
+        except OSError:
+            pass
     return out
 
 

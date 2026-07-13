@@ -729,9 +729,14 @@ def load_calc_module(script_path: Path, module_name: str = "_calc"):
     Each Step 3 calc.py must expose a top-level function::
 
         def calc(batch_size: int, seq_len: int) -> dict:
-            return {"tflops": <float>, "access_gb": <float>}
+            return {
+                "prefill": {"tflops": <float>, "access_gb": <float>},
+                "decode":  {"tflops": <float>, "access_gb": <float>},
+            }
 
-    or a 2-tuple ``(tflops, access_gb)``.
+    Legacy shape ``{"tflops": ..., "access_gb": ...}`` (no phase split)
+    is accepted as a backward-compatibility fallback — it is treated as
+    prefill-only with decode zeroed out.
 
     Raises ImportError if the module can't be loaded or doesn't expose
     ``calc``.
@@ -747,33 +752,72 @@ def load_calc_module(script_path: Path, module_name: str = "_calc"):
     return mod
 
 
-def call_calc(mod, batch_size: int, seq_len: int) -> Tuple[float, float]:
-    """Call calc() and normalize the return shape to (tflops, access_gb)."""
+# Sentinel used for backward-compat with old-shape calc.py — decode fields
+# are zeroed when an old-shape script is detected, so the rest of the
+# pipeline still has a consistent 4-field shape to work with.
+_ZERO_PHASE: Dict[str, float] = {"tflops": 0.0, "access_gb": 0.0}
+
+
+def _coerce_phase(d: Any) -> Dict[str, float]:
+    """Normalize one phase sub-dict to {tflops: float, access_gb: float}."""
+    if not isinstance(d, dict):
+        raise ValueError(f"phase value must be dict, got {type(d).__name__}")
+    tflops = float(d.get("tflops", 0.0))
+    gb = float(d.get("access_gb", d.get("gb", 0.0)))
+    if not (math.isfinite(tflops) and math.isfinite(gb)):
+        raise ValueError(f"non-finite phase result: tflops={tflops}, gb={gb}")
+    return {"tflops": tflops, "access_gb": gb}
+
+
+def call_calc(mod, batch_size: int, seq_len: int) -> Dict[str, Dict[str, float]]:
+    """Call calc() and normalize the return shape.
+
+    Returns ``{"prefill": {tflops, access_gb}, "decode": {tflops, access_gb}}``.
+
+    Backward-compat: if calc returns the legacy shape
+    ``{"tflops": ..., "access_gb": ...}`` (or a 2-tuple), it's treated as
+    prefill-only and decode is zeroed.
+    """
     out = mod.calc(batch_size=batch_size, seq_len=seq_len)
     if isinstance(out, dict):
-        tflops = float(out.get("tflops", 0.0))
-        gb = float(out.get("access_gb", out.get("gb", 0.0)))
+        if "prefill" in out or "decode" in out:
+            prefill = _coerce_phase(out.get("prefill") or _ZERO_PHASE)
+            decode = _coerce_phase(out.get("decode") or _ZERO_PHASE)
+        else:
+            # Legacy shape — treat as prefill-only.
+            prefill = _coerce_phase(out)
+            decode = dict(_ZERO_PHASE)
     else:
+        # Legacy 2-tuple shape.
         tflops, gb = float(out[0]), float(out[1])
-    if not (math.isfinite(tflops) and math.isfinite(gb)):
-        raise ValueError(f"non-finite result for b={batch_size}, s={seq_len}: "
-                         f"tflops={tflops}, gb={gb}")
-    return tflops, gb
+        if not (math.isfinite(tflops) and math.isfinite(gb)):
+            raise ValueError(f"non-finite result for b={batch_size}, s={seq_len}")
+        prefill = {"tflops": tflops, "access_gb": gb}
+        decode = dict(_ZERO_PHASE)
+    return {"prefill": prefill, "decode": decode}
 
 
 def run_calc_on_grid(script_path: Path) -> List[Dict[str, Any]]:
     """Load script_path and run its calc() on the full 42-combo grid.
 
-    Returns a list of ``{batch_size, seq_len, tflops, access_gb}`` records.
-    Raises if the script raises.
+    Returns a list of records::
+
+        {"batch_size": int, "seq_len": int,
+         "prefill": {"tflops": float, "access_gb": float},
+         "decode":  {"tflops": float, "access_gb": float}}
+
+    Legacy scripts (old shape) produce decode = {0, 0} for every combo.
     """
     mod = load_calc_module(script_path, module_name=f"_calc_{script_path.stem}")
     out: List[Dict[str, Any]] = []
     for b in BATCH_SIZES:
         for s in SEQ_LENS:
-            tflops, gb = call_calc(mod, b, s)
-            out.append({"batch_size": b, "seq_len": s,
-                        "tflops": tflops, "access_gb": gb})
+            phases = call_calc(mod, b, s)
+            out.append({
+                "batch_size": b, "seq_len": s,
+                "prefill": phases["prefill"],
+                "decode":  phases["decode"],
+            })
     return out
 
 
@@ -786,16 +830,21 @@ def compare_calc_grids(
 ) -> Dict[str, Any]:
     """Compare N (typically 3) agents' grid outputs combo-by-combo.
 
+    Checks four quantities per combo: ``prefill.tflops``, ``prefill.access_gb``,
+    ``decode.tflops``, ``decode.access_gb``. Any one exceeding tolerance
+    records a mismatch entry.
+
     Returns::
 
         {
-          "ok": bool,            # True iff all 42 combos agree
+          "ok": bool,
           "mismatches": [
             {"batch_size": ..., "seq_len": ...,
-             "values": [{"tflops":..., "access_gb":...}, ...],
-             "spread": {"tflops": <max-min>, "access_gb": <max-min>}}
+             "values": [{"prefill": {...}, "decode": {...}}, ...],
+             "spread": {"prefill": {"tflops": ..., "access_gb": ...},
+                        "decode":  {"tflops": ..., "access_gb": ...}}}
           ],
-          "rounds": <int>,       # informational: how many grids compared
+          "rounds": <int>,
         }
     """
     n = len(grids)
@@ -816,21 +865,50 @@ def compare_calc_grids(
             if r["batch_size"] != b or r["seq_len"] != s:
                 return {"ok": False, "mismatches": mismatches, "rounds": n,
                         "error": f"grid row {idx} combo mismatch"}
-        tflops = [r["tflops"] for r in records]
-        gbs = [r["access_gb"] for r in records]
-        # Agreement check: max-min within tolerance.
-        t_spread = max(tflops) - min(tflops)
-        g_spread = max(gbs) - min(gbs)
-        t_ref = max(abs(x) for x in tflops)
-        g_ref = max(abs(x) for x in gbs)
-        t_ok = t_spread <= max(abs_tol_flops, rel_tol * t_ref)
-        g_ok = g_spread <= max(abs_tol_bytes, rel_tol * g_ref)
-        if not (t_ok and g_ok):
+        # Each record now carries {prefill: {tflops, access_gb}, decode: {...}}.
+        # Backward-compat: if a record still has the old top-level shape
+        # (legacy calc.py output), normalize it on the fly.
+        def _split(rec: Dict[str, Any]) -> Tuple[Dict[str, float], Dict[str, float]]:
+            if "prefill" in rec or "decode" in rec:
+                pre = rec.get("prefill") or _ZERO_PHASE
+                dec = rec.get("decode") or _ZERO_PHASE
+                return (_coerce_phase(pre), _coerce_phase(dec))
+            return (_coerce_phase(rec), dict(_ZERO_PHASE))
+
+        split = [_split(r) for r in records]
+        pre = [sp[0] for sp in split]
+        dec = [sp[1] for sp in split]
+        pre_t = [p["tflops"] for p in pre]
+        pre_g = [p["access_gb"] for p in pre]
+        dec_t = [d["tflops"] for d in dec]
+        dec_g = [d["access_gb"] for d in dec]
+
+        def _check(vals: List[float], abs_tol: float) -> Tuple[bool, float, float]:
+            spread = max(vals) - min(vals)
+            ref = max(abs(x) for x in vals)
+            ok = spread <= max(abs_tol, rel_tol * ref)
+            return ok, spread, ref
+
+        pre_t_ok, pre_t_spread, _ = _check(pre_t, abs_tol_flops)
+        pre_g_ok, pre_g_spread, _ = _check(pre_g, abs_tol_bytes)
+        dec_t_ok, dec_t_spread, _ = _check(dec_t, abs_tol_flops)
+        dec_g_ok, dec_g_spread, _ = _check(dec_g, abs_tol_bytes)
+        if not (pre_t_ok and pre_g_ok and dec_t_ok and dec_g_ok):
             mismatches.append({
                 "batch_size": b,
                 "seq_len": s,
-                "values": [{"tflops": t, "access_gb": g} for t, g in zip(tflops, gbs)],
-                "spread": {"tflops": t_spread, "access_gb": g_spread},
+                "values": [
+                    {"prefill": {"tflops": pt, "access_gb": pg},
+                     "decode":  {"tflops": dt, "access_gb": dg}}
+                    for (pt, pg), (dt, dg) in zip(
+                        ((p["tflops"], p["access_gb"]) for p in pre),
+                        ((d["tflops"], d["access_gb"]) for d in dec),
+                    )
+                ],
+                "spread": {
+                    "prefill": {"tflops": pre_t_spread, "access_gb": pre_g_spread},
+                    "decode":  {"tflops": dec_t_spread, "access_gb": dec_g_spread},
+                },
             })
     return {"ok": not mismatches, "mismatches": mismatches, "rounds": n}
 
@@ -838,24 +916,35 @@ def compare_calc_grids(
 def median_fallback(
     grids: List[List[Dict[str, Any]]],
 ) -> List[Dict[str, Any]]:
-    """For each combo, take the median of (tflops, access_gb) across N agents.
+    """For each combo, take the median of prefill/decode tflops+gb across N agents.
 
-    Used when 15 rounds of disagreement fail. Each row of the returned
-    grid is annotated with ``source: "median_fallback"``.
+    Used when 5 rounds of disagreement fail. Each row of the returned
+    grid is annotated with ``source: "median_fallback"`` and includes
+    both phase sub-dicts.
     """
     if not grids:
         return []
     out: List[Dict[str, Any]] = []
     for idx in range(len(grids[0])):
         records = [g[idx] for g in grids]
-        tflops = sorted(r["tflops"] for r in records)
-        gbs = sorted(r["access_gb"] for r in records)
-        mid = len(tflops) // 2
+        # Same normalize as compare_calc_grids — supports legacy shape.
+        def _split(rec: Dict[str, Any]) -> Tuple[Dict[str, float], Dict[str, float]]:
+            if "prefill" in rec or "decode" in rec:
+                return (_coerce_phase(rec.get("prefill") or _ZERO_PHASE),
+                        _coerce_phase(rec.get("decode") or _ZERO_PHASE))
+            return (_coerce_phase(rec), dict(_ZERO_PHASE))
+
+        split = [_split(r) for r in records]
+        mid = len(records) // 2
+        pre_t = sorted(s[0]["tflops"] for s in split)[mid]
+        pre_g = sorted(s[0]["access_gb"] for s in split)[mid]
+        dec_t = sorted(s[1]["tflops"] for s in split)[mid]
+        dec_g = sorted(s[1]["access_gb"] for s in split)[mid]
         out.append({
             "batch_size": records[0]["batch_size"],
             "seq_len": records[0]["seq_len"],
-            "tflops": tflops[mid],
-            "access_gb": gbs[mid],
+            "prefill": {"tflops": pre_t, "access_gb": pre_g},
+            "decode":  {"tflops": dec_t, "access_gb": dec_g},
             "source": "median_fallback",
         })
     return out
@@ -867,14 +956,32 @@ def median_fallback(
 
 def format_mismatches_for_prompt(mismatches: List[Dict[str, Any]],
                                  max_rows: int = 30) -> str:
-    """Render mismatches as a readable text block for the next round's prompt."""
+    """Render mismatches as a readable text block for the next round's prompt.
+
+    Handles both the new prefill/decode shape and the legacy
+    ``{"tflops", "access_gb"}`` value shape (defensive — newer code
+    always emits prefill/decode).
+    """
     if not mismatches:
         return "All combos agreed."
     lines = [f"Total mismatches: {len(mismatches)} (showing first {max_rows})"]
     for m in mismatches[:max_rows]:
+        cells = []
+        for i, v in enumerate(m["values"]):
+            if "prefill" in v or "decode" in v:
+                pre = v.get("prefill") or {}
+                dec = v.get("decode") or {}
+                cells.append(
+                    f"a{i}=(pre.t={pre.get('tflops', 0):.4g}, "
+                    f"pre.gb={pre.get('access_gb', 0):.4g}, "
+                    f"dec.t={dec.get('tflops', 0):.4g}, "
+                    f"dec.gb={dec.get('access_gb', 0):.4g})"
+                )
+            else:
+                cells.append(f"a{i}=(t={v.get('tflops', 0):.4g}, "
+                             f"gb={v.get('access_gb', 0):.4g})")
         lines.append(
             f"  batch={m['batch_size']:<5d} seq={m['seq_len']:<6d}  "
-            + "  ".join(f"a{i}=(t={v['tflops']:.4g}, gb={v['access_gb']:.4g})"
-                        for i, v in enumerate(m["values"]))
+            + "  ".join(cells)
         )
     return "\n".join(lines)

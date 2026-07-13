@@ -11,7 +11,6 @@ import {
   listTasks, getTask,
 } from "app/api";
 import { TaskDetailView } from "app/task-detail";
-import { CalcVizView } from "app/calc-viz";
 import { NewTaskView } from "app/new-task";
 import { labelFor } from "app/utils";
 
@@ -147,17 +146,12 @@ function App() {
       onNewTask=${() => setShowNewTask(true)}
       onRefresh=${refreshList}>
       ${active
-        ? (cached?.run?.task_type === "calc-theoretical-value"
-          ? html`<${CalcVizView}
-              taskId=${active.id}
-              run=${cached?.run}
-              status=${active.status} />`
-          : html`<${TaskDetailView}
-              taskId=${active.id}
-              run=${cached?.run}
-              status=${active.status}
-              onChange=${refreshTick}
-              onOpenRetro=${() => {}} />`)
+        ? html`<${TaskDetailView}
+            taskId=${active.id}
+            run=${cached?.run}
+            status=${active.status}
+            onChange=${refreshTick}
+            onOpenRetro=${() => {}} />`
         : html`<${EmptyState} onNewTask=${() => setShowNewTask(true)} />`}
     </${Shell}>
 

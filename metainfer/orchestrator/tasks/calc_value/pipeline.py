@@ -1,10 +1,13 @@
-"""Pipeline driver: S1 → S2 → S3 → S4.
+"""Pipeline driver: S0 → S1 → S2 → S3 → S4.
 
 Each step runs in an infinite retry loop — the system never enters a
 Fail state. If a step raises, the error is logged to the timeline and
 the step is retried after a short backoff. The only legitimate exit is
-success (all four steps complete → ``final_status="success"``) or an
+success (all five steps complete → ``final_status="success"``) or an
 external signal (handled in ``orchestrator.py`` → ``final_status="aborted"``).
+
+S0 (rough) is wrapped in an extra try/except: a fatal S0 failure does
+NOT abort the pipeline because S1/S2/S3 don't depend on its output.
 """
 
 from __future__ import annotations
@@ -88,10 +91,32 @@ def run_pipeline(
 
     # Local imports so that adding stepN_*.py modules doesn't require
     # touching this file's imports if a step is mid-refactor.
+    from .step0_rough import run_step0_rough
     from .step1_analyze import run_step1_analyze
     from .step2_graph import run_step2_graph
     from .step3_calculate import run_step3_calculate
     from .step4_visualize import run_step4_visualize
+
+    # ---------------- S0: rough single-pass estimate ---------------- #
+    # Runs FIRST so the WebUI has something to show within minutes.
+    # Failures here are non-fatal — write empty results and move on;
+    # the detailed audit (S3) will produce the authoritative numbers.
+    try:
+        rough_path = _run_step_with_retry(
+            step_name="S0", phase=_phases.S0_ROUGH,
+            store=store, manager=manager, paths=paths, req=req,
+            runner=run_step0_rough,
+            set_phase_label="rough single-pass estimate",
+        )
+        store.append_timeline("calc_value.s0.done",
+                              {"rough": str(rough_path)})
+    except Exception as exc:  # noqa: BLE001
+        # Even the retry loop gave up. Log + keep going — S1/S2/S3 don't
+        # depend on S0's output.
+        store.append_timeline(
+            "calc_value.s0.fatal",
+            {"error": f"{type(exc).__name__}: {exc}"},
+        )
 
     # ---------------- S1: analyze code ---------------- #
     memory_path = _run_step_with_retry(

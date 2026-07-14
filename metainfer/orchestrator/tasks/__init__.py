@@ -81,6 +81,7 @@ def all_cli_modules() -> List[str]:
 
 from . import gen_infer_framework as _gen_infer_framework  # noqa: F401,E402
 from . import calc_value as _calc_value  # noqa: F401,E402
+from . import fusedmoe_evolve as _fusedmoe_evolve  # noqa: F401,E402
 
 
 __all__ = [

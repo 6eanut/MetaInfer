@@ -33,6 +33,7 @@ TASK_TYPES = (
     "opt-kernel",
     "port-model",
     "calc-theoretical-value",
+    "fusedmoe-evolve",
 )
 
 

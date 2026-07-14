@@ -83,6 +83,13 @@ TASK_TYPE_META: Dict[str, Dict[str, str]] = {
             "pass, with per-node breakdown and an interactive visualization."
         ),
     },
+    "fusedmoe-evolve": {
+        "label": "Evolve FusedMoE Kernel",
+        "description": (
+            "Use OpenEvolve to iteratively optimize SGLang's Triton FusedMoE "
+            "kernel for target hardware (H100/A100/RTX 4090/MI300)."
+        ),
+    },
 }
 
 

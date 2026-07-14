@@ -1,0 +1,128 @@
+# Question bank for the `fusedmoe-evolve` task type.
+# Invoked as `/metainfer fusedmoe-evolve`.
+
+- key: target_kernel_source
+  question: "Where is the SGLang source tree containing the fused MoE kernel?"
+  header: "Kernel src"
+  required: true
+  default: "/home/jiakai/0716-fusedmoe-sglang/sglang-v0.5.10_dpsk_v4"
+
+- key: target_kernel_file
+  question: "Which file contains the MoE kernel? (relative to kernel source root)"
+  header: "Kernel file"
+  required: true
+  default: "python/sglang/srt/layers/moe/fused_moe_triton/fused_moe_triton_kernels.py"
+
+- key: target_kernel_func
+  question: "Which function/line is the optimization target?"
+  header: "Target func"
+  required: true
+  default: "fused_moe_kernel (line 339)"
+
+- key: openevolve_path
+  question: "Path to the openevolve installation directory?"
+  header: "OE path"
+  required: true
+  default: "/home/jiakai/0716-fusedmoe-sglang/openevolve"
+
+- key: llm_api_base
+  question: "LLM API base URL for OpenEvolve?"
+  header: "LLM API"
+  required: true
+  default: "https://api.openai.com/v1"
+
+- key: llm_model
+  question: "LLM model name for OpenEvolve?"
+  header: "LLM model"
+  required: true
+  default: "gpt-4o"
+
+- key: target_hardware
+  question: "Target GPU hardware?"
+  header: "Hardware"
+  required: true
+  multi: false
+  options:
+    - label: "H100 (SM 90)"
+      description: "TMA, wgmma, fp8"
+    - label: "A100 (SM 80)"
+      description: "Ampere, async cp"
+    - label: "H20 (SM 90)"
+      description: "Hopper, swap_ab verified"
+    - label: "RTX 4090 (SM 89)"
+      description: "Consumer Ada"
+    - label: "MI300 (CDNA3)"
+      description: "AMD ROCm"
+
+- key: dtype
+  question: "Primary compute/data dtype to optimize for?"
+  header: "Dtype"
+  required: true
+  multi: false
+  default: "bf16"
+  options:
+    - label: "bf16"
+      description: "bfloat16, no quantization"
+    - label: "fp8 (e4m3)"
+      description: "W8A8 block-wise or channel-wise"
+    - label: "int8"
+      description: "W8A8 or W8A16"
+
+- key: model_config
+  question: "MoE model configuration?"
+  header: "Model config"
+  required: true
+  default: "deepseek"
+  options:
+    - label: "DeepSeek V2/V3 typical"
+      description: "E=256, N=2048, K=5120, top_k=8"
+    - label: "Mixtral 8x7B"
+      description: "E=8, N=4096, K=4096, top_k=2"
+    - label: "Qwen2-MoE"
+      description: "E=64, N=2048, K=2048, top_k=8"
+    - label: "Custom"
+      description: "Specify in notes"
+
+- key: openevolve_iterations
+  question: "How many internal openevolve generations per MetaInfer iteration?"
+  header: "OE iters"
+  required: false
+  default: "50"
+  options:
+    - label: "25"
+      description: "Quick exploration"
+    - label: "50"
+      description: "Balanced (recommended)"
+    - label: "100"
+      description: "Deep search"
+
+- key: max_iterations
+  question: "Max MetaInfer orchestrator iterations?"
+  header: "Max iters"
+  required: false
+  multi: false
+  default: "10"
+  options:
+    - label: "5"
+      description: "Quick prototype"
+    - label: "10"
+      description: "Balanced (recommended)"
+    - label: "20"
+      description: "Deep tuning"
+
+- key: correctness_ref
+  question: "Correctness reference for kernel validation?"
+  header: "Reference"
+  required: false
+  multi: false
+  default: "pytorch eager"
+  options:
+    - label: "PyTorch eager"
+      description: "torch.einsum + topk routing"
+    - label: "SGLang original"
+      description: "Compare against unmodified fused_moe_kernel"
+
+- key: extra_notes
+  question: "Extra constraints or notes?"
+  header: "Notes"
+  required: false

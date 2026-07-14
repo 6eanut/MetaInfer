@@ -1,0 +1,68 @@
+# MoE test cases for fusedmoe-evolve C_validate
+cases:
+  - id: "small_bf16"
+    M: 128
+    N: 2048
+    K: 5120
+    E: 8
+    top_k: 2
+    dtype: "bfloat16"
+
+  - id: "medium_bf16"
+    M: 1024
+    N: 2048
+    K: 5120
+    E: 64
+    top_k: 8
+    dtype: "bfloat16"
+
+  - id: "large_bf16"
+    M: 4096
+    N: 2048
+    K: 5120
+    E: 256
+    top_k: 8
+    dtype: "bfloat16"
+
+  - id: "small_fp8"
+    M: 128
+    N: 2048
+    K: 5120
+    E: 8
+    top_k: 2
+    dtype: "float8_e4m3fn"
+
+  - id: "medium_fp8"
+    M: 1024
+    N: 2048
+    K: 5120
+    E: 64
+    top_k: 8
+    dtype: "float8_e4m3fn"
+
+  - id: "odd_K"
+    M: 256
+    N: 2048
+    K: 5121  # Non-aligned K (important for even_Ks path)
+    E: 8
+    top_k: 2
+    dtype: "bfloat16"
+
+  - id: "odd_M"
+    M: 257  # Non-aligned M
+    N: 2048
+    K: 5120
+    E: 8
+    top_k: 2
+    dtype: "bfloat16"
+
+tolerances:
+  bfloat16:
+    rtol: 0.02
+    atol: 0.01
+  float8_e4m3fn:
+    rtol: 0.05
+    atol: 0.05
+  int8:
+    rtol: 0.05
+    atol: 0.05

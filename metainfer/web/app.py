@@ -18,10 +18,10 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import StreamingResponse
 
@@ -32,44 +32,40 @@ from . import reconcile as _reconcile
 from . import sse as _sse
 from . import state_reader as _sr
 from . import tasks as _tasks
+from ._helpers import (
+    state_dir_for as _state_dir_for,
+    task_or_404 as _task_or_404,
+)
+from .registry import WebDeps as _WebDeps
+from .registry import all_plugins as _all_web_plugins
+from .registry import get as _get_web_plugin
+from .. import tasks as _task_packages  # noqa: F401 — side-effect: register all task plugins (orchestrator + web)
+from ..orchestrator.paths import repo_root as _repo_root
 
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
-def _task_or_404(task_id: str):
-    entry = _tasks.get_task(task_id)
-    if entry is None:
-        raise HTTPException(404, f"no such task: {task_id}")
-    return entry
+# Backward-compat aliases — keep the historical names that the rest of
+# app.py uses inline. Both point at the same callable as the extracted
+# helpers, so behavior is unchanged.
 
 
-def _state_dir_for(entry) -> Path:
-    return Path(entry.state_dir)
+def _plugin_view_hint(task_type: str) -> Dict[str, Any]:
+    """Return the frontend detail-view hint fields for a task type.
 
-
-def _find_events_file(log_dir: Path) -> Optional[Path]:
-    """Locate the events.jsonl produced by SubAgentManager for an agent
-    whose log_dir is ``log_dir``. Returns the highest-attempt file if
-    several attempts exist (the last attempt is the one that produced
-    the final result). Returns None if the dir is missing or empty.
+    Plugins set ``detail_view_module`` (an importmap key) on their
+    WebPlugin; the frontend uses it to dynamically dispatch the task
+    detail view. Returns an empty dict when no plugin is registered for
+    this task type (the frontend then renders its default view).
     """
-    if not log_dir.is_dir():
-        return None
-    candidates = sorted(log_dir.glob("*.events.jsonl"))
-    if not candidates:
-        return None
-    # Prefer the highest attempt number; fall back to the last lexically.
-    def _attempt(p: Path) -> int:
-        # filenames look like "<name>.attempt<N>.events.jsonl"
-        for part in p.stem.split("."):
-            if part.startswith("attempt"):
-                try:
-                    return int(part[len("attempt"):])
-                except ValueError:
-                    pass
-        return -1
-    return max(candidates, key=_attempt)
+    plugin = _get_web_plugin(task_type)
+    if plugin is None or not plugin.detail_view_module:
+        return {}
+    return {
+        "detail_view_module": plugin.detail_view_module,
+        "detail_view_export": plugin.detail_view_export,
+    }
 
 
 def create_app() -> FastAPI:
@@ -113,6 +109,7 @@ def create_app() -> FastAPI:
                 "state_dir": e.state_dir, "created_at": e.created_at,
                 "launcher": e.launcher,
                 "status": status,
+                **_plugin_view_hint(e.type),
             })
         return {"tasks": out}
 
@@ -128,6 +125,7 @@ def create_app() -> FastAPI:
             "status": launcher.status(task_id).to_dict(),
             "requirements": _sr.read_requirements(sd),
             "run": _sr.read_run(sd),
+            **_plugin_view_hint(entry.type),
         }
 
     @app.get("/api/tasks/{task_id}/run")
@@ -471,768 +469,20 @@ def create_app() -> FastAPI:
         }
 
     # ------------------------------------------------------------------ #
-    # Calc-theoretical-value endpoints
+    # Plugin routes (per task type)
     # ------------------------------------------------------------------ #
-    # These three endpoints only apply to tasks of type
-    # calc-theoretical-value. They read the artifacts produced by the
-    # calc_value orchestrator's 4-step pipeline:
-    #   * step2/graph.json  (graph)
-    #   * step3/final/*.py  (per-node calc scripts)
-    #   * step4/viz.html    (HTML visualization)
-    # The /compute endpoint imports each per-node calc.py and runs it
-    # deterministically — never trusts an LLM for numeric computation.
-
-    @app.get("/api/tasks/{task_id}/calc/graph")
-    def calc_graph(task_id: str) -> Dict[str, Any]:
-        entry = _task_or_404(task_id)
-        if entry.type != "calc-theoretical-value":
-            raise HTTPException(409, "task is not a calc-theoretical-value task")
-        sd = _state_dir_for(entry)
-        graph_path = sd / "step2" / "graph.json"
-        if not graph_path.exists():
-            raise HTTPException(404, "graph.json not built yet")
-        return json.loads(graph_path.read_text(encoding="utf-8"))
-
-    @app.get("/api/tasks/{task_id}/calc/compute")
-    def calc_compute(task_id: str, batch_size: int = 1, seq_len: int = 1) -> Dict[str, Any]:
-        """Run every per-compound calc.py at the given shape and return
-        per-instance numbers keyed by compound_id, split into prefill and
-        decode phases. Totals are aggregated as
-        ``Σ per_compound.{phase} * section.repeat_count``.
-
-        Deterministic — no LLM in the loop. ``compound_id`` is the
-        section-prefixed filename stem (``<section_id>__<node_id>``),
-        matching what step3 writes; ``per_compound`` values are
-        per-instance (one layer), so the frontend multiplies by
-        ``section.repeat_count`` for display and we do the same here for
-        the totals.
-        """
-        entry = _task_or_404(task_id)
-        if entry.type != "calc-theoretical-value":
-            raise HTTPException(409, "task is not a calc-theoretical-value task")
-        if batch_size <= 0 or seq_len <= 0:
-            raise HTTPException(400, "batch_size and seq_len must be positive")
-        sd = _state_dir_for(entry)
-        final_dir = sd / "step3" / "final"
-        if not final_dir.exists():
-            raise HTTPException(404, "calc scripts not built yet")
-        # Import the calc_value deterministic helpers lazily so the
-        # WebUI doesn't pay the import cost for non-calc tasks.
-        from ..orchestrator.tasks.calc_value import deterministic as _det
-        per_compound: Dict[str, Dict[str, Any]] = {}
-        per_compound_meta: Dict[str, Dict[str, Any]] = {}
-        total_pre_tflops = 0.0
-        total_pre_gb = 0.0
-        total_dec_tflops = 0.0
-        total_dec_gb = 0.0
-        errors: Dict[str, str] = {}
-        # Walk *.py scripts; resolve each script's repeat_count from its
-        # sibling .meta.json (defaults to 1 if meta missing or unset).
-        for script in sorted(final_dir.glob("*.py")):
-            compound_id = script.stem
-            meta_path = final_dir / f"{compound_id}.meta.json"
-            repeat = 1
-            section_id: Optional[str] = None
-            section_kind: Optional[str] = None
-            if meta_path.exists():
-                try:
-                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                    repeat = int(meta.get("section_repeat_count") or 1)
-                    section_id = meta.get("section_id")
-                    section_kind = meta.get("section_kind")
-                    per_compound_meta[compound_id] = {
-                        "section_id": section_id,
-                        "section_kind": section_kind,
-                        "repeat_count": repeat,
-                        "node_id": meta.get("node_id"),
-                    }
-                except (ValueError, OSError):
-                    pass
-            try:
-                mod = _det.load_calc_module(
-                    script, module_name=f"_calc_web_{compound_id}",
-                )
-                phases = _det.call_calc(mod, batch_size, seq_len)
-                pre = phases["prefill"]
-                dec = phases["decode"]
-                per_compound[compound_id] = {
-                    "prefill": pre,
-                    "decode": dec,
-                    # Legacy aliases (prefill-derived) for older consumers.
-                    "tflops": pre["tflops"],
-                    "access_gb": pre["access_gb"],
-                }
-                total_pre_tflops += pre["tflops"] * repeat
-                total_pre_gb += pre["access_gb"] * repeat
-                total_dec_tflops += dec["tflops"] * repeat
-                total_dec_gb += dec["access_gb"] * repeat
-            except Exception as exc:  # noqa: BLE001
-                errors[compound_id] = f"{type(exc).__name__}: {exc}"
-                per_compound[compound_id] = {
-                    "prefill": {"tflops": 0.0, "access_gb": 0.0},
-                    "decode":  {"tflops": 0.0, "access_gb": 0.0},
-                    "tflops": 0.0, "access_gb": 0.0,
-                }
-        # approximate_compounds: read flags from each meta file.
-        approximate_compounds: List[str] = []
-        for compound_id, meta in per_compound_meta.items():
-            # Re-read approximate flag (we only kept a subset above).
-            mp = final_dir / f"{compound_id}.meta.json"
-            try:
-                full = json.loads(mp.read_text(encoding="utf-8"))
-                if full.get("approximate"):
-                    approximate_compounds.append(compound_id)
-            except (ValueError, OSError):
-                pass
-        pre_ai = (total_pre_tflops / total_pre_gb) if total_pre_gb > 0 else 0.0
-        dec_ai = (total_dec_tflops / total_dec_gb) if total_dec_gb > 0 else 0.0
-        return {
-            "batch_size": batch_size,
-            "seq_len": seq_len,
-            "per_compound": per_compound,
-            # Legacy alias for older frontends; same data as per_compound.
-            "per_node": per_compound,
-            "compound_meta": per_compound_meta,
-            "totals": {
-                "prefill": {
-                    "tflops": total_pre_tflops,
-                    "access_gb": total_pre_gb,
-                    "arithmetic_intensity": pre_ai,
-                },
-                "decode": {
-                    "tflops": total_dec_tflops,
-                    "access_gb": total_dec_gb,
-                    "arithmetic_intensity": dec_ai,
-                },
-                # Legacy aliases (prefill-derived).
-                "tflops": total_pre_tflops,
-                "access_gb": total_pre_gb,
-                "arithmetic_intensity": pre_ai,
-            },
-            "approximate_compounds": approximate_compounds,
-            "approximate_nodes": approximate_compounds,
-            "errors": errors,
-        }
-
-    @app.get("/api/tasks/{task_id}/calc/viz")
-    def calc_viz(task_id: str) -> HTMLResponse:
-        """Serve the generated HTML visualization. Inline (no iframe
-        sandbox needed) since the WebUI already trusts its own output
-        and the HTML is generated locally by an LLM agent."""
-        entry = _task_or_404(task_id)
-        if entry.type != "calc-theoretical-value":
-            raise HTTPException(409, "task is not a calc-theoretical-value task")
-        sd = _state_dir_for(entry)
-        viz_path = sd / "step4" / "viz.html"
-        if not viz_path.exists():
-            raise HTTPException(404, "viz.html not built yet")
-        return HTMLResponse(viz_path.read_text(encoding="utf-8"))
-
-    @app.get("/api/tasks/{task_id}/calc/summary")
-    def calc_summary(task_id: str) -> Dict[str, Any]:
-        """Step-by-step pipeline progress for the calc-value task."""
-        entry = _task_or_404(task_id)
-        if entry.type != "calc-theoretical-value":
-            raise HTTPException(409, "task is not a calc-theoretical-value task")
-        sd = _state_dir_for(entry)
-        out: Dict[str, Any] = {"steps": {}}
-        # Step 1
-        s1 = sd / "step1" / "memory.json"
-        out["steps"]["s1_analyze"] = {
-            "done": s1.exists(),
-            "memory_path": str(s1) if s1.exists() else None,
-        }
-        # Step 2
-        s2 = sd / "step2" / "graph.json"
-        graph_node_count = 0          # template nodes (per-section)
-        aggregated_node_count = 0     # × repeat_count
-        section_count = 0
-        sections_summary: List[Dict[str, Any]] = []
-        if s2.exists():
-            try:
-                from ..orchestrator.tasks.calc_value import deterministic as _det
-                g = _det.normalize_graph(json.loads(s2.read_text(encoding="utf-8")))
-                graph_node_count = _det.section_node_count(g)
-                aggregated_node_count = _det.aggregated_node_count(g)
-                section_count = len(g.get("sections") or [])
-                for sec in g.get("sections") or []:
-                    if not isinstance(sec, dict):
-                        continue
-                    rc = (sec.get("repeat_count") if sec.get("kind") == "layer_template"
-                          else 1)
-                    sections_summary.append({
-                        "id": sec.get("id"),
-                        "kind": sec.get("kind"),
-                        "repeat_count": rc,
-                        "node_count": len(((sec.get("graph") or {}).get("nodes")) or []),
-                        "edge_count": len(((sec.get("graph") or {}).get("edges")) or []),
-                    })
-            except ValueError:
-                pass
-        out["steps"]["s2_graph"] = {
-            "done": s2.exists(),
-            "graph_path": str(s2) if s2.exists() else None,
-            "node_count": graph_node_count,
-            "aggregated_node_count": aggregated_node_count,
-            "section_count": section_count,
-            "sections": sections_summary,
-        }
-        # Step 3
-        final_dir = sd / "step3" / "final"
-        calc_scripts = list(final_dir.glob("*.py")) if final_dir.exists() else []
-        out["steps"]["s3_calculate"] = {
-            "done": len(calc_scripts) > 0,
-            "final_dir": str(final_dir),
-            "node_count": len(calc_scripts),
-        }
-        # Step 4
-        s4 = sd / "step4" / "viz.html"
-        out["steps"]["s4_visualize"] = {
-            "done": s4.exists(),
-            "viz_path": str(s4) if s4.exists() else None,
-        }
-        return out
-
-    @app.get("/api/tasks/{task_id}/calc/iterations")
-    def calc_iterations(task_id: str) -> Dict[str, Any]:
-        """Per-round, per-agent analysis results for every step.
-
-        Surfaces each agent's individual output (including disagreements)
-        so the user can audit the convergence process, not just the
-        final consensus. Reads artifacts already on disk — no extra
-        writes from the orchestrator side.
-        """
-        entry = _task_or_404(task_id)
-        if entry.type != "calc-theoretical-value":
-            raise HTTPException(409, "task is not a calc-theoretical-value task")
-        sd = _state_dir_for(entry)
-        out: Dict[str, Any] = {"s1_analyze": [], "s2_graph": [], "s3_calculate": []}
-
-        # ---- Step 1: round_NN/agent_X/memory.json ----
-        s1 = sd / "step1"
-        if s1.exists():
-            rounds = sorted(d for d in s1.iterdir() if d.is_dir()
-                            and d.name.startswith("round_"))
-            for r in rounds:
-                round_idx = int(r.name.split("_")[1])
-                agents = []
-                for a in sorted(x for x in r.iterdir() if x.is_dir()
-                                and x.name.startswith("agent_")):
-                    mem_p = a / "memory.json"
-                    memory = None
-                    if mem_p.exists():
-                        try:
-                            memory = json.loads(mem_p.read_text(encoding="utf-8"))
-                        except ValueError:
-                            memory = None
-                    resp_p = a / "response.txt"
-                    response_excerpt = None
-                    if resp_p.exists():
-                        try:
-                            response_excerpt = resp_p.read_text(encoding="utf-8")[:8000]
-                        except OSError:
-                            response_excerpt = None
-                    err_p = a / "parse_error.txt"
-                    parse_error = err_p.read_text(encoding="utf-8")[:2000] \
-                        if err_p.exists() else None
-                    # Locate events.jsonl + workdir so QA can target this
-                    # agent. The events file lives under round_dir/logs/
-                    # <name>/<name>.attempt0.events.jsonl (see
-                    # subagent_manager.AgentSpec.events_file).
-                    events_file = _find_events_file(r / "logs" / a.name)
-                    agents.append({
-                        "name": a.name,
-                        "has_memory": memory is not None,
-                        "memory": memory,
-                        "response_excerpt": response_excerpt,
-                        "parse_error": parse_error,
-                        "events_file": str(events_file) if events_file else None,
-                        "target_workdir": str(a),
-                    })
-                # Disputes for this round (re-derived from the per-agent
-                # memories by running the deterministic merge again).
-                # Decoupled from the merged-file existence check so the
-                # panel still surfaces disagreements even mid-round.
-                disputes = []
-                agent_mems = [a.get("memory") for a in agents
-                              if a.get("memory")]
-                if len(agent_mems) >= 2:
-                    try:
-                        from ..orchestrator.calc_value import deterministic as _det
-                        _, disp = _det.merge_memories(agent_mems)
-                        disputes = disp
-                    except Exception:  # noqa: BLE001
-                        pass
-                merged_p = s1 / f"memory.round_{round_idx:02d}.json"
-                out["s1_analyze"].append({
-                    "round": round_idx,
-                    "agents": agents,
-                    "disputes": disputes,
-                    "converged": len(disputes) == 0,
-                })
-
-        # ---- Step 2: rounds/<NN>_(validate|fix|build)/ ----
-        s2 = sd / "step2"
-        if s2.exists():
-            rroot = s2 / "rounds"
-            if rroot.exists():
-                # Track the graph.json snapshot per round (if present)
-                # and the verdicts.json for validate rounds.
-                rounds = sorted(rroot.iterdir(), key=lambda p: p.name)
-                for r in rounds:
-                    if not r.is_dir():
-                        continue
-                    label = r.name  # e.g. "00_build", "01_validate", "02_fix"
-                    kind = "build" if "_build" in label else (
-                        "validate" if "_validate" in label else (
-                            "fix" if "_fix" in label else "other"))
-                    entry_rec: Dict[str, Any] = {
-                        "dir": label, "kind": kind,
-                    }
-                    gj = r / "graph.json"
-                    if gj.exists():
-                        try:
-                            from ..orchestrator.tasks.calc_value import deterministic as _det
-                            g = _det.normalize_graph(
-                                json.loads(gj.read_text(encoding="utf-8"))
-                            )
-                            entry_rec["node_count"] = _det.section_node_count(g)
-                            entry_rec["edge_count"] = _det.section_edge_count(g)
-                            entry_rec["aggregated_node_count"] = (
-                                _det.aggregated_node_count(g)
-                            )
-                            entry_rec["section_count"] = (
-                                len(g.get("sections") or [])
-                            )
-                            entry_rec["sections"] = [
-                                {
-                                    "id": sec.get("id"),
-                                    "kind": sec.get("kind"),
-                                    "repeat_count": (
-                                        sec.get("repeat_count")
-                                        if sec.get("kind") == "layer_template"
-                                        else 1
-                                    ),
-                                    "node_count": len(
-                                        ((sec.get("graph") or {}).get("nodes")) or []
-                                    ),
-                                    "edge_count": len(
-                                        ((sec.get("graph") or {}).get("edges")) or []
-                                    ),
-                                }
-                                for sec in (g.get("sections") or [])
-                                if isinstance(sec, dict)
-                            ]
-                        except ValueError:
-                            entry_rec["node_count"] = None
-                    vj = r / "verdicts.json"
-                    if vj.exists():
-                        try:
-                            verdicts = json.loads(vj.read_text(encoding="utf-8"))
-                            entry_rec["verdicts"] = verdicts
-                            entry_rec["pass"] = sum(
-                                1 for v in verdicts
-                                if isinstance(v, dict) and v.get("verdict") == "pass")
-                            entry_rec["reject"] = sum(
-                                1 for v in verdicts
-                                if isinstance(v, dict) and v.get("verdict") == "reject")
-                        except ValueError:
-                            entry_rec["verdicts"] = []
-                    # Per-validator raw responses (one per node).
-                    validators = []
-                    for vdir in sorted(r.iterdir()):
-                        if not vdir.is_dir() or not vdir.name.startswith("validator_"):
-                            continue
-                        resp_p = vdir / "response.txt"
-                        v_ef = _find_events_file(r / "logs" / vdir.name)
-                        validators.append({
-                            "name": vdir.name,
-                            "response_excerpt": (
-                                resp_p.read_text(encoding="utf-8")[:1500]
-                                if resp_p.exists() else None),
-                            "events_file": str(v_ef) if v_ef else None,
-                            "target_workdir": str(vdir),
-                        })
-                    if validators:
-                        entry_rec["validators"] = validators
-                    out["s2_graph"].append(entry_rec)
-
-        # ---- Step 3: rounds/<node>/round_NN/writer_X/ ----
-        s3 = sd / "step3" / "rounds"
-        if s3.exists():
-            nodes = []
-            for ndir in sorted(s3.iterdir()):
-                if not ndir.is_dir():
-                    continue
-                node_rec: Dict[str, Any] = {
-                    "node_id": ndir.name, "rounds": [],
-                    "compound_id": ndir.name,
-                }
-                # Compound id is ``<section_id>__<node_id>`` (sanitized).
-                # Resolve the bare node_id + section context from the
-                # sibling final/<compound>.meta.json if present.
-                meta_p = sd / "step3" / "final" / f"{ndir.name}.meta.json"
-                if meta_p.exists():
-                    try:
-                        m = json.loads(meta_p.read_text(encoding="utf-8"))
-                        node_rec["node_id"] = m.get("node_id") or ndir.name
-                        node_rec["section_id"] = m.get("section_id")
-                        node_rec["section_kind"] = m.get("section_kind")
-                        node_rec["section_repeat_count"] = (
-                            m.get("section_repeat_count")
-                        )
-                    except (ValueError, OSError):
-                        pass
-                for rdir in sorted(ndir.iterdir()):
-                    if not rdir.is_dir() or not rdir.name.startswith("round_"):
-                        continue
-                    round_idx = int(rdir.name.split("_")[1])
-                    writers = []
-                    for wdir in sorted(rdir.iterdir()):
-                        if not wdir.is_dir() or not wdir.name.startswith("writer_"):
-                            continue
-                        calc_p = wdir / "calc.py"
-                        resp_p = wdir / "response.txt"
-                        err_p = wdir / "error.txt"
-                        w_ef = _find_events_file(rdir / "logs" / wdir.name)
-                        writers.append({
-                            "name": wdir.name,
-                            "has_script": calc_p.exists(),
-                            "script_excerpt": (
-                                calc_p.read_text(encoding="utf-8")[:2500]
-                                if calc_p.exists() else None),
-                            "response_excerpt": (
-                                resp_p.read_text(encoding="utf-8")[:1500]
-                                if resp_p.exists() else None),
-                            "events_file": str(w_ef) if w_ef else None,
-                            "target_workdir": str(wdir),
-                            "error": (
-                                err_p.read_text(encoding="utf-8")[:500]
-                                if err_p.exists() else None),
-                        })
-                    rec: Dict[str, Any] = {"round": round_idx, "writers": writers}
-                    comp_p = rdir / "comparison.json"
-                    if comp_p.exists():
-                        try:
-                            comp = json.loads(comp_p.read_text(encoding="utf-8"))
-                            rec["ok"] = bool(comp.get("ok"))
-                            rec["mismatch_count"] = len(comp.get("mismatches") or [])
-                            rec["mismatches_excerpt"] = (
-                                comp.get("mismatches") or [])[:5]
-                        except ValueError:
-                            pass
-                    med_p = rdir / "median_fallback.json"
-                    if med_p.exists():
-                        rec["median_fallback"] = True
-                    node_rec["rounds"].append(rec)
-                nodes.append(node_rec)
-            out["s3_calculate"] = nodes
-
-        return out
-
-    # ------------------------------------------------------------------ #
-    # S0 rough estimate + S3 streaming cells
-    # ------------------------------------------------------------------ #
-
-    @app.get("/api/tasks/{task_id}/calc/rough")
-    def calc_rough(task_id: str, request: Request) -> Dict[str, Any]:
-        """Return the S0 rough-pass estimate.
-
-        Reads ``step0/rough_results.json``. Returns an empty placeholder
-        shape if S0 hasn't run yet.
-
-        Optional query params ``batch_size`` and ``seq_len`` override the
-        canonical shape (B=1, S=512) used when the pipeline ran each
-        per-node script: when either is present we re-run each
-        ``step0/agent_rough/per_node/<compound>.py`` at the requested shape
-        on the fly and override the ``prefill`` / ``decode`` (and legacy
-        ``tflops_picked`` / ``gb_picked``) fields in the response. The
-        on-disk file is never modified — recompute is per-request.
-        """
-        entry = _task_or_404(task_id)
-        if entry.type != "calc-theoretical-value":
-            raise HTTPException(409, "task is not a calc-theoretical-value task")
-        sd = _state_dir_for(entry)
-        rough = sd / "step0" / "rough_results.json"
-        if not rough.exists():
-            return {"ok": False, "pending": True, "results": [], "graph": {"sections": []}}
-        try:
-            data = json.loads(rough.read_text(encoding="utf-8"))
-        except ValueError:
-            return {"ok": False, "pending": False, "error": "corrupt rough_results.json",
-                    "results": [], "graph": {"sections": []}}
-
-        qp = request.query_params
-        bs_str = qp.get("batch_size")
-        sl_str = qp.get("seq_len")
-        if bs_str is None and sl_str is None:
-            return data  # canonical-shape values baked into the JSON
-
-        try:
-            bs = int(bs_str) if bs_str is not None else 1
-            sl = int(sl_str) if sl_str is not None else 512
-        except ValueError:
-            raise HTTPException(400, "batch_size / seq_len must be integers")
-        if bs < 1 or sl < 1:
-            raise HTTPException(400, "batch_size / seq_len must be >= 1")
-
-        # On-demand recompute at the requested shape.
-        from ..orchestrator.tasks.calc_value import deterministic as _det
-        per_node_dir = sd / "step0" / "agent_rough" / "per_node"
-        for row in data.get("results") or []:
-            if not isinstance(row, dict) or not row.get("ok"):
-                continue
-            compound = row.get("compound")
-            if not compound:
-                continue
-            script = per_node_dir / f"{compound}.py"
-            if not script.exists():
-                continue
-            try:
-                mod = _det.load_calc_module(
-                    script, module_name=f"_calc_rough_{compound}",
-                )
-                phases = _det.call_calc(mod, bs, sl)
-                pre = phases["prefill"]
-                dec = phases["decode"]
-                row["prefill"] = pre
-                row["decode"] = dec
-                # Legacy aliases.
-                row["tflops_picked"] = pre["tflops"]
-                row["gb_picked"] = pre["access_gb"]
-            except Exception:  # noqa: BLE001
-                # Leave canonical values in place if recompute fails.
-                continue
-        data["combo"] = {"batch_size": bs, "seq_len": sl}
-        return data
-
-    @app.get("/api/tasks/{task_id}/calc/cells")
-    def calc_cells(task_id: str, request: Request) -> Dict[str, Any]:
-        """Return the S3 streaming cell-state grid.
-
-        Reads ``step3/cells/_state.json`` written by the angle-serial /
-        node-parallel S3. The UI renders the live audit table directly
-        from this document. Returns an empty shell if S3 hasn't started.
-
-        Optional query params ``batch_size`` and ``seq_len`` override the
-        canonical shape (B=1, S=512) baked into the stored cell values:
-        when either is present we re-run each cell's calc.py at the
-        requested shape on the fly and override ``prefill`` / ``decode``
-        (and legacy ``tflops`` / ``gb``) in the response. The on-disk
-        ``_state.json`` is never modified — recompute is per-request.
-        Falls back silently to the stored value if a cell's calc.py is
-        missing or its recompute raises.
-        """
-        entry = _task_or_404(task_id)
-        if entry.type != "calc-theoretical-value":
-            raise HTTPException(409, "task is not a calc-theoretical-value task")
-        sd = _state_dir_for(entry)
-        state = sd / "step3" / "cells" / "_state.json"
-        if not state.exists():
-            return {"round": 0, "nodes": {}, "pending": True}
-        try:
-            data = json.loads(state.read_text(encoding="utf-8"))
-        except ValueError:
-            return {"round": 0, "nodes": {}, "error": "corrupt _state.json"}
-
-        qp = request.query_params
-        bs_str = qp.get("batch_size")
-        sl_str = qp.get("seq_len")
-        if bs_str is None and sl_str is None:
-            return data  # canonical-shape values baked into _state.json
-
-        try:
-            bs = int(bs_str) if bs_str is not None else 1
-            sl = int(sl_str) if sl_str is not None else 512
-        except ValueError:
-            raise HTTPException(400, "batch_size / seq_len must be integers")
-        if bs < 1 or sl < 1:
-            raise HTTPException(400, "batch_size / seq_len must be >= 1")
-
-        from ..orchestrator.tasks.calc_value import deterministic as _det
-        cells_root = sd / "step3" / "cells"
-        nodes = data.get("nodes") or {}
-        for compound, node in nodes.items():
-            cells = node.get("cells") or {}
-            for angle, c in cells.items():
-                if not isinstance(c, dict):
-                    continue
-                # Need a usable calc.py to recompute.
-                if c.get("status") not in ("ok", "approximate"):
-                    continue
-                round_idx = c.get("round")
-                if round_idx is None:
-                    continue
-                calc_path = (
-                    cells_root / compound / angle
-                    / f"round_{int(round_idx):02d}" / "writer" / "calc.py"
-                )
-                if not calc_path.exists():
-                    continue
-                try:
-                    mod = _det.load_calc_module(
-                        calc_path, module_name=f"_calc_cell_{compound}_{angle}",
-                    )
-                    phases = _det.call_calc(mod, bs, sl)
-                    pre = phases["prefill"]
-                    dec = phases["decode"]
-                    c["prefill"] = pre
-                    c["decode"] = dec
-                    # Legacy aliases stay in sync with prefill.
-                    c["tflops"] = pre["tflops"]
-                    c["gb"] = pre["access_gb"]
-                    c["picked_combo"] = {"batch_size": bs, "seq_len": sl}
-                except Exception:  # noqa: BLE001
-                    continue
-        data["combo"] = {"batch_size": bs, "seq_len": sl}
-        return data
-
-    @app.get("/api/tasks/{task_id}/calc/cell/{compound}/{angle}/{round_idx}")
-    def calc_cell_detail(
-        task_id: str, compound: str, angle: str, round_idx: int,
-    ) -> Dict[str, Any]:
-        """Return one cell's full detail: calc.py source, response.txt
-        (agent thinking), result.json (single canonical-shape record), and
-        the writer's events.jsonl path so the UI can launch a QA session
-        against this cell.
-
-        Path params map directly to the on-disk layout::
-
-            step3/cells/<compound>/<angle>/round_<NN>/
-                writer/calc.py
-                writer/response.txt
-                result.json
-                logs/<spec_name>.attempt<M>.events.jsonl
-        """
-        entry = _task_or_404(task_id)
-        if entry.type != "calc-theoretical-value":
-            raise HTTPException(409, "task is not a calc-theoretical-value task")
-        if angle not in ("a", "b"):
-            raise HTTPException(400, "angle must be one of a / b")
-        sd = _state_dir_for(entry)
-        cell_dir = sd / "step3" / "cells" / compound / angle / f"round_{round_idx:02d}"
-        if not cell_dir.exists():
-            raise HTTPException(404, f"cell not found: {compound}/{angle}/round_{round_idx:02d}")
-
-        calc_path = cell_dir / "writer" / "calc.py"
-        response_path = cell_dir / "writer" / "response.txt"
-        result_path = cell_dir / "result.json"
-
-        calc_py = calc_path.read_text(encoding="utf-8") if calc_path.exists() else ""
-        response = response_path.read_text(encoding="utf-8") if response_path.exists() else ""
-        result: Any = None
-        if result_path.exists():
-            try:
-                result = json.loads(result_path.read_text(encoding="utf-8"))
-            except ValueError:
-                result = None
-
-        # Locate the writer's events.jsonl (attempt-agnostic — pick the
-        # highest attempt number that exists).
-        events_file: Optional[str] = None
-        logs_dir = cell_dir / "logs"
-        if logs_dir.is_dir():
-            candidates = sorted(logs_dir.rglob("*.events.jsonl"))
-            if candidates:
-                events_file = str(candidates[-1])
-
-        # Read sibling cells (other angle at same round) for mismatch
-        # context if both exist.
-        from ..orchestrator.tasks.calc_value import deterministic as _det
-        siblings: Dict[str, Any] = {}
-        for a in ("a", "b"):
-            sib_result_path = (
-                sd / "step3" / "cells" / compound / a
-                / f"round_{round_idx:02d}" / "result.json"
-            )
-            if sib_result_path.exists():
-                try:
-                    siblings[a] = json.loads(sib_result_path.read_text(encoding="utf-8"))
-                except ValueError:
-                    pass
-        mismatches: List[Dict[str, Any]] = []
-        if len(siblings) == 2:
-            cmp = _det.compare_calc_results([siblings[a] for a in ("a", "b")])
-            mismatches = cmp.get("mismatches") or []
-
-        return {
-            "compound": compound,
-            "angle": angle,
-            "round": round_idx,
-            "calc_py": calc_py,
-            "response": response,
-            "result": result,
-            "events_file": events_file,
-            "workdir": str(cell_dir / "writer"),
-            "siblings_present": sorted(siblings.keys()),
-            "mismatches": mismatches,
-        }
-
-    # ------------------------------------------------------------------ #
-    # Offline QA over agent conversation history
-    # ------------------------------------------------------------------ #
-    # Lets the user click an agent in the iterations panel and ask a
-    # follow-up question. A fresh ccb subprocess (the "analyst") is
-    # spawned with read access to the agent's events.jsonl transcript;
-    # the analyst answers based on what the original agent actually
-    # did. See metainfer/web/qa.py for lifecycle / storage.
-
-    @app.post("/api/tasks/{task_id}/calc/qa/start")
-    def calc_qa_start(task_id: str, body: dict) -> Dict[str, Any]:
-        """Body: {events_file, target_workdir?, target_label?, question,
-                  step?, round?, round_label?, agent?}.
-
-        Returns {session_id} immediately; the analyst runs in a daemon
-        thread. Poll GET /qa/<session_id> for the answer.
-        """
-        from . import qa as _qa
-        entry = _task_or_404(task_id)
-        if entry.type != "calc-theoretical-value":
-            raise HTTPException(409, "task is not a calc-theoretical-value task")
-        sd = _state_dir_for(entry)
-        try:
-            sid = _qa.start_qa_session(sd, body or {})
-        except _qa.EventsFileNotFound as exc:
-            raise HTTPException(404, str(exc))
-        except _qa.BudgetExhausted as exc:
-            # 429 + Retry-After-ish body so the client can surface a
-            # meaningful "task over budget" message instead of a generic
-            # 500. Body shape matches FastAPI's default error envelope.
-            raise HTTPException(429, str(exc))
-        except ValueError as exc:
-            raise HTTPException(400, str(exc))
-        return {"session_id": sid, "task_id": task_id}
-
-    @app.get("/api/tasks/{task_id}/calc/qa/{session_id}")
-    def calc_qa_get(task_id: str, session_id: str) -> Dict[str, Any]:
-        entry = _task_or_404(task_id)
-        if entry.type != "calc-theoretical-value":
-            raise HTTPException(409, "task is not a calc-theoretical-value task")
-        sd = _state_dir_for(entry)
-        from . import qa as _qa
-        sess = _qa.get_qa_session(sd, session_id)
-        if sess is None:
-            raise HTTPException(404, f"no such qa session: {session_id}")
-        return sess
-
-    @app.get("/api/tasks/{task_id}/calc/qa")
-    def calc_qa_list(
-        task_id: str,
-        step: Optional[str] = None,
-        round: Optional[str] = None,
-        agent: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """List QA sessions, optionally filtered by target agent identity.
-        Query params: ?step=&round=&agent="""
-        entry = _task_or_404(task_id)
-        if entry.type != "calc-theoretical-value":
-            raise HTTPException(409, "task is not a calc-theoretical-value task")
-        sd = _state_dir_for(entry)
-        from . import qa as _qa
-        sessions = _qa.list_qa_sessions(
-            sd, step=step, round_=round, agent=agent,
-        )
-        return {"sessions": sessions}
+    # Each WebPlugin registers its task-type-specific routes here. Adding
+    # a new task type: drop a self-contained package under
+    # ``metainfer/tasks/<name>/`` with a ``web_server_handler/plugin.py``
+    # that calls ``register(WebPlugin(...))``. Auto-discovery via
+    # ``metainfer/tasks/__init__.py`` picks it up; no edits to app.py.
+    _web_deps = _WebDeps(
+        repo_root=_repo_root(),
+        get_launcher=_launcher.get_default_launcher,
+    )
+    for _plugin in _all_web_plugins():
+        if _plugin.register_routes is not None:
+            _plugin.register_routes(app, _web_deps)
 
     # ------------------------------------------------------------------ #
     # SSE stream
@@ -1273,29 +523,62 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------ #
     def _cache_bust_token() -> str:
         """Compute a version token from the latest mtime across all
-        static files. Embedded into index.html as ?v=<token> on every
-        JS/CSS URL so the browser fetches fresh modules after any code
-        change. Cheap to compute (~1ms).
+        static files (web shell + every plugin's frontend dir).
+        Embedded into index.html as ?v=<token> on every JS/CSS URL so
+        the browser fetches fresh modules after any code change.
         """
-        try:
-            mtimes = [p.stat().st_mtime for p in STATIC_DIR.rglob("*") if p.is_file()]
-            return str(int(max(mtimes))) if mtimes else "0"
-        except OSError:
-            return "0"
+        mtimes: List[float] = []
+        roots = [STATIC_DIR] + [
+            p.frontend_dir for p in _all_web_plugins()
+            if p.frontend_dir and p.frontend_dir.exists()
+        ]
+        for root in roots:
+            try:
+                mtimes.extend(pp.stat().st_mtime for pp in root.rglob("*") if pp.is_file())
+            except OSError:
+                pass
+        return str(int(max(mtimes))) if mtimes else "0"
+
+    def _plugin_importmap_snippet(token: str) -> str:
+        """Build the comma-prefixed ``"key": "url"`` lines injected into
+        ``index.html``'s importmap. Iterates every plugin's
+        ``importmap_entries`` and applies the cache-bust token.
+        """
+        lines: List[str] = []
+        for plugin in _all_web_plugins():
+            for key, url in plugin.importmap_entries.items():
+                url_resolved = url.replace("CACHE_BUST", token)
+                lines.append(f'      {json.dumps(key)}: {json.dumps(url_resolved)}')
+        if not lines:
+            return ""
+        return ",\n" + ",\n".join(lines)
 
     @app.get("/")
     def index() -> HTMLResponse:
-        # Replace the CACHE_BUST placeholder in index.html with the
-        # current static-dir mtime token. This pins every module URL
-        # with a version query string so the browser never serves a
-        # stale cached JS after a code change.
         html_text = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
         token = _cache_bust_token()
+        # Plugin importmap entries first so the same CACHE_BUST replace
+        # covers both the static shell entries and plugin URLs.
+        snippet = _plugin_importmap_snippet(token)
+        html_text = html_text.replace("<!-- PLUGINS_IMPORTMAP -->", snippet)
+        # Now substitute any remaining CACHE_BUST on static-shell lines.
         html_text = html_text.replace("CACHE_BUST", token)
         return HTMLResponse(
             content=html_text,
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
         )
+
+    # Each plugin with bundled frontend assets gets its own mount point
+    # at /static/plugins/<type>/. The plugin's importmap_entries point
+    # at URLs under this mount. Mount these BEFORE the generic /static
+    # catch-all so the more-specific path wins.
+    for _plugin in _all_web_plugins():
+        if _plugin.frontend_dir and _plugin.frontend_dir.exists():
+            app.mount(
+                f"/static/plugins/{_plugin.type}",
+                StaticFiles(directory=str(_plugin.frontend_dir)),
+                name=f"static_plugin_{_plugin.type}",
+            )
 
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")

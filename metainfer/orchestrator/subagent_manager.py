@@ -64,6 +64,12 @@ class AgentSpec:
     # ``AgentResult.session_id`` so the caller can resume from it.
     session_id: Optional[str] = None
     resume_session_id: Optional[str] = None
+    # Per-spec model override. When set, takes precedence over the
+    # manager's ``default_model``. Lets cost-conscious roles (e.g. node
+    # validators that only emit pass/reject) use a cheaper model while
+    # reasoning-heavy roles (graph_builder, calc_writer) keep the strong
+    # default. None → fall back to manager default.
+    model: Optional[str] = None
 
     def log_file(self, attempt: int) -> Path:
         return self.log_dir / f"{self.name}.attempt{attempt}.log"
@@ -176,8 +182,8 @@ class SubAgentManager:
         # METAINFER_EFFORT env var or the CLI --effort flag.
         self.effort = effort
         # Directories every sub-agent is allowed to read from, in addition to
-        # the per-invocation workdir. Prompts tell sub-agents to consult the
-        # knowledge base under notebooks/ and the SKILL.md at the skill root;
+        # the per-invocation workdir. Each task passes its own knowledge base
+        # (e.g. metainfer/tasks/gen_infer_framework/notebooks/) via this list;
         # without --add-dir the Claude Code sandbox blocks those reads and the
         # agent loops forever against the sandbox. Resolve to absolute, real
         # paths so the flag stays valid even when invoked via a symlink.
@@ -616,12 +622,14 @@ class SubAgentManager:
             # but --add-dir guarantees the agent treats it as writable.
             "--add-dir", str(spec.workdir),
         ]
-        # Read-only knowledge sources (notebooks/, skill root with SKILL.md).
+        # Read-only knowledge sources (per-task notebooks/, repo root, etc.).
         # The manager-level list applies to every sub-agent so individual
         # phase code doesn't have to remember to opt in.
         for d in self.extra_add_dirs:
             cmd += ["--add-dir", str(d)]
-        if self.default_model:
+        if spec.model:
+            cmd += ["--model", spec.model]
+        elif self.default_model:
             cmd += ["--model", self.default_model]
         # Effort level controls extended-thinking budget. "max" lets the
         # model finish long reasoning chains instead of getting cut off

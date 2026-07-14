@@ -3,8 +3,8 @@
 All persistent state lives under one root. Default location is
 ``<cwd>/.metainfer/`` — i.e. a ``.metainfer`` subdirectory of whatever
 directory the WebUI was launched from. This keeps each MetaInfer
-deployment self-contained next to its notebooks/ + metainfer/ source
-tree instead of polluting ``~``.
+deployment self-contained next to its metainfer/ source tree instead
+of polluting ``~``.
 
 Layout::
 

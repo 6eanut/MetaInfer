@@ -31,12 +31,23 @@ metainfer-web = "metainfer.web.app:main"
 metainfer-orchestrator = "metainfer.orchestrator.cli:main"
 
 [tool.setuptools.packages.find]
-# Only ship the Python package; tasks/, notebooks/, static/ are data
+# Only ship the Python package; the top-level tasks/, legacy/ dirs are
+# not part of the install. Per-task form.yaml / static/ / notebooks/
+# ship as package-data of their task package (see below).
 include = ["metainfer*"]
 
 [tool.setuptools.package-data]
-"metainfer" = [
+# ``*`` matches every package under ``include = ["metainfer*"]``. The
+# patterns here pick up:
+#   - WebUI shell assets (static/**) and shared orchestrator data files
+#     (oracles/prompts yaml) from the metainfer package itself;
+#   - per-task form.yaml, ES modules under static/, and — for
+#     gen_infer_framework — the notebooks/ knowledge base. Each task
+#     package owns its non-Python assets.
+"*" = [
+    "*.yaml",
     "static/**/*",
     "orchestrator/oracles/**/*.yaml",
     "orchestrator/prompts/**/*",
+    "notebooks/**/*",
 ]

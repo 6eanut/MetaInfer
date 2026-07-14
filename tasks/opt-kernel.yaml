@@ -79,7 +79,7 @@
     - label: "vLLM/SGLang op"
       description: "Compare against the framework's existing op"
     - label: "Hand-written ref"
-      description: "A reference provided in notebooks/"
+      description: "A reference provided in the task's notebooks/"
 
 - key: perf_target
   question: "What is the perf target? (free text, e.g. >=80% of cuBLAS, or >=2x torch.compile)"

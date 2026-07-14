@@ -175,13 +175,16 @@ MetaInfer/
 │       ├── vendor/                 # preact/htm/chart.js/marked (local, no CDN)
 │       └── styles.css              # design tokens + components
 │
-├── tasks/                          # task type definitions (data, not code)
-│   ├── gen-infer-framework.yaml
-│   ├── opt-kernel.yaml
-│   └── port-model.yaml
+├── tasks/                          # LEGACY stub form schemas (opt-kernel.yaml, port-model.yaml)
 │
-├── notebooks/                      # knowledge base (read by sub-agents at runtime)
-│
+└── legacy/                         # archived pre-refactor skill bundle
+```
+
+Note: each task package's knowledge base lives inside its package —
+e.g. `metainfer/tasks/gen_infer_framework/notebooks/` — not at the
+top level. Form schemas for full task types live at
+`metainfer/tasks/<pkg>/form.yaml`; legacy stub types still ship
+`tasks/<type>.yaml`.
 └── legacy/                         # archived pre-refactor skill bundle
 ```
 
@@ -247,8 +250,10 @@ Add `override_component: <name>` to delegate to a task-specific widget
 
 ### Knowledge base
 
-Drop markdown files into `notebooks/<topic>/`. Prompt templates already
-tell sub-agents to consult `notebooks/` — no code change required.
+Drop markdown files into `metainfer/tasks/<task_pkg>/notebooks/<topic>/`.
+Prompt templates already tell sub-agents to consult the `notebooks/`
+path passed to them — no code change required. Each task package owns
+its own knowledge base.
 Keep each file short: one concept, one example, one gotcha list.
 
 ## Design notes

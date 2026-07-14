@@ -72,15 +72,18 @@ def all_cli_modules() -> List[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Shipped plugins — importing here triggers their register() calls.
+# Task package discovery
 # --------------------------------------------------------------------------- #
 #
-# Each import line is one task plugin. New built-in plugins get added
-# here; third-party plugins register themselves when their own package
-# is imported (we don't enumerate them here).
-
-from . import gen_infer_framework as _gen_infer_framework  # noqa: F401,E402
-from . import calc_value as _calc_value  # noqa: F401,E402
+# Auto-discovery now lives in :mod:`metainfer.tasks` (which imports each
+# self-contained task package under ``metainfer/tasks/<name>/``, and
+# each task package's __init__. calls ``register(...)`` here). Importing
+# ``metainfer.tasks`` as a side effect of web app startup / launcher
+# use populates this registry.
+#
+# We deliberately do NOT import ``metainfer.tasks`` from here — that
+# would create a circular import (task packages import this module to
+# call ``register``).
 
 
 __all__ = [

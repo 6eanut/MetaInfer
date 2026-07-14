@@ -1,7 +1,11 @@
 """Task type definitions → frontend form schema.
 
-Each task type ships a YAML file under ``<repo>/tasks/<type>.yaml`` with
-this shape (compatible with the legacy questions.yaml format):
+Each task type ships a ``form.yaml`` inside its self-contained task package
+at ``metainfer/tasks/<task_pkg>/form.yaml`` (see CLAUDE.md for the layout).
+Stub types without a full package (e.g. ``opt-kernel``) may still ship a
+YAML under ``<repo>/tasks/<type>.yaml``; both locations are supported.
+
+Schema shape (compatible with the legacy questions.yaml format):
 
     - key: target_model           # unique field key
       question: "Enter the model weight path:"
@@ -128,11 +132,36 @@ def _normalize_field(entry: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _form_yaml_for_task_type(task_type: str) -> Optional[Path]:
+    """Resolve the form.yaml path for a task type.
+
+    Priority:
+      1. If a WebPlugin is registered for this task type, look for
+         ``form.yaml`` at the plugin's task-package root (parent of
+         ``frontend_dir``). This is the canonical self-contained layout.
+      2. Fallback: legacy ``<repo>/tasks/<task_type>.yaml`` for stub
+         types that don't have a full task package yet (e.g. opt-kernel,
+         port-model).
+
+    Returns ``None`` if no YAML exists.
+    """
+    from .registry import get as _get_plugin
+    plugin = _get_plugin(task_type)
+    if plugin is not None and plugin.frontend_dir is not None:
+        cand = plugin.frontend_dir.parent / "form.yaml"
+        if cand.exists():
+            return cand
+    legacy = _orch_paths.question_file(task_type)
+    if legacy.exists():
+        return legacy
+    return None
+
+
 def load_form_schema(task_type: str) -> Optional[Dict[str, Any]]:
     """Return the normalized form schema for ``task_type``, or None if
     no YAML exists for it."""
-    yaml_path = _orch_paths.question_file(task_type)
-    if not yaml_path.exists():
+    yaml_path = _form_yaml_for_task_type(task_type)
+    if yaml_path is None:
         return None
     with open(yaml_path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f) or []
@@ -150,19 +179,50 @@ def load_form_schema(task_type: str) -> Optional[Dict[str, Any]]:
 
 def list_task_types() -> List[Dict[str, str]]:
     """Return a compact list of available task types for the task-type
-    picker in the New Task form."""
+    picker in the New Task form.
+
+    Combines two sources:
+      - Every registered WebPlugin (full task packages under
+        ``metainfer/tasks/<pkg>/`` whose ``frontend_dir.parent/form.yaml``
+        exists).
+      - Every ``<repo>/tasks/<type>.yaml`` stub whose type isn't already
+        covered by a plugin (so legacy stubs like opt-kernel still appear).
+    """
     out: List[Dict[str, str]] = []
-    # Walk TASK_TYPES for stable ordering; only include ones whose YAML exists.
-    for tt in _orch_paths.TASK_TYPES:
-        yaml_path = _orch_paths.question_file(tt)
-        if not yaml_path.exists():
+    seen: set = set()
+    # Full task packages first — these are the primary, peer-registered types.
+    from .registry import all_plugins as _all_plugins
+    for plugin in _all_plugins():
+        if plugin.frontend_dir is None:
             continue
+        cand = plugin.frontend_dir.parent / "form.yaml"
+        if not cand.exists():
+            continue
+        tt = plugin.type
+        if tt in seen:
+            continue
+        seen.add(tt)
         meta = TASK_TYPE_META.get(tt, {})
         out.append({
             "id": tt,
             "label": meta.get("label", tt),
             "description": meta.get("description", ""),
         })
+    # Legacy stub types: any YAML under <repo>/tasks/ whose type isn't
+    # already covered by a plugin.
+    legacy_dir = _orch_paths.tasks_dir()
+    if legacy_dir.exists():
+        for p in sorted(legacy_dir.glob("*.yaml")):
+            tt = p.stem
+            if tt in seen:
+                continue
+            seen.add(tt)
+            meta = TASK_TYPE_META.get(tt, {})
+            out.append({
+                "id": tt,
+                "label": meta.get("label", tt),
+                "description": meta.get("description", ""),
+            })
     return out
 
 

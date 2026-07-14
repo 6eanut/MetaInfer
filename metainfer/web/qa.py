@@ -1,11 +1,18 @@
 """Offline QA over an agent's conversation history.
 
-When a calc-value pipeline agent finishes, its full stream-json
+When any MetaInfer pipeline agent finishes, its full stream-json
 conversation is on disk at ``<log_dir>/<name>.attempt<N>.events.jsonl``.
 This module lets the user (via the WebUI) ask follow-up questions about
 what that agent did: a fresh ``ccb`` subprocess is spawned with read
 access to the transcript, and answers the user's question by inspecting
 the events log with Read/Grep.
+
+The module is **task-type-agnostic**. The caller (a task-type plugin's
+route handler, or a reader that exposes per-agent metadata) is
+responsible for resolving ``(step, round, agent) → events_file``. This
+module just takes the resolved ``events_file`` + ``target_workdir`` +
+``target_label`` and runs the analyst. Different task types reuse the
+same lifecycle / index / budget plumbing without forking.
 
 Lifecycle::
 
@@ -73,9 +80,8 @@ class BudgetExhausted(Exception):
 
 ANALYST_PROMPT_TEMPLATE = """\
 You are a READ-ONLY analyst. Another LLM agent previously ran as part of
-the MetaInfer calc-value pipeline. The user wants to understand what that
-agent did and why, by asking you questions about that agent's conversation
-history.
+a MetaInfer pipeline. The user wants to understand what that agent did
+and why, by asking you questions about that agent's conversation history.
 
 The target agent's full stream-json conversation log is at:
   {events_file}

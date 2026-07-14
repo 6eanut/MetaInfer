@@ -208,7 +208,7 @@ def read_state_graph(state_dir: Path) -> Dict[str, Any]:
             # Unknown task_type — best-effort fallback so the UI still
             # renders *something* rather than 500'ing.
             phases_module = (
-                "metainfer.orchestrator.tasks.gen_infer_framework.phases"
+                "metainfer.tasks.gen_infer_framework.orchestrator.phases"
             )
         import importlib
         P = importlib.import_module(phases_module)
@@ -323,12 +323,13 @@ def reset_state_dir(
         for p in state_dir.iterdir():
             if p.name in keep:
                 continue
+            is_dir = p.is_dir() and not p.is_symlink()
             try:
-                if p.is_dir() and not p.is_symlink():
+                if is_dir:
                     shutil.rmtree(p, ignore_errors=True)
                 else:
                     p.unlink()
-                removed.append(p.name + ("/" if p.is_dir() else ""))
+                removed.append(p.name + ("/" if is_dir else ""))
             except OSError:
                 pass
     now = time.time()

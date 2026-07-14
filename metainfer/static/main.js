@@ -97,6 +97,8 @@ function App() {
         [activeId]: {
           run: t.run, status: t.status,
           type: t.type, label: t.label,
+          detail_view_module: t.detail_view_module || null,
+          detail_view_export: t.detail_view_export || null,
         },
       }));
     } catch (e) {
@@ -152,6 +154,7 @@ function App() {
             run=${cached?.run}
             status=${active.status}
             label=${cached?.label || active.label}
+            detailViewModule=${cached?.detail_view_module || active?.detail_view_module || null}
             onChange=${refreshTick}
             onOpenRetro=${() => {}} />`
         : html`<${EmptyState} onNewTask=${() => setShowNewTask(true)} />`}

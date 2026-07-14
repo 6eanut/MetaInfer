@@ -154,6 +154,17 @@ def create_app() -> FastAPI:
         v = _forms.validate_submission(task_type, answers)
         if not v["ok"]:
             raise HTTPException(400, detail={"errors": v["errors"]})
+        # Apply YAML defaults for fields whose submitted value is empty or
+        # a placeholder (the frontend sends "默认 " for unfilled text fields).
+        schema = _forms.load_form_schema(task_type)
+        if schema:
+            for field in schema["fields"]:
+                key = field["key"]
+                submitted = (answers.get(key) or "").strip()
+                if not submitted or submitted == "默认":
+                    default = field.get("default")
+                    if default is not None and str(default).strip():
+                        answers[key] = default
         # Generate a unique task id.
         task_id = _tasks.gen_task_id(task_type, label)
         sd = _paths.task_dir(task_id)

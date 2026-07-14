@@ -106,7 +106,7 @@ def run_with_requirements(
         model=model,
         permission_mode=permission_mode,
         extra_claude_args=list(extra_claude_args or []),
-        openevolve_path=openevolve_path or _resolve_openevolve_path(),
+        openevolve_path=openevolve_path or _resolve_openevolve_path(req),
         openevolve_iterations=(
             openevolve_iterations
             or _extract_openevolve_iterations(req, default=50)
@@ -170,9 +170,17 @@ def _extract_openevolve_iterations(req: Dict[str, Any], default: int = 50) -> in
         return default
 
 
-def _resolve_openevolve_path() -> Path:
-    """Resolve openevolve_path: CLI arg > env var > default."""
+def _resolve_openevolve_path(req: dict) -> Path:
+    """Resolve openevolve_path: CLI arg > requirements.json > env var > default."""
+    # Read from requirements.json if present
+    v = req.get("openevolve_path")
+    if v is None:
+        v = req.get("answers", {}).get("openevolve_path")
+    if v and str(v).strip():
+        p = Path(str(v).strip())
+        if p.is_dir():
+            return p
     env = os.environ.get("METAINFER_OPENEVOLVE_PATH")
     if env:
         return Path(env)
-    return Path("/home/jiakai/0716-fusedmoe-sglang/openevolve")
+    return Path("/workspace/openevolve")

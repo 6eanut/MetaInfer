@@ -6,6 +6,9 @@ import { html } from "htm/preact";
 import { useEffect, useState } from "preact/hooks";
 import { getCalcRough } from "app/api";
 
+const DEFAULT_BATCH = 1;
+const DEFAULT_SEQ = 512;
+
 function fmtNum(n, digits = 2) {
   if (n == null || Number.isNaN(n)) return "—";
   if (!isFinite(n)) return "∞";
@@ -16,12 +19,14 @@ function fmtNum(n, digits = 2) {
 export function CalcRoughPanel({ taskId }) {
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
+  const [batchSize, setBatchSize] = useState(DEFAULT_BATCH);
+  const [seqLen, setSeqLen] = useState(DEFAULT_SEQ);
 
   useEffect(() => {
     let alive = true;
     const tick = async () => {
       try {
-        const d = await getCalcRough(taskId);
+        const d = await getCalcRough(taskId, batchSize, seqLen);
         if (alive) { setData(d); setErr(null); }
       } catch (e) {
         if (alive) setErr(String(e));
@@ -30,7 +35,7 @@ export function CalcRoughPanel({ taskId }) {
     tick();
     const id = setInterval(tick, 5000);
     return () => { alive = false; clearInterval(id); };
-  }, [taskId]);
+  }, [taskId, batchSize, seqLen]);
 
   if (err) {
     return html`
@@ -80,6 +85,36 @@ export function CalcRoughPanel({ taskId }) {
           · ${summary.ok_count || 0}/${summary.total_nodes || 0} 节点成功）
         </span>
       </h2>
+      <div class="calc-combo-controls">
+        <label>
+          batch_size
+          <input
+            type="number"
+            min="1"
+            step="1"
+            value=${batchSize}
+            onInput=${(e) => {
+              const v = parseInt(e.target.value, 10);
+              if (v && v > 0) setBatchSize(v);
+            }} />
+        </label>
+        <label>
+          seq_len
+          <input
+            type="number"
+            min="1"
+            step="1"
+            value=${seqLen}
+            onInput=${(e) => {
+              const v = parseInt(e.target.value, 10);
+              if (v && v > 0) setSeqLen(v);
+            }} />
+        </label>
+        <span class="muted small">
+          表格内每节点的 tflops/gb 是该 (batch, seq) 组合下的取值，
+          从节点的 42 组合 grid 里挑出。改了之后下一次轮询（5s）生效。
+        </span>
+      </div>
       <p class="muted small">
         这是粗略值，会被详细审计（S3）覆盖。MoE 类节点只算 6KHI，不算 scaling/combine。
         每 cell 同时显示 prefill（处理整段 prompt）和 decode（生成 1 token，含 KV cache 读取）。
@@ -90,8 +125,8 @@ export function CalcRoughPanel({ taskId }) {
             <tr>
               <th class="left" rowspan="2">section</th>
               <th class="left" rowspan="2">node</th>
-              <th colspan="2" class="center">prefill (B=1,S=512)</th>
-              <th colspan="2" class="center">decode (B=1,S=512)</th>
+              <th colspan="2" class="center">prefill (B=${batchSize},S=${seqLen})</th>
+              <th colspan="2" class="center">decode (B=${batchSize},S=${seqLen})</th>
               <th class="left" rowspan="2">status</th>
             </tr>
             <tr>

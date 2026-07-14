@@ -10,7 +10,7 @@ import { html } from "htm/preact";
 import { useCallback, useEffect, useState } from "preact/hooks";
 
 const STEPS = [
-  { id: "s1_analyze",    label: "S1: Analyze (3 agents)" },
+  { id: "s1_analyze",    label: "S1: Analyze (2 agents)" },
   { id: "s2_graph",      label: "S2: Build graph" },
   { id: "s3_calculate",  label: "S3: Calculate" },
   { id: "s4_visualize",  label: "S4: Visualize" },

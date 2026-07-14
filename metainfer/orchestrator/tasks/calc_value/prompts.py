@@ -50,7 +50,7 @@ any file under MODEL_DIR or FRAMEWORK."
 
 
 # --------------------------------------------------------------------------- #
-# Step 1 — code analysis from 3 angles
+# Step 1 — code analysis from 2 angles
 # --------------------------------------------------------------------------- #
 
 STEP1_OUTPUT_SCHEMA = """\
@@ -543,7 +543,7 @@ Strategy:
    head counts, intermediate size, vocabulary size, etc. Use these as
    your symbolic constants.
 2. Read memory.json's `operator_calls` for the actual operator sequence
-   (these were cross-validated by 3 agents).
+   (these were cross-validated by 2 agents).
 3. Inspect the model's layer definitions in FRAMEWORK. Identify how many
    DISTINCT layer types exist. A "distinct" layer type is one whose
    operator sequence differs structurally — e.g. a dense MLP layer vs a
@@ -771,8 +771,9 @@ GENERAL RULES:
   no file I/O, no random).
 * Import from `math` if needed; do NOT import torch / numpy / external libs.
 * The orchestrator will import your file as a module and call calc()
-  42 times (across the seq_len x batch_size cartesian product). It
-  must NOT print anything.
+  at the canonical shape (batch_size=1, seq_len=512) to verify it.
+  The WebUI may also call it at other user-chosen shapes on demand.
+  It must NOT print anything.
 * Numeric constants baked in from the model config MUST be hardcoded
   (read from your understanding of memory.json); only batch_size and
   seq_len come from the function arguments.
@@ -899,57 +900,12 @@ Write your Python source to a file named ``calc.py`` in your workdir
 using the Write tool. The orchestrator imports ONLY that file; your
 response text is archived as ``response.txt`` and is NOT executed.
 """,
-    # Writer 2: tensor-calculus / first-principles angle.
-    """\
-You are writing a Python function to compute the theoretical FLOPs and
-global-memory traffic of ONE operator node in an LLM forward pass.
-
-STRATEGY: FIRST PRINCIPLES — reason about the mathematical definition
-of the operator and count FLOPs/bytes from scratch, WITHOUT leaning on
-the framework source or the node's `op` field.
-
-The node:
-
-```json
-{node_json}
-```
-
-Consensus memory (use ONLY for baked-in config constants):
-
-```json
-{memory_json}
-```
-
-Approach:
-1. What is the user-visible mathematical function this operator computes?
-   (e.g. "this is RMSNorm: y = x / sqrt(mean(x^2) + eps) * weight")
-2. For ONE forward pass at shape (batch_size, seq_len):
-   * What inputs are read from HBM? (volume * dtype_bytes each)
-   * What outputs are written to HBM?
-   * What intermediate values are kept in SRAM (don't count) vs spilled
-     to HBM (count)?
-3. How many scalar multiply/add/compare operations does the math require?
-4. Bake config constants as hard literals.
-
-This strategy is most useful as a CROSS-CHECK against the other two
-strategies: if your first-principles answer differs from the source-driven
-answer by more than 1e-6, the orchestrator will ask all 3 of us to
-reconcile. Be rigorous.
-
-{readonly}
-
-{calc_contract}
-
-Write your Python source to a file named ``calc.py`` in your workdir
-using the Write tool. The orchestrator imports ONLY that file; your
-response text is archived as ``response.txt`` and is NOT executed.
-""",
 ]
 
 
 STEP3_FIX_PROMPT = """\
 You previously wrote a calc() function for ONE operator node, but its
-output disagreed with 2 other independent agents' calc() functions on
+output disagreed with the other independent agent's calc() function on
 the cartesian product of (batch_size, seq_len). Reconcile.
 
 The node:
@@ -964,15 +920,15 @@ Your previous calc.py:
 {your_script}
 ```
 
-Mismatches (the orchestrator's deterministic checker ran all 3 scripts
-on 42 combos and found these disagreements; "a0"=your output, "a1","a2"
-are the other 2 agents' outputs):
+Mismatches (the orchestrator's deterministic checker ran both scripts
+at the canonical shape and found these disagreements; "a0"=your output,
+"a1" is the other agent's output):
 
 {mismatches}
 
 Steps:
 1. Re-derive the FLOPs and access_gb formulas for this node.
-2. If your prior answer was correct (the OTHER 2 agents are wrong),
+2. If your prior answer was correct (the OTHER agent is wrong),
    KEEP your formula but make it more rigorous — the comparison is
    relative-tolerance based; rounding noise under 1e-6 should already
    pass.
@@ -981,7 +937,7 @@ Steps:
    output write, double-counted the input read) and FIX it.
 
 CRITICAL: You are STILL working in isolation. Do NOT try to look up or
-guess what the other 2 agents wrote. The mismatches above show their
+guess what the other agent wrote. The mismatches above show their
 NUMBERS only, not their formulas. Make your formula correct on its own
 merits.
 

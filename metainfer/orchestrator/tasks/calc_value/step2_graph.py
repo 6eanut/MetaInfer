@@ -11,7 +11,7 @@ Pipeline::
   verdict.
 * If any node rejects, one fix-agent rewrites graph.json to address
   all failures. Re-run structure check + per-node validation.
-* Up to 5 rounds; after that the graph (with flagged nodes noted) is
+* Up to 3 rounds; after that the graph (with flagged nodes noted) is
   accepted and Step 3 proceeds.
 """
 
@@ -27,7 +27,7 @@ from . import deterministic as det
 from . import prompts as P
 
 
-MAX_ROUNDS = 5
+MAX_ROUNDS = 3
 PER_AGENT_TIMEOUT_S = 1800
 VALIDATE_TIMEOUT_S = 600
 

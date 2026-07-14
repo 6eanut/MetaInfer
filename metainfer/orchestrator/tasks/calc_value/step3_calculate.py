@@ -1,19 +1,23 @@
-"""Step 3: per-node FLOPs / mem-traffic calc with 3-angle agreement.
+"""Step 3: per-node FLOPs / mem-traffic calc with 2-angle agreement.
 
 Algorithm (angle-serial, node-parallel, streaming):
 
 1. For each round (up to MAX_ROUNDS_PER_NODE):
-   - For each angle in [a, b, c] STRICTLY SERIALLY:
+   - For each angle in [a, b] STRICTLY SERIALLY:
      - Launch ALL pending nodes IN PARALLEL (max_concurrent caps it).
-     - As each agent finishes, write its cell
-       (calc.py / response.txt / grid.json) + update _state.json +
+     - As each agent finishes, run its calc.py once at the canonical
+       shape, write the cell
+       (calc.py / response.txt / result.json) + update _state.json +
        emit timeline. UI sees cells stream in.
-   - After all 3 angles done for this round: find nodes whose 3 angles
+   - After both angles done for this round: find nodes whose 2 angles
      disagree > REL_TOL. Those become the pending set for next round.
-2. Converged nodes: pick the median angle's script as canonical, write
+2. Converged nodes: pick angle a's script as canonical, write
    to final/<compound>.py + .meta.json.
 3. Nodes still disputed after MAX_ROUNDS_PER_NODE: mark approximate,
-   use median fallback (same as before).
+   use the closer-to-median angle's script (same as before).
+
+The WebUI re-runs final/<compound>.py on demand at arbitrary batch/seq
+values via /calc/compute — we no longer precompute a 42-combo grid.
 
 Output layout::
 
@@ -21,9 +25,8 @@ Output layout::
     ├── cells/
     │   ├── _state.json                # UI-facing live state
     │   └── <compound>/
-    │       ├── a/round_NN/{calc.py, response.txt, grid.json, meta.json}
-    │       ├── b/round_NN/...
-    │       └── c/round_NN/...
+    │       ├── a/round_NN/{calc.py, response.txt, result.json}
+    │       └── b/round_NN/...
     ├── final/
     │   ├── <compound>.py              # final winning calc.py
     │   └── <compound>.meta.json       # {approximate, source_agent, ...}
@@ -45,9 +48,9 @@ from . import deterministic as det
 from . import prompts as P
 
 
-MAX_ROUNDS_PER_NODE = 5
+MAX_ROUNDS_PER_NODE = 3
 PER_AGENT_TIMEOUT_S = 900  # 15 min per writer
-ANGLES = ("a", "b", "c")  # maps to STEP3_WRITER_PROMPTS[0/1/2]
+ANGLES = ("a", "b")  # maps to STEP3_WRITER_PROMPTS[0/1]
 
 
 # --------------------------------------------------------------------------- #
@@ -160,7 +163,7 @@ class CellStateStore:
                 "error": error,
                 "script_path": script_path,
             }
-            # Recompute convergence if all 3 angles have values.
+            # Recompute convergence if both angles have values.
             self._recompute_locked(compound)
             self._flush_locked()
 
@@ -197,109 +200,6 @@ class CellStateStore:
         tmp.write_text(json.dumps(self._doc, indent=2, ensure_ascii=False),
                        encoding="utf-8")
         tmp.replace(self.path)
-
-
-# --------------------------------------------------------------------------- #
-# Per-cell writer
-# --------------------------------------------------------------------------- #
-
-def _run_writer_for_cell(
-    *,
-    manager,
-    cells_root: Path,
-    compound: str,
-    angle: str,
-    angle_idx: int,
-    round_idx: int,
-    node: Dict[str, Any],
-    memory_json: str,
-    req: Dict[str, Any],
-    prev_script: Optional[str],
-    mismatches: List[Dict[str, Any]],
-) -> Tuple[str, Optional[Path], Optional[List[Dict[str, Any]]], Optional[str], float]:
-    """Launch ONE writer agent for one (compound, angle, round) cell.
-
-    Returns (status, calc_path_or_None, grid_or_None, error_or_None, elapsed_s).
-    """
-    cell_dir = cells_root / compound / angle / f"round_{round_idx:02d}"
-    cell_dir.mkdir(parents=True, exist_ok=True)
-    workdir = cell_dir / "writer"
-    log_dir = cell_dir / "logs"
-
-    node_json = json.dumps(node, indent=2, ensure_ascii=False)
-    readonly = P.READONLY_WARNING.format(
-        model_dir=req["model_dir"],
-        framework_dir=req["framework_source_dir"],
-    )
-    calc_contract = P.STEP3_CALC_FUNC_CONTRACT
-    common = {
-        "node_json": node_json,
-        "memory_json": memory_json,
-        "readonly": readonly,
-        "calc_contract": calc_contract,
-    }
-    if round_idx == 0 or prev_script is None:
-        text = P.STEP3_WRITER_PROMPTS[angle_idx].format(**common)
-    else:
-        text = P.STEP3_FIX_PROMPT.format(
-            **common,
-            your_script=prev_script,
-            mismatches=det.format_mismatches_for_prompt(mismatches or []),
-        )
-    prompt_file = _write_prompt(workdir, "writer", text)
-    spec_name = f"s3_{compound}_{angle}_r{round_idx}"
-    spec = AgentSpec(
-        name=spec_name,
-        role="calc_writer",
-        prompt_file=prompt_file,
-        workdir=workdir,
-        log_dir=log_dir,
-        timeout_s=PER_AGENT_TIMEOUT_S,
-        stuck_timeout_s=300,
-        max_retries=2,
-    )
-
-    t0 = time.time()
-    thread = manager.launch_async(spec)
-    thread.join()
-    elapsed = time.time() - t0
-
-    result = manager.result(spec.name)
-    if result is None or not result.success:
-        err = result.error if result else "no result"
-        (workdir / "error.txt").write_text(str(err), encoding="utf-8")
-        return "failed", None, None, str(err), elapsed
-
-    text_out = result.final_text or ""
-    (workdir / "response.txt").write_text(text_out, encoding="utf-8")
-    src, _source = det.load_agent_text_file(
-        workdir, "calc.py", text_out, _extract_python_source,
-    )
-    if not src:
-        (workdir / "parse_error.txt").write_text(
-            "No `def calc` block found.\n"
-            f"Response first 500 chars:\n{text_out[:500]}",
-            encoding="utf-8",
-        )
-        return "no_source", None, None, "no def calc in response", elapsed
-
-    calc_path = workdir / "calc.py"
-    if not calc_path.exists():
-        # Agent inlined source — persist what we scraped.
-        calc_path.write_text(src, encoding="utf-8")
-
-    try:
-        grid = det.run_calc_on_grid(calc_path)
-    except Exception as exc:  # noqa: BLE001
-        (workdir / "runtime_error.txt").write_text(
-            f"{type(exc).__name__}: {exc}", encoding="utf-8",
-        )
-        return "runtime_error", str(calc_path), None, str(exc), elapsed
-
-    (cell_dir / "grid.json").write_text(
-        json.dumps(grid, indent=2, ensure_ascii=False), encoding="utf-8",
-    )
-    return "ok", str(calc_path), grid, None, elapsed
 
 
 # --------------------------------------------------------------------------- #
@@ -419,21 +319,17 @@ def _run_angle_stage(
                     if not calc_path.exists():
                         calc_path.write_text(src, encoding="utf-8")
                     try:
-                        grid = det.run_calc_on_grid(calc_path)
+                        result_rec = det.run_calc_canonical(calc_path)
                         status = "ok"
                         calc_path_str = str(calc_path)
-                        # Pick a representative combo for quick UI display.
-                        for r in grid:
-                            if r["batch_size"] == 1 and r["seq_len"] == 512:
-                                prefill_picked = {
-                                    "tflops": (r.get("prefill") or {}).get("tflops", 0.0),
-                                    "access_gb": (r.get("prefill") or {}).get("access_gb", 0.0),
-                                }
-                                decode_picked = {
-                                    "tflops": (r.get("decode") or {}).get("tflops", 0.0),
-                                    "access_gb": (r.get("decode") or {}).get("access_gb", 0.0),
-                                }
-                                break
+                        prefill_picked = {
+                            "tflops": (result_rec.get("prefill") or {}).get("tflops", 0.0),
+                            "access_gb": (result_rec.get("prefill") or {}).get("access_gb", 0.0),
+                        }
+                        decode_picked = {
+                            "tflops": (result_rec.get("decode") or {}).get("tflops", 0.0),
+                            "access_gb": (result_rec.get("decode") or {}).get("access_gb", 0.0),
+                        }
                     except Exception as exc:  # noqa: BLE001
                         (workdir / "runtime_error.txt").write_text(
                             f"{type(exc).__name__}: {exc}", encoding="utf-8",
@@ -441,9 +337,18 @@ def _run_angle_stage(
                         status = "runtime_error"
                         err = str(exc)
 
-            if grid is not None:
-                (cell_dir / "grid.json").write_text(
-                    json.dumps(grid, indent=2, ensure_ascii=False),
+            if prefill_picked is not None:
+                # Single-shape result (canonical B=1, S=512). The WebUI
+                # re-runs calc.py at other shapes on demand via /calc/cells
+                # or /calc/compute.
+                result_rec = {
+                    "batch_size": det.CANONICAL_BATCH,
+                    "seq_len":    det.CANONICAL_SEQ,
+                    "prefill": prefill_picked,
+                    "decode":  decode_picked or {"tflops": 0.0, "access_gb": 0.0},
+                }
+                (cell_dir / "result.json").write_text(
+                    json.dumps(result_rec, indent=2, ensure_ascii=False),
                     encoding="utf-8",
                 )
 
@@ -480,8 +385,8 @@ def _find_disputed(
     cells_root: Path,
     round_idx: int,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, List[Dict[str, Any]]], Dict[str, Optional[str]]]:
-    """For each pending node, read back the 3 angles' grids from this round
-    and check agreement. Returns:
+    """For each pending node, read back both angles' single-shape results
+    from this round and check agreement. Returns:
 
       bad_pending           — nodes that still disagree > REL_TOL
       mismatches_by_node    — for each disputed node, the mismatch list
@@ -493,30 +398,30 @@ def _find_disputed(
 
     for node_meta in pending:
         compound = node_meta["compound"]
-        grids: List[List[Dict[str, Any]]] = []
+        results: List[Dict[str, Any]] = []
         script_for_node: Optional[str] = None
         ok = True
         for angle in ANGLES:
             cell_dir = cells_root / compound / angle / f"round_{round_idx:02d}"
-            grid_path = cell_dir / "grid.json"
+            result_path = cell_dir / "result.json"
             calc_path = cell_dir / "writer" / "calc.py"
-            if not grid_path.exists():
+            if not result_path.exists():
                 ok = False
                 break
             try:
-                g = json.loads(grid_path.read_text(encoding="utf-8"))
+                r = json.loads(result_path.read_text(encoding="utf-8"))
             except ValueError:
                 ok = False
                 break
-            grids.append(g)
+            results.append(r)
             if calc_path.exists() and script_for_node is None:
                 script_for_node = calc_path.read_text(encoding="utf-8")
         prev_scripts_by_node[compound] = script_for_node
-        if not ok or len(grids) < len(ANGLES):
+        if not ok or len(results) < len(ANGLES):
             bad.append(node_meta)
             mismatches_by_node[compound] = []
             continue
-        comparison = det.compare_calc_grids(grids)
+        comparison = det.compare_calc_results(results)
         if not comparison["ok"]:
             bad.append(node_meta)
             mismatches_by_node[compound] = comparison["mismatches"]
@@ -538,27 +443,27 @@ def _finalize_node(
 ) -> Tuple[Path, Dict[str, Any]]:
     """Pick the canonical script for a node and emit final/<compound>.py.
 
-    Strategy: read all 3 angles' scripts from the last completed round.
+    Strategy: read both angles' scripts from the last completed round.
     If cell_state says converged → take writer_0 (arbitrary, all agree).
-    Else → take the writer whose grid is closest to the median (same as
-    the legacy median fallback).
+    Else → take the writer whose single-shape result is closest to the
+    median (same idea as the legacy median fallback).
     """
-    # Find the latest round where all 3 angles produced a grid.
+    # Find the latest round where both angles produced a result.
     chosen_round = -1
-    grids_by_angle: Dict[str, List[Dict[str, Any]]] = {}
+    results_by_angle: Dict[str, Dict[str, Any]] = {}
     calc_by_angle: Dict[str, str] = {}
     for r in range(last_round, -1, -1):
         ok = True
-        trial: Dict[str, List[Dict[str, Any]]] = {}
+        trial: Dict[str, Dict[str, Any]] = {}
         trial_calc: Dict[str, str] = {}
         for angle in ANGLES:
-            grid_path = cells_root / compound / angle / f"round_{r:02d}" / "grid.json"
+            result_path = cells_root / compound / angle / f"round_{r:02d}" / "result.json"
             calc_path = cells_root / compound / angle / f"round_{r:02d}" / "writer" / "calc.py"
-            if not grid_path.exists():
+            if not result_path.exists():
                 ok = False
                 break
             try:
-                trial[angle] = json.loads(grid_path.read_text(encoding="utf-8"))
+                trial[angle] = json.loads(result_path.read_text(encoding="utf-8"))
             except ValueError:
                 ok = False
                 break
@@ -566,7 +471,7 @@ def _finalize_node(
                 trial_calc[angle] = calc_path.read_text(encoding="utf-8")
         if ok and len(trial) == len(ANGLES):
             chosen_round = r
-            grids_by_angle = trial
+            results_by_angle = trial
             calc_by_angle = trial_calc
             break
 
@@ -590,7 +495,7 @@ def _finalize_node(
                                                "rounds": last_round + 1}
 
     # Decide: converged or median fallback.
-    comparison = det.compare_calc_grids(list(grids_by_angle.values()))
+    comparison = det.compare_calc_results(list(results_by_angle.values()))
     node_state = cell_state._doc["nodes"].get(compound, {})
     converged = node_state.get("converged", False)
 
@@ -600,16 +505,16 @@ def _finalize_node(
         approximate = False
         source_agent = "unanimous"
     else:
-        # Median fallback: pick the angle whose grid is closest to the
-        # per-combo median.
-        median_grid = det.median_fallback(list(grids_by_angle.values()))
-        chosen_angle = _pick_most_median_angle(grids_by_angle, median_grid)
+        # Median fallback: pick the angle whose result is closest to the
+        # per-phase median.
+        median_rec = det.median_result(list(results_by_angle.values()))
+        chosen_angle = _pick_most_median_angle(results_by_angle, median_rec)
         approximate = True
         source_agent = f"median_fallback_from_angle_{chosen_angle}"
 
     script_text = calc_by_angle.get(chosen_angle, "")
     if not script_text:
-        # Edge case: angle had grid.json but calc.py missing — fall back.
+        # Edge case: angle had result.json but calc.py missing — fall back.
         script_text = ("def calc(batch_size, seq_len):\n"
                        "    return {'prefill': {'tflops': 0.0, 'access_gb': 0.0}, 'decode': {'tflops': 0.0, 'access_gb': 0.0}}\n")
         approximate = True
@@ -642,15 +547,14 @@ def _finalize_node(
 
 
 def _pick_most_median_angle(
-    grids_by_angle: Dict[str, List[Dict[str, Any]]],
-    median_grid: List[Dict[str, Any]],
+    results_by_angle: Dict[str, Dict[str, Any]],
+    median_rec: Dict[str, Any],
 ) -> str:
-    if not grids_by_angle:
+    if not results_by_angle:
         return ANGLES[0]
 
     def _pick(rec: Dict[str, Any], phase: str, field: str) -> float:
-        """Extract a numeric field from a grid record. Handles both the
-        new prefill/decode shape and legacy top-level {tflops, access_gb}."""
+        """Extract a numeric field from a single-shape record."""
         if phase in rec:
             return (rec.get(phase) or {}).get(field, 0.0)
         # Legacy — only prefill.tflops / prefill.access_gb exist.
@@ -660,12 +564,11 @@ def _pick_most_median_angle(
 
     best_angle = ANGLES[0]
     best_err = float("inf")
-    for angle, g in grids_by_angle.items():
+    for angle, rec in results_by_angle.items():
         err = 0.0
-        for r1, r2 in zip(g, median_grid):
-            for phase in ("prefill", "decode"):
-                err += abs(_pick(r1, phase, "tflops") - _pick(r2, phase, "tflops"))
-                err += abs(_pick(r1, phase, "access_gb") - _pick(r2, phase, "access_gb"))
+        for phase in ("prefill", "decode"):
+            err += abs(_pick(rec, phase, "tflops") - _pick(median_rec, phase, "tflops"))
+            err += abs(_pick(rec, phase, "access_gb") - _pick(median_rec, phase, "access_gb"))
         if err < best_err:
             best_err = err
             best_angle = angle

@@ -8,10 +8,11 @@
 import { html, render } from "htm/preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import {
-  listTasks, getTask,
+  listTasks, getTask, deleteTask,
 } from "app/api";
 import { TaskDetailView } from "app/task-detail";
 import { NewTaskView } from "app/new-task";
+import { ConfirmActionModal } from "app/confirm-action-modal";
 import { labelFor } from "app/utils";
 
 function App() {
@@ -28,6 +29,9 @@ function App() {
   const [refreshTick, setRefreshTick] = useState(0);
   // Last list fetch error.
   const [listErr, setListErr] = useState(null);
+  // Pending task-close (× click) awaiting name-typed confirmation.
+  // Holds the registry entry the user is trying to close.
+  const [closeTarget, setCloseTarget] = useState(null);
 
   // SSE subscription. Single connection, lives for the app's lifetime.
   const sseRef = useRef(null);
@@ -137,10 +141,7 @@ function App() {
       tabs=${tabs}
       activeId=${activeId}
       onSelectTab=${setActiveId}
-      onCloseTab=${(id) => {
-        // Closing a tab just deselects it; the registry stays intact.
-        if (activeId === id) setActiveId(null);
-      }}
+      onCloseTab=${(t) => setCloseTarget(t)}
       counts=${counts}
       listErr=${listErr}
       onNewTask=${() => setShowNewTask(true)}
@@ -150,6 +151,7 @@ function App() {
             taskId=${active.id}
             run=${cached?.run}
             status=${active.status}
+            label=${cached?.label || active.label}
             onChange=${refreshTick}
             onOpenRetro=${() => {}} />`
         : html`<${EmptyState} onNewTask=${() => setShowNewTask(true)} />`}
@@ -159,6 +161,25 @@ function App() {
       <${NewTaskView}
         onClose=${() => setShowNewTask(false)}
         onCreated=${onNewTask} />
+    ` : null}
+
+    ${closeTarget ? html`
+      <${ConfirmActionModal}
+        title="关闭并删除任务"
+        promptText="将永久删除此任务：从任务列表移除，并删除所有日志、迭代产物、运行状态、调试信息等。此操作不可撤销。"
+        confirmText=${closeTarget.label || closeTarget.id}
+        confirmLabel="删除"
+        onConfirm=${async () => {
+          await deleteTask(closeTarget.id, /*purge=*/ true);
+          if (activeId === closeTarget.id) setActiveId(null);
+          setTaskCache((prev) => {
+            const next = { ...prev };
+            delete next[closeTarget.id];
+            return next;
+          });
+          await refreshList();
+        }}
+        onClose=${() => setCloseTarget(null)} />
     ` : null}
   `;
 }
@@ -194,7 +215,7 @@ function Shell({
             <span class="tab-label">${t.label || t.id}</span>
             <span class="tab-id">${t.id}</span>
             <span class="tab-close"
-              onClick=${(e) => { e.stopPropagation(); onCloseTab(t.id); }}>×</span>
+              onClick=${(e) => { e.stopPropagation(); onCloseTab(t); }}>×</span>
           </button>
         `)}
     </div>

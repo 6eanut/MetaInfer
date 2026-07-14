@@ -125,6 +125,31 @@ export async function getAgents(taskId) {
   return r.json();
 }
 
+export async function getTokenBudget(taskId) {
+  // Returns the task's cost-budget snapshot. 200 with {configured:false}
+  // when no budget file exists yet — caller should render nothing.
+  const r = await fetch(`${TASK_SCOPE(taskId)}/token-budget`,
+                        { cache: "no-store" });
+  if (!r.ok) throw new Error(`token-budget: ${r.status}`);
+  return r.json();
+}
+
+export async function updateTokenBudget(taskId, payload) {
+  // payload: { max_cost_usd?: number|null, max_cost_usd_hard?: number|null }
+  // Returns the post-update snapshot (same shape as getTokenBudget).
+  const r = await fetch(`${TASK_SCOPE(taskId)}/token-budget`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload || {}),
+  });
+  if (!r.ok) {
+    let detail = `${r.status}`;
+    try { detail += `: ${(await r.json()).detail}`; } catch (_) { /* ignore */ }
+    throw new Error(`token-budget update: ${detail}`);
+  }
+  return r.json();
+}
+
 export async function getLog(taskId, tailBytes = 65536) {
   const r = await fetch(
     `${TASK_SCOPE(taskId)}/log?tail_bytes=${tailBytes}`,
@@ -135,9 +160,12 @@ export async function getLog(taskId, tailBytes = 65536) {
 
 // ---- calc-theoretical-value: rough + streaming cells --------------------- //
 
-export async function getCalcRough(taskId) {
-  const r = await fetch(`${TASK_SCOPE(taskId)}/calc/rough`,
-    { cache: "no-store" });
+export async function getCalcRough(taskId, batchSize, seqLen) {
+  let url = `${TASK_SCOPE(taskId)}/calc/rough`;
+  if (batchSize != null && seqLen != null) {
+    url += `?batch_size=${encodeURIComponent(batchSize)}&seq_len=${encodeURIComponent(seqLen)}`;
+  }
+  const r = await fetch(url, { cache: "no-store" });
   if (!r.ok) throw new Error(`calc/rough: ${r.status}`);
   return r.json();
 }

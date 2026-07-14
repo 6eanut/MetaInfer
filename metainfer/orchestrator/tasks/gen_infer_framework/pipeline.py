@@ -60,6 +60,7 @@ from .prompts import (
 )
 from ...state import IterationRecord, StateStore
 from ...subagent_manager import AgentSpec, SubAgentManager
+from ...token_budget import TokenBudget
 
 
 JSON_LINE_RE = re.compile(r"\{.*\}")
@@ -192,10 +193,12 @@ class Orchestrator:
         store: StateStore,
         cfg: OrchestratorConfig,
         manager: Optional[SubAgentManager] = None,
+        budget: Optional[TokenBudget] = None,
     ) -> None:
         self.req = req
         self.store = store
         self.cfg = cfg
+        self.budget = budget
         self.manager = manager or SubAgentManager(
             claude_bin=cfg.claude_bin,
             default_model=cfg.model,
@@ -468,6 +471,48 @@ class Orchestrator:
                 phase_rec["failure"] = failure
             if perf:
                 phase_rec["perf"] = perf
+
+            # ---- token-budget circuit breaker ------------------------------ #
+            # After every phase, check whether the task's cost budget has
+            # been exhausted. If so: close the current iteration (with
+            # status=aborted so the WebUI distinguishes "we ran out of
+            # money" from "the agent gave up"), write a timeline event,
+            # set final_status, and break. Subsequent launch() calls
+            # would refuse anyway via the budget's own pre-check; this
+            # loop-level check is what makes the exit prompt + clean.
+            if self.budget is not None and self.budget.snapshot().exhausted:
+                snap = self.budget.snapshot()
+                budget_reason = (
+                    f"token budget exhausted: used ${snap.total_cost_usd:.4f} "
+                    f">= limit ${snap.limit_cost_usd:.4f} "
+                    f"(agents={snap.agent_count}, "
+                    f"in_tokens={snap.total_input_tokens}, "
+                    f"out_tokens={snap.total_output_tokens})"
+                )
+                # Close the iteration as failed (the only closed state
+                # besides success) but stamp outcome=ABORTED so the
+                # record distinguishes "ran out of budget" from "agent
+                # gave up". The TASK-level run.json::final_status is
+                # where we surface "aborted" to the WebUI.
+                self._close_iteration(
+                    iter_rec, status="failed",
+                    failure=budget_reason, perf=ctx.this_iter_perf,
+                    outcome=P.ABORTED,
+                )
+                self.store.append_timeline(
+                    "token_budget_exhausted",
+                    {
+                        "phase": phase, "iteration": iter_num,
+                        "used_cost_usd": snap.total_cost_usd,
+                        "limit_cost_usd": snap.limit_cost_usd,
+                        "agent_count": snap.agent_count,
+                        "per_source": snap.per_source,
+                        "per_phase": snap.per_phase,
+                    },
+                )
+                final_status = "aborted"
+                phase = "finished"
+                break
 
             # ---- escalation: too many attempts at this phase in this folder #
             # Instead of aborting the whole run, close this iteration as

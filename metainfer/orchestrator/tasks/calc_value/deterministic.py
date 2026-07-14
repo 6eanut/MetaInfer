@@ -5,10 +5,10 @@ testable in isolation. The orchestrator relies on these for:
 
 * parsing JSON out of agent responses (which often wrap JSON in
   ```json ... ``` fences or surround it with prose),
-* merging 3 agents' structured outputs into a consensus memory,
+* merging 2 agents' structured outputs into a consensus memory,
 * validating graph.json structure (no orphan nodes, no missing fields),
-* comparing 3 calc scripts' outputs on the 42-combo cartesian product
-  with a strict tolerance, and falling back to median if 15 rounds
+* comparing 2 calc scripts' outputs at the canonical shape (B=1, S=512)
+  with a strict tolerance, and falling back to median if 3 rounds
   don't converge.
 
 Unit-test friendly: every public function takes data, returns data, no
@@ -210,7 +210,7 @@ def _extract_balanced(text: str, open_ch: str, close_ch: str) -> Optional[Any]:
 # Memory merging (Step 1)
 # --------------------------------------------------------------------------- #
 
-# Fields where all 3 agents must agree (else another round).
+# Fields where both agents must agree (else another round).
 CRITICAL_FIELDS = (
     "architecture",
     "num_layers",
@@ -221,7 +221,7 @@ CRITICAL_FIELDS = (
 
 
 def merge_memories(agent_outputs: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """Merge 3 agents' memory dicts into a consensus.
+    """Merge 2 agents' memory dicts into a consensus.
 
     Returns ``(merged_memory, disputes)`` where ``disputes`` is a list of
     ``{field, values: [agent_a_val, agent_b_val, agent_c_val]}`` records
@@ -707,14 +707,15 @@ def aggregated_node_count(graph: Dict[str, Any]) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# Step 3: calc script comparison on the cartesian product
+# Step 3: calc script comparison at the canonical shape
 # --------------------------------------------------------------------------- #
 
-# Per the plan: 7 seq_len × 6 batch_size = 42 combos.
-SEQ_LENS = (1, 8, 64, 512, 4096, 65536, 524288)
-BATCH_SIZES = (1, 4, 32, 256, 1024, 8192)
+# Agents compute at a single canonical shape during the pipeline. The
+# WebUI can re-run calc.py at any other shape on demand via /calc/compute.
+CANONICAL_BATCH = 1
+CANONICAL_SEQ = 512
 
-# Relative tolerance for "3 agents agree". 5% lets writers converge even
+# Relative tolerance for "both agents agree". 5% lets writers converge even
 # when they disagree on minor FLOP-accounting conventions (e.g. whether
 # to include 2KH weighted-combine + scaling-factor multiplies in MoE).
 # ABS_TOL_* are floors used when the reference magnitude is ~0.
@@ -797,157 +798,127 @@ def call_calc(mod, batch_size: int, seq_len: int) -> Dict[str, Dict[str, float]]
     return {"prefill": prefill, "decode": decode}
 
 
-def run_calc_on_grid(script_path: Path) -> List[Dict[str, Any]]:
-    """Load script_path and run its calc() on the full 42-combo grid.
+def run_calc_canonical(script_path: Path) -> Dict[str, Any]:
+    """Load script_path and run its calc() ONCE at the canonical shape
+    (``CANONICAL_BATCH``, ``CANONICAL_SEQ``).
 
-    Returns a list of records::
+    Returns a single record::
 
         {"batch_size": int, "seq_len": int,
          "prefill": {"tflops": float, "access_gb": float},
          "decode":  {"tflops": float, "access_gb": float}}
 
-    Legacy scripts (old shape) produce decode = {0, 0} for every combo.
+    Legacy scripts (old shape) produce decode = {0, 0}.
     """
     mod = load_calc_module(script_path, module_name=f"_calc_{script_path.stem}")
-    out: List[Dict[str, Any]] = []
-    for b in BATCH_SIZES:
-        for s in SEQ_LENS:
-            phases = call_calc(mod, b, s)
-            out.append({
-                "batch_size": b, "seq_len": s,
-                "prefill": phases["prefill"],
-                "decode":  phases["decode"],
-            })
-    return out
+    phases = call_calc(mod, CANONICAL_BATCH, CANONICAL_SEQ)
+    return {
+        "batch_size": CANONICAL_BATCH,
+        "seq_len": CANONICAL_SEQ,
+        "prefill": phases["prefill"],
+        "decode":  phases["decode"],
+    }
 
 
-def compare_calc_grids(
-    grids: List[List[Dict[str, Any]]],
+def compare_calc_results(
+    results: List[Dict[str, Any]],
     *,
     rel_tol: float = REL_TOL,
     abs_tol_flops: float = ABS_TOL_FLOPS,
     abs_tol_bytes: float = ABS_TOL_BYTES,
 ) -> Dict[str, Any]:
-    """Compare N (typically 3) agents' grid outputs combo-by-combo.
+    """Compare N agents' single-shape results.
 
-    Checks four quantities per combo: ``prefill.tflops``, ``prefill.access_gb``,
+    Checks four quantities: ``prefill.tflops``, ``prefill.access_gb``,
     ``decode.tflops``, ``decode.access_gb``. Any one exceeding tolerance
-    records a mismatch entry.
+    records a mismatch entry (at most one entry — there's only one shape).
 
-    Returns::
-
-        {
-          "ok": bool,
-          "mismatches": [
-            {"batch_size": ..., "seq_len": ...,
-             "values": [{"prefill": {...}, "decode": {...}}, ...],
-             "spread": {"prefill": {"tflops": ..., "access_gb": ...},
-                        "decode":  {"tflops": ..., "access_gb": ...}}}
-          ],
-          "rounds": <int>,
-        }
+    Returns ``{"ok": bool, "mismatches": [...], "rounds": n}``.
     """
-    n = len(grids)
-    mismatches: List[Dict[str, Any]] = []
+    n = len(results)
     if n == 0:
         return {"ok": False, "mismatches": [], "rounds": 0,
-                "error": "no grids provided"}
-    # All grids must have the same length (= 42).
-    if any(len(g) != len(grids[0]) for g in grids):
-        return {"ok": False, "mismatches": [], "rounds": n,
-                "error": "grids have different lengths"}
-    for idx in range(len(grids[0])):
-        records = [g[idx] for g in grids]
-        # Sanity: same (b, s).
-        b = records[0]["batch_size"]
-        s = records[0]["seq_len"]
-        for r in records[1:]:
-            if r["batch_size"] != b or r["seq_len"] != s:
-                return {"ok": False, "mismatches": mismatches, "rounds": n,
-                        "error": f"grid row {idx} combo mismatch"}
-        # Each record now carries {prefill: {tflops, access_gb}, decode: {...}}.
-        # Backward-compat: if a record still has the old top-level shape
-        # (legacy calc.py output), normalize it on the fly.
-        def _split(rec: Dict[str, Any]) -> Tuple[Dict[str, float], Dict[str, float]]:
-            if "prefill" in rec or "decode" in rec:
-                pre = rec.get("prefill") or _ZERO_PHASE
-                dec = rec.get("decode") or _ZERO_PHASE
-                return (_coerce_phase(pre), _coerce_phase(dec))
-            return (_coerce_phase(rec), dict(_ZERO_PHASE))
+                "error": "no results provided"}
 
-        split = [_split(r) for r in records]
-        pre = [sp[0] for sp in split]
-        dec = [sp[1] for sp in split]
-        pre_t = [p["tflops"] for p in pre]
-        pre_g = [p["access_gb"] for p in pre]
-        dec_t = [d["tflops"] for d in dec]
-        dec_g = [d["access_gb"] for d in dec]
+    def _split(rec: Dict[str, Any]) -> Tuple[Dict[str, float], Dict[str, float]]:
+        if "prefill" in rec or "decode" in rec:
+            return (_coerce_phase(rec.get("prefill") or _ZERO_PHASE),
+                    _coerce_phase(rec.get("decode") or _ZERO_PHASE))
+        return (_coerce_phase(rec), dict(_ZERO_PHASE))
 
-        def _check(vals: List[float], abs_tol: float) -> Tuple[bool, float, float]:
-            spread = max(vals) - min(vals)
-            ref = max(abs(x) for x in vals)
-            ok = spread <= max(abs_tol, rel_tol * ref)
-            return ok, spread, ref
+    split = [_split(r) for r in results]
+    pre_t = [s[0]["tflops"] for s in split]
+    pre_g = [s[0]["access_gb"] for s in split]
+    dec_t = [s[1]["tflops"] for s in split]
+    dec_g = [s[1]["access_gb"] for s in split]
 
-        pre_t_ok, pre_t_spread, _ = _check(pre_t, abs_tol_flops)
-        pre_g_ok, pre_g_spread, _ = _check(pre_g, abs_tol_bytes)
-        dec_t_ok, dec_t_spread, _ = _check(dec_t, abs_tol_flops)
-        dec_g_ok, dec_g_spread, _ = _check(dec_g, abs_tol_bytes)
-        if not (pre_t_ok and pre_g_ok and dec_t_ok and dec_g_ok):
-            mismatches.append({
-                "batch_size": b,
-                "seq_len": s,
-                "values": [
-                    {"prefill": {"tflops": pt, "access_gb": pg},
-                     "decode":  {"tflops": dt, "access_gb": dg}}
-                    for (pt, pg), (dt, dg) in zip(
-                        ((p["tflops"], p["access_gb"]) for p in pre),
-                        ((d["tflops"], d["access_gb"]) for d in dec),
-                    )
-                ],
-                "spread": {
-                    "prefill": {"tflops": pre_t_spread, "access_gb": pre_g_spread},
-                    "decode":  {"tflops": dec_t_spread, "access_gb": dec_g_spread},
-                },
-            })
-    return {"ok": not mismatches, "mismatches": mismatches, "rounds": n}
+    def _check(vals: List[float], abs_tol: float) -> Tuple[bool, float]:
+        spread = max(vals) - min(vals)
+        ref = max(abs(x) for x in vals)
+        return (spread <= max(abs_tol, rel_tol * ref), spread)
+
+    pre_t_ok, pre_t_spread = _check(pre_t, abs_tol_flops)
+    pre_g_ok, pre_g_spread = _check(pre_g, abs_tol_bytes)
+    dec_t_ok, dec_t_spread = _check(dec_t, abs_tol_flops)
+    dec_g_ok, dec_g_spread = _check(dec_g, abs_tol_bytes)
+
+    if pre_t_ok and pre_g_ok and dec_t_ok and dec_g_ok:
+        return {"ok": True, "mismatches": [], "rounds": n}
+
+    mismatch = {
+        "batch_size": results[0].get("batch_size", CANONICAL_BATCH),
+        "seq_len":    results[0].get("seq_len", CANONICAL_SEQ),
+        "values": [
+            {"prefill": {"tflops": pt, "access_gb": pg},
+             "decode":  {"tflops": dt, "access_gb": dg}}
+            for (pt, pg), (dt, dg) in zip(
+                ((p["tflops"], p["access_gb"]) for p in
+                 [s[0] for s in split]),
+                ((d["tflops"], d["access_gb"]) for d in
+                 [s[1] for s in split]),
+            )
+        ],
+        "spread": {
+            "prefill": {"tflops": pre_t_spread, "access_gb": pre_g_spread},
+            "decode":  {"tflops": dec_t_spread, "access_gb": dec_g_spread},
+        },
+    }
+    return {"ok": False, "mismatches": [mismatch], "rounds": n}
 
 
-def median_fallback(
-    grids: List[List[Dict[str, Any]]],
-) -> List[Dict[str, Any]]:
-    """For each combo, take the median of prefill/decode tflops+gb across N agents.
-
-    Used when 5 rounds of disagreement fail. Each row of the returned
-    grid is annotated with ``source: "median_fallback"`` and includes
-    both phase sub-dicts.
+def median_result(
+    results: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Take the median of prefill/decode tflops+gb across N agents at the
+    single canonical shape. Used when 3 rounds of disagreement fail.
     """
-    if not grids:
-        return []
-    out: List[Dict[str, Any]] = []
-    for idx in range(len(grids[0])):
-        records = [g[idx] for g in grids]
-        # Same normalize as compare_calc_grids — supports legacy shape.
-        def _split(rec: Dict[str, Any]) -> Tuple[Dict[str, float], Dict[str, float]]:
-            if "prefill" in rec or "decode" in rec:
-                return (_coerce_phase(rec.get("prefill") or _ZERO_PHASE),
-                        _coerce_phase(rec.get("decode") or _ZERO_PHASE))
-            return (_coerce_phase(rec), dict(_ZERO_PHASE))
+    if not results:
+        return {
+            "batch_size": CANONICAL_BATCH, "seq_len": CANONICAL_SEQ,
+            "prefill": {"tflops": 0.0, "access_gb": 0.0},
+            "decode":  {"tflops": 0.0, "access_gb": 0.0},
+            "source": "median_fallback_empty",
+        }
 
-        split = [_split(r) for r in records]
-        mid = len(records) // 2
-        pre_t = sorted(s[0]["tflops"] for s in split)[mid]
-        pre_g = sorted(s[0]["access_gb"] for s in split)[mid]
-        dec_t = sorted(s[1]["tflops"] for s in split)[mid]
-        dec_g = sorted(s[1]["access_gb"] for s in split)[mid]
-        out.append({
-            "batch_size": records[0]["batch_size"],
-            "seq_len": records[0]["seq_len"],
-            "prefill": {"tflops": pre_t, "access_gb": pre_g},
-            "decode":  {"tflops": dec_t, "access_gb": dec_g},
-            "source": "median_fallback",
-        })
-    return out
+    def _split(rec: Dict[str, Any]) -> Tuple[Dict[str, float], Dict[str, float]]:
+        if "prefill" in rec or "decode" in rec:
+            return (_coerce_phase(rec.get("prefill") or _ZERO_PHASE),
+                    _coerce_phase(rec.get("decode") or _ZERO_PHASE))
+        return (_coerce_phase(rec), dict(_ZERO_PHASE))
+
+    split = [_split(r) for r in results]
+    mid = len(split) // 2
+    pre_t = sorted(s[0]["tflops"] for s in split)[mid]
+    pre_g = sorted(s[0]["access_gb"] for s in split)[mid]
+    dec_t = sorted(s[1]["tflops"] for s in split)[mid]
+    dec_g = sorted(s[1]["access_gb"] for s in split)[mid]
+    return {
+        "batch_size": results[0].get("batch_size", CANONICAL_BATCH),
+        "seq_len":    results[0].get("seq_len", CANONICAL_SEQ),
+        "prefill": {"tflops": pre_t, "access_gb": pre_g},
+        "decode":  {"tflops": dec_t, "access_gb": dec_g},
+        "source": "median_fallback",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -963,8 +934,8 @@ def format_mismatches_for_prompt(mismatches: List[Dict[str, Any]],
     always emits prefill/decode).
     """
     if not mismatches:
-        return "All combos agreed."
-    lines = [f"Total mismatches: {len(mismatches)} (showing first {max_rows})"]
+        return "Agents agreed at the canonical shape."
+    lines = [f"Mismatches at canonical shape: {len(mismatches)}"]
     for m in mismatches[:max_rows]:
         cells = []
         for i, v in enumerate(m["values"]):
@@ -981,7 +952,7 @@ def format_mismatches_for_prompt(mismatches: List[Dict[str, Any]],
                 cells.append(f"a{i}=(t={v.get('tflops', 0):.4g}, "
                              f"gb={v.get('access_gb', 0):.4g})")
         lines.append(
-            f"  batch={m['batch_size']:<5d} seq={m['seq_len']:<6d}  "
+            f"  batch={m.get('batch_size')} seq={m.get('seq_len')}  "
             + "  ".join(cells)
         )
     return "\n".join(lines)

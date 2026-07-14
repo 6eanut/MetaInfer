@@ -1,20 +1,19 @@
-"""Step 1: analyze model + framework code from 3 angles.
+"""Step 1: analyze model + framework code from 2 angles.
 
-Spawns 3 parallel agents using SubAgentManager.launch_async, each
+Spawns 2 parallel agents using SubAgentManager.launch_async, each
 getting the same model_dir + framework_source_dir but a different
 analysis strategy:
 
 * agent_a: top-down from config.json
 * agent_b: bottom-up from cmdline flags + env vars
-* agent_c: weight-driven from safetensors/bin load paths
 
 Each agent Writes its structured findings to ``output.json`` in its
 workdir; the loader (:func:`deterministic.load_agent_json`) reads that
 file and only falls back to scraping the natural-language response if
-the file is missing. The 3 outputs are merged into a consensus
+the file is missing. The 2 outputs are merged into a consensus
 memory.json (see :func:`deterministic.merge_memories`).
 
-If the merge surfaces disputes on CRITICAL_FIELDS, the 3 agents are
+If the merge surfaces disputes on CRITICAL_FIELDS, the 2 agents are
 re-prompted with the disputes and produce a new round. Max 3 rounds;
 after that the merge (with disputes noted) is accepted.
 """
@@ -78,9 +77,9 @@ def _launch_round(
     prev_outputs: Optional[List[Dict[str, Any]]] = None,
     disputes: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Launch 3 parallel agents, return their parsed JSON outputs.
+    """Launch 2 parallel agents, return their parsed JSON outputs.
 
-    On round 0 the 3 angle-prompts are used. On rounds >=1 the
+    On round 0 the 2 angle-prompts are used. On rounds >=1 the
     disagreement prompt is used (each agent gets the same disputes +
     its own previous output).
     """
@@ -105,10 +104,9 @@ def _launch_round(
         spec_builders = [
             ("agent_a", P.STEP1_AGENT_A_PROMPT),
             ("agent_b", P.STEP1_AGENT_B_PROMPT),
-            ("agent_c", P.STEP1_AGENT_C_PROMPT),
         ]
     else:
-        # Disagreement round: all 3 agents use the disagreement prompt,
+        # Disagreement round: both agents use the disagreement prompt,
         # but each gets ITS OWN previous output.
         if prev_outputs is None or disputes is None:
             raise ValueError("disagreement round requires prev_outputs + disputes")
@@ -137,7 +135,7 @@ def _launch_round(
                 name=name, workdir=workdir, log_dir=log_dir, prompt_text=text,
             ))
 
-    # Launch all 3 in parallel (max_concurrent on the manager gates).
+    # Launch both in parallel (max_concurrent on the manager gates).
     threads = []
     for spec in specs:
         t = manager.launch_async(spec)
@@ -198,13 +196,13 @@ def run_step1_analyze(
     manager,
     paths: Dict[str, Path],
 ) -> Path:
-    """Run Step 1: 3-angle analysis with up to 3 rounds of reconciliation.
+    """Run Step 1: 2-angle analysis with up to 3 rounds of reconciliation.
 
     Returns the path to ``step1/memory.json``.
     """
     step1_dir = paths["step1_dir"]
     store.append_timeline("calc_value.s1.agents.launched",
-                          {"angles": ["a_topdown", "b_bottomup", "c_weightdriven"]})
+                          {"angles": ["a_topdown", "b_bottomup"]})
 
     prev_outputs: Optional[List[Dict[str, Any]]] = None
     prev_disputes: Optional[List[Dict[str, Any]]] = None

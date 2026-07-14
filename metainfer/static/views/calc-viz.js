@@ -20,7 +20,7 @@ import { CalcIterations } from "app/calc-iterations";
 import { labelFor } from "app/utils";
 
 const STEPS = [
-  { id: "s1_analyze", label: "S1: Analyze code (3 agents)" },
+  { id: "s1_analyze", label: "S1: Analyze code (2 agents)" },
   { id: "s2_graph", label: "S2: Build & validate graph" },
   { id: "s3_calculate", label: "S3: Calculate FLOPs / mem" },
   { id: "s4_visualize", label: "S4: Generate visualization" },

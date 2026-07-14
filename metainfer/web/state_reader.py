@@ -298,3 +298,58 @@ def append_timeline_event(
     }
     with open(state_dir / "timeline.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
+
+
+def reset_state_dir(
+    state_dir: Path, task_id: str, task_type: str,
+) -> Dict[str, Any]:
+    """Wipe everything in ``state_dir`` except ``requirements.json``.
+
+    Removes run.json, timeline.jsonl, orchestrator.log, orchestrator.pid,
+    agents.json, and all subdirectories (iterations/, code/, logs/,
+    step0..4/, etc.). Then writes a fresh ``run.json`` matching the
+    RunStatus defaults so the WebUI shows a clean idle state immediately,
+    and stamps a single ``task_reset`` timeline event so the reset itself
+    is auditable.
+
+    Caller MUST ensure the orchestrator is not running — this function
+    does not check.
+    """
+    import shutil
+    state_dir = Path(state_dir)
+    keep = {"requirements.json"}
+    removed: List[str] = []
+    if state_dir.exists():
+        for p in state_dir.iterdir():
+            if p.name in keep:
+                continue
+            try:
+                if p.is_dir() and not p.is_symlink():
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    p.unlink()
+                removed.append(p.name + ("/" if p.is_dir() else ""))
+            except OSError:
+                pass
+    now = time.time()
+    fresh_run = {
+        "task_id": task_id,
+        "task_type": task_type,
+        "created_at": now,
+        "current_iteration": 0,
+        "current_phase": "idle",
+        "last_update": now,
+        "finished": False,
+        "final_status": None,
+        "last_outcome": None,
+        "last_transition_label": None,
+        "notes": [],
+    }
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "run.json").write_text(
+        json.dumps(fresh_run, indent=2), encoding="utf-8",
+    )
+    append_timeline_event(state_dir, "task_reset", {
+        "task_id": task_id, "reset_at": now, "removed_count": len(removed),
+    })
+    return {"removed": removed, "run": fresh_run}

@@ -102,7 +102,7 @@ class RequestResult:
     """One HTTP request's outcome."""
     case_id: str
     elapsed_s: float
-    http_status: Optional[int]
+    http_status: Optional[int] = None
     output_text: str = ""
     output_tokens: int = 0
     input_tokens: int = 0

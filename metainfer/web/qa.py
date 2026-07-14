@@ -61,6 +61,12 @@ class EventsFileNotFound(Exception):
     without catching unrelated FileNotFoundErrors from index writes."""
 
 
+class BudgetExhausted(Exception):
+    """Raised by start_qa_session when the task's token-cost budget has
+    been exhausted and no new analyst may launch. Route maps this to
+    HTTP 429."""
+
+
 # --------------------------------------------------------------------------- #
 # Prompt
 # --------------------------------------------------------------------------- #
@@ -381,6 +387,19 @@ def start_qa_session(
     target_label = payload.get("target_label") or (
         f"events_file={events_file.name}")
 
+    # Token-budget pre-check: refuse to spawn a new analyst if the
+    # task's cost budget is exhausted. The orchestrator process and
+    # the WebUI process share state via the persisted JSON, so we
+    # re-load the budget from disk here to see the latest totals.
+    # (Concurrent record between the two processes is rare and at
+    # worst causes one record to be lost on collision — acceptable
+    # for the MVP soft-abort use case.)
+    budget = _load_budget_for_check(state_dir)
+    if budget is not None:
+        refusal = budget.check_launch_allowed(f"qa:{target_label}")
+        if refusal is not None:
+            raise BudgetExhausted(refusal)
+
     prompt = _build_analyst_prompt(
         question=question,
         events_file=events_file,
@@ -543,7 +562,8 @@ def finalize_session(
     _write_status(session_dir, new_status)
     (session_dir / "answer.txt").write_text(answer, encoding="utf-8")
 
-    # Update the index entry.
+    # Fold the analyst's cost into the task's token budget. Best-effort;
+    # helper swallows its own errors.
     request_p = session_dir / "request.json"
     request_rec: Dict[str, Any] = {}
     if request_p.exists():
@@ -551,6 +571,10 @@ def finalize_session(
             request_rec = json.loads(request_p.read_text(encoding="utf-8"))
         except (ValueError, OSError):
             pass
+    _record_analyst_usage(state_dir, session_dir,
+                          request_rec.get("target_label"))
+
+    # Update the index entry.
     _upsert_index(state_dir, _index_entry_from_session_dir(
         session_dir, request_rec, new_status,
     ))
@@ -583,6 +607,86 @@ def _terminate_proc(proc: subprocess.Popen, reason: str = "manual") -> None:
                 proc.kill()
     finally:
         pass  # events file is closed by the caller
+
+
+# --------------------------------------------------------------------------- #
+# Token budget integration
+# --------------------------------------------------------------------------- #
+#
+# The qa module runs in the WebUI process, which is SEPARATE from the
+# orchestrator process that owns the canonical SubAgentManager. Both
+# processes share state via the persisted ``<state_dir>/token_budget.json``
+# file. We construct a fresh TokenBudget for each operation (pre-check
+# and post-run record) so we always see the latest totals from disk.
+#
+# Concurrency caveat: if the orchestrator and an analyst both finish
+# within the same ~10ms window, one record may be lost on file replace.
+# Acceptable for the soft-abort use case (running total is best-effort
+# at the boundary); a file-lock-based scheme would be needed for
+# strict accounting.
+
+
+def _load_budget_for_check(state_dir: Path) -> Optional[Any]:
+    """Construct a TokenBudget that picks up limits + history from disk.
+
+    Returns None if no budget file exists (task has no limit configured
+    — the common case for legacy tasks created before this feature).
+    """
+    # Local import — keeps the qa module importable even if some
+    # downstream user pulls it out of the orchestrator package.
+    from ..orchestrator.token_budget import TokenBudget  # noqa: PLC0415
+    budget_path = state_dir / "token_budget.json"
+    if not budget_path.exists():
+        return None
+    # Passing no limits forces TokenBudget to honor whatever is on disk
+    # (which is exactly what we want — the WebUI shouldn't second-guess
+    # the limits the orchestrator was launched with).
+    return TokenBudget(state_dir)
+
+
+def _record_analyst_usage(
+    state_dir: Path, session_dir: Path, target_label: Optional[str],
+) -> None:
+    """Scan analyst_events.jsonl for the ``result`` event and record its
+    usage into the task's budget. Best-effort: any error is swallowed
+    so a recording failure can't make a successful analyst look failed.
+    """
+    try:
+        from ..orchestrator.token_budget import (  # noqa: PLC0415
+            TokenBudget, usage_from_result_event,
+        )
+        budget = _load_budget_for_check(state_dir)
+        if budget is None:
+            return  # task has no budget configured
+        events_path = session_dir / "analyst_events.jsonl"
+        if not events_path.exists():
+            return
+        result_ev: Optional[Dict[str, Any]] = None
+        with open(events_path, "r", encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    ev = json.loads(ln)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(ev, dict) and ev.get("type") == "result":
+                    result_ev = ev
+        if result_ev is None:
+            return  # no result event → killed/crashed → nothing to record
+        rec = usage_from_result_event(
+            result_ev,
+            agent=f"qa:{target_label or session_dir.name}",
+            source="web_qa",
+            phase=None,
+        )
+        budget.record(rec)
+    except Exception:  # noqa: BLE001
+        # Budget recording must never break the QA flow. The analyst
+        # already produced a valid answer; lose the record rather than
+        # the answer.
+        return
 
 
 # --------------------------------------------------------------------------- #

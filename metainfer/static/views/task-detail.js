@@ -26,11 +26,13 @@ import { RetrospectiveModal } from "app/retrospective-modal";
 import { CalcRoughPanel } from "app/calc-rough-panel";
 import { CalcAuditPanel } from "app/calc-audit-panel";
 import { CalcVizTab } from "app/calc-viz-tab";
+import { ConfirmActionModal } from "app/confirm-action-modal";
+import { BudgetBar } from "app/budget-bar";
 import { labelFor } from "app/utils";
 
 const CALC_TYPE = "calc-theoretical-value";
 
-export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro }) {
+export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro, label }) {
   const [iterations, setIterations] = useState([]);
   const [timeline, setTimeline] = useState({ events: [], since: 0 });
   const [charts, setCharts] = useState(null);
@@ -40,6 +42,7 @@ export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro }) {
   const [loadState, setLoadState] = useState("loading"); // loading | ok | error
   const [lastErr, setLastErr] = useState(null);
   const [activeTab, setActiveTab] = useState("rough");
+  const [showReset, setShowReset] = useState(false);
 
   const withTimeout = (p, ms = 8000) =>
     Promise.race([
@@ -104,6 +107,7 @@ export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro }) {
       setTimeout(refreshAll, 400);
     } catch (e) {
       console.error(e);
+      throw e;
     }
   };
 
@@ -112,6 +116,11 @@ export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro }) {
   const finalStatus = run?.final_status;
   const running = !!status?.running;
   const isCalc = (run?.task_type || "") === CALC_TYPE;
+  // Human-friendly task name shown in the header and required as the
+  // confirmation text for destructive actions (reset / close). Prefer
+  // the registry label (what the user typed at creation); fall back to
+  // the run's task_id (slug + short uuid) and finally the raw id.
+  const taskName = label || run?.task_id || taskId;
 
   const retroIter = selectedIter != null
     ? (typeof selectedIter === "number" ? selectedIter : null)
@@ -194,6 +203,7 @@ export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro }) {
           <strong>刷新失败：</strong> ${lastErr}
           <span class="muted">（轮询会自动重试）</span>
         </div>` : null}
+      <${BudgetBar} taskId=${taskId} refreshKey=${onChange} />
       <header class="task-header">
         <div class="task-id">
           <span class="label">task</span>
@@ -224,6 +234,12 @@ export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro }) {
                 onClick=${() => onControl("kill", { force: true })}>Kill</button>`
             : html`<button class="btn ghost"
                 onClick=${() => onControl("restart")}>Restart</button>`}
+          ${!running
+            ? html`<button class="btn danger"
+                disabled=${running}
+                title=${running ? "任务运行中，无法重置" : "清除所有迭代/日志，保留原始任务输入"}
+                onClick=${() => setShowReset(true)}>Reset</button>`
+            : null}
         </div>
       </header>
 
@@ -235,6 +251,16 @@ export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro }) {
           taskId=${taskId}
           iteration=${selectedIter}
           onClose=${() => setSelectedIter(null)} />
+      ` : null}
+
+      ${showReset ? html`
+        <${ConfirmActionModal}
+          title="重置任务到初始状态"
+          promptText="将删除所有日志、迭代产物、调试信息、运行记录，仅保留创建任务时的原始输入（requirements.json）。任务运行次数清零。重置后点击 Restart 即可重新开始。"
+          confirmText=${taskName}
+          confirmLabel="重置"
+          onConfirm=${() => onControl("reset")}
+          onClose=${() => setShowReset(false)} />
       ` : null}
     </div>
   `;

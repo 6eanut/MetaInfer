@@ -123,7 +123,7 @@ def run_pipeline(
         step_name="S1", phase=_phases.S1_ANALYZE,
         store=store, manager=manager, paths=paths, req=req,
         runner=run_step1_analyze,
-        set_phase_label="analyze code from 3 angles",
+        set_phase_label="analyze code from 2 angles",
     )
     store.append_timeline("calc_value.s1.done",
                           {"memory": str(memory_path)})
@@ -144,7 +144,7 @@ def run_pipeline(
         step_name="S3", phase=_phases.S3_CALCULATE,
         store=store, manager=manager, paths=paths, req=req,
         runner=run_step3_calculate,
-        set_phase_label="3 agents × 42 combos; converge with median fallback",
+        set_phase_label="2 agents × canonical shape; converge with median fallback",
         graph_path=graph_path,
     )
     store.append_timeline("calc_value.s3.done",

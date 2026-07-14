@@ -40,9 +40,9 @@ STEP_ORDER: List[str] = [S0_ROUGH, S1_ANALYZE, S2_GRAPH, S3_CALCULATE, S4_VISUAL
 
 HUMAN_LABEL = {
     S0_ROUGH: "S0: Rough single-pass estimate",
-    S1_ANALYZE: "S1: Analyze code (3 agents)",
+    S1_ANALYZE: "S1: Analyze code (2 agents)",
     S2_GRAPH: "S2: Build & validate execution graph",
-    S3_CALCULATE: "S3: Calculate FLOPs / mem-traffic (3 angles × 5-way parallel)",
+    S3_CALCULATE: "S3: Calculate FLOPs / mem-traffic (2 angles × 5-way parallel)",
     S4_VISUALIZE: "S4: Generate HTML visualization",
     FINISHED: "finished",
     IDLE: "idle",

@@ -17,11 +17,11 @@ Pipeline shape::
 
 Each step is internally self-converging:
 
-* S1: 3 independent agents analyze code from 3 angles → memory.json
+* S1: 2 independent agents analyze code from 2 angles → memory.json
 * S2: build graph.json, then per-node LLM validation, iterate to convergence
-* S3: 3 independent agents write Python calc functions per node; deterministic
-  verification on a 7×6 cartesian product (seq_len × batch_size = 42 combos);
-  median-fallback after 15 rounds
+* S3: 2 independent agents write Python calc functions per node; deterministic
+  verification at the canonical shape (B=1, S=512); median-fallback after
+  3 rounds. The WebUI re-runs the final calc.py at arbitrary shapes on demand.
 * S4: one agent generates an HTML visualization that calls back into the
   WebUI's /compute endpoint at runtime
 """

@@ -3,8 +3,9 @@
 Single agent reads config.json, derives back-of-envelope formulas for
 every standard LLM operator node, and writes one simplified calc.py per
 node under ``step0/per_node/<compound>.py`` plus a ``rough_graph.json``
-manifest. The orchestrator then runs each calc.py on the 42-combo grid
-and aggregates results into ``rough_results.json`` for the WebUI.
+manifest. The orchestrator then runs each calc.py at the canonical shape
+(B=1, S=512) and aggregates results into ``rough_results.json`` for the
+WebUI. The WebUI can re-run each script at other shapes on demand.
 
 Goal: get defensible numbers on screen within minutes, before the
 detailed audit (S1+S2+S3) catches up. The detailed audit overwrites
@@ -122,13 +123,15 @@ def _run_per_node_grid(
     graph: Dict[str, Any],
     store,
 ) -> List[Dict[str, Any]]:
-    """Run each per_node/<compound>.py on the 42-combo grid.
+    """Run each per_node/<compound>.py at the canonical shape.
 
     Returns a list of result rows:
-        [{compound, section_id, node_id, ok, grid, error, tflops_picked, gb_picked}]
-    where tflops_picked/gb_picked are the values at (B=1, S=2048) for
-    quick UI display. (B=1, S=2048) isn't in the standard 42-combo grid,
-    so we ALSO run that specific combo separately.
+        [{compound, section_id, node_id, ok, prefill, decode, error,
+          tflops_picked, gb_picked}]
+    where prefill/decode hold the canonical-shape (B=1, S=512) result and
+    tflops_picked/gb_picked are legacy aliases equal to prefill.tflops /
+    prefill.access_gb. The WebUI re-runs each script at other shapes
+    on demand via /calc/rough?batch_size=&seq_len=.
     """
     per_node = workdir / "per_node"
     results: List[Dict[str, Any]] = []
@@ -179,37 +182,30 @@ def _run_per_node_grid(
             "section_kind": meta["section_kind"],
             "section_repeat_count": meta["section_repeat_count"],
             "ok": False,
-            "grid": [],
             "error": None,
             # Aliases kept for legacy clients — equal to prefill.tflops/gb.
             "tflops_picked": None,
             "gb_picked": None,
-            # Authoritative phase-split values for the picked combo.
+            # Authoritative phase-split values at the canonical shape.
             "prefill": None,
             "decode": None,
         }
         try:
-            grid = det.run_calc_on_grid(script)
-            row["grid"] = grid
+            result = det.run_calc_canonical(script)
             row["ok"] = True
-            # Pick a representative combo for quick display: B=1, S=512
-            # (smallest non-trivial seq_len in the grid).
-            for r in grid:
-                if r["batch_size"] == 1 and r["seq_len"] == 512:
-                    pre = r.get("prefill") or {}
-                    dec = r.get("decode") or {}
-                    row["prefill"] = {
-                        "tflops": pre.get("tflops", 0.0),
-                        "access_gb": pre.get("access_gb", 0.0),
-                    }
-                    row["decode"] = {
-                        "tflops": dec.get("tflops", 0.0),
-                        "access_gb": dec.get("access_gb", 0.0),
-                    }
-                    # Legacy aliases.
-                    row["tflops_picked"] = pre.get("tflops", 0.0)
-                    row["gb_picked"] = pre.get("access_gb", 0.0)
-                    break
+            pre = result.get("prefill") or {}
+            dec = result.get("decode") or {}
+            row["prefill"] = {
+                "tflops": pre.get("tflops", 0.0),
+                "access_gb": pre.get("access_gb", 0.0),
+            }
+            row["decode"] = {
+                "tflops": dec.get("tflops", 0.0),
+                "access_gb": dec.get("access_gb", 0.0),
+            }
+            # Legacy aliases.
+            row["tflops_picked"] = pre.get("tflops", 0.0)
+            row["gb_picked"] = pre.get("access_gb", 0.0)
         except Exception as exc:  # noqa: BLE001
             row["error"] = f"{type(exc).__name__}: {exc}"
         results.append(row)

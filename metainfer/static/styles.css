@@ -64,7 +64,7 @@
 
 html, body {
   height: 100%;
-  overflow: hidden;  /* single-window app — no page scroll */
+  overflow: hidden;  /* single-window app — scrolling happens in .workspace */
 }
 
 body {
@@ -242,7 +242,8 @@ body {
 
 /* ------------------------- Workspace ------------------------- */
 .workspace {
-  overflow: hidden;
+  overflow-y: auto;       /* scroll instead of squashing panels */
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -272,8 +273,9 @@ body {
 .task-detail {
   display: flex;
   flex-direction: column;
-  flex: 1;
-  min-height: 0;
+  /* Natural content height — .workspace scrolls instead of compressing
+     panels when the window is short. */
+  flex: 0 0 auto;
   gap: var(--sp-3);
 }
 .task-banner {
@@ -340,11 +342,13 @@ body {
 .task-grid {
   display: grid;
   grid-template-columns: minmax(360px, 1fr) minmax(480px, 2fr);
-  grid-template-rows: auto auto 1fr;
+  grid-template-rows: auto auto auto;
   gap: var(--sp-3);
-  flex: 1;
+  /* Take natural content height — don't force-fill the viewport.
+     When the window is short, the .workspace scrolls instead of
+     squashing these panels. */
+  flex: 0 0 auto;
   min-height: 0;
-  overflow: hidden;
 }
 /* Panel placement:
    row 1 col 1: state graph
@@ -699,6 +703,63 @@ ul.timeline li .muted { color: var(--muted); }
   padding: var(--sp-5);
   overflow: auto;
   flex: 1;
+}
+
+/* Destructive-action confirmation modal (reset task / close+delete task). */
+.modal.confirm-action-modal { width: min(560px, 95vw); }
+.confirm-action-modal .confirm-prompt {
+  margin: 0 0 var(--sp-4);
+  color: var(--fg-dim);
+  line-height: 1.6;
+}
+.confirm-action-modal .confirm-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  background: var(--bg);
+  padding: var(--sp-3);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--sp-4);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+.confirm-action-modal .confirm-target {
+  font-family: var(--fs-mono);
+  background: var(--panel-2);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--accent-2);
+  user-select: all;
+  cursor: text;
+}
+.confirm-action-modal .btn.small {
+  padding: 2px 8px;
+  font-size: var(--fs-xs);
+}
+.confirm-action-modal .confirm-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+.confirm-action-modal .confirm-input {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--fs-mono);
+  font-size: var(--fs-md);
+}
+.confirm-action-modal .confirm-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.confirm-action-modal .confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-3);
 }
 
 /* Retrospective markdown rendering */
@@ -1471,4 +1532,147 @@ code {
 .calc-combo-controls input:focus {
   outline: none;
   border-color: #58a6ff;
+}
+
+/* ---- Token budget bar (task detail header) ----------------------------- */
+.budget-bar-wrap {
+  background: var(--panel-bg, #161b22);
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+.budget-bar-wrap.exhausted {
+  border-color: #f85149;
+  background: rgba(248, 81, 73, 0.06);
+}
+.budget-bar-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.budget-label {
+  font-weight: 600;
+  color: #c9d1d9;
+}
+.budget-numbers strong {
+  color: #e6edf3;
+}
+.budget-pct {
+  color: #8b949e;
+  font-variant-numeric: tabular-nums;
+}
+.budget-tag {
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-weight: 700;
+}
+.budget-tag-soft {
+  background: #f85149;
+  color: #fff;
+}
+.budget-tag-hard {
+  background: #a371f7;
+  color: #fff;
+}
+.budget-hardlimit {
+  margin-left: auto;
+  font-size: 11px;
+}
+.budget-bar-track {
+  height: 6px;
+  background: #21262d;
+  border-radius: 3px;
+  overflow: hidden;
+  margin: 8px 0 6px;
+}
+.budget-bar-fill {
+  height: 100%;
+  background: #2ea043;
+  transition: width 0.4s ease, background 0.3s;
+}
+.budget-bar-fill.budget-warm     { background: #d29922; }
+.budget-bar-fill.budget-hot      { background: #db6d28; }
+.budget-bar-fill.budget-exhausted { background: #f85149; }
+.budget-bar-fill.budget-hard     { background: #a371f7; }
+.budget-bar-meta {
+  font-size: 11px;
+  color: #8b949e;
+}
+
+/* ---- Budget editor modal ---------------------------------------------- */
+.budget-edit-btn {
+  margin-left: auto;
+  padding: 2px 10px !important;
+  font-size: 11px !important;
+}
+.budget-editor-modal {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1100;
+}
+.budget-editor-card {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 22px 26px;
+  width: min(440px, 92vw);
+  box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+}
+.budget-editor-card h3 {
+  margin: 0 0 8px;
+  color: #e6edf3;
+}
+.budget-editor-card p {
+  margin: 0 0 16px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.budget-editor-card form {
+  display: flex; flex-direction: column; gap: 14px;
+}
+.budget-editor-card label {
+  display: flex; flex-direction: column; gap: 4px;
+  font-size: 12px; color: #c9d1d9;
+}
+.budget-editor-card label span {
+  font-weight: 600;
+}
+.budget-editor-card input {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 6px 10px;
+  color: #e6edf3;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.budget-editor-card input:focus {
+  outline: none; border-color: #58a6ff;
+}
+.budget-editor-card small {
+  font-size: 11px; color: #8b949e;
+}
+.budget-editor-card .form-err {
+  color: #f85149; font-size: 12px;
+}
+.budget-editor-actions {
+  display: flex; justify-content: flex-end; gap: 8px;
+  margin-top: 4px;
+}
+
+/* Unconfigured budget bar (slim "set budget" affordance) */
+.budget-bar-unconfigured {
+  padding: 6px 14px;
+  background: transparent;
+  border-style: dashed;
+}
+.budget-bar-unconfigured .budget-label {
+  color: #8b949e;
+  font-weight: 500;
 }

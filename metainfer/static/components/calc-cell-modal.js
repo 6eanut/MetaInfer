@@ -4,7 +4,7 @@
 //   1. Agent thinking — response.txt rendered as markdown (the agent's
 //      reasoning + commentary about its calc.py).
 //   2. calc.py source — the actual Python script.
-//   3. 42-combo grid + mismatches vs other angles.
+//   3. Canonical-shape result + mismatches vs the other angle.
 //   4. Q&A — user can ask an analyst questions about why this agent
 //      produced this output. Reuses the calc/qa/start endpoint with
 //      the writer's events.jsonl as the target transcript.
@@ -131,14 +131,15 @@ export function CalcCellModal({ taskId, compound, angle, roundIdx, onClose }) {
               </section>
             ` : null}
 
-            ${detail.grid && detail.grid.length ? html`
+            ${detail.result ? html`
               <section class="cell-section">
-                <h4>42 组合数值 <span class="muted small">（decode = 1 token + seq_len KV cache 读取）</span></h4>
+                <h4>计算结果 <span class="muted small">
+                  （canonical shape B=${detail.result.batch_size}, S=${detail.result.seq_len}
+                  · decode = 1 token + seq_len KV cache 读取）
+                </span></h4>
                 <table class="calc-table compact">
                   <thead>
                     <tr>
-                      <th class="right" rowspan="2">batch</th>
-                      <th class="right" rowspan="2">seq_len</th>
                       <th colspan="2" class="center">prefill</th>
                       <th colspan="2" class="center">decode</th>
                     </tr>
@@ -150,20 +151,18 @@ export function CalcCellModal({ taskId, compound, angle, roundIdx, onClose }) {
                     </tr>
                   </thead>
                   <tbody>
-                    ${detail.grid.map((r, i) => {
-                      const pre = r.prefill || {};
-                      const dec = r.decode || {};
+                    ${(() => {
+                      const pre = detail.result.prefill || {};
+                      const dec = detail.result.decode || {};
                       return html`
-                        <tr key=${i}>
-                          <td class="right">${r.batch_size}</td>
-                          <td class="right">${r.seq_len}</td>
-                          <td class="right">${fmtNum(pre.tflops != null ? pre.tflops : r.tflops)}</td>
-                          <td class="right">${fmtNum(pre.access_gb != null ? pre.access_gb : r.access_gb)}</td>
+                        <tr>
+                          <td class="right">${fmtNum(pre.tflops)}</td>
+                          <td class="right">${fmtNum(pre.access_gb)}</td>
                           <td class="right">${fmtNum(dec.tflops)}</td>
                           <td class="right">${fmtNum(dec.access_gb)}</td>
                         </tr>
                       `;
-                    })}
+                    })()}
                   </tbody>
                 </table>
               </section>
@@ -171,9 +170,9 @@ export function CalcCellModal({ taskId, compound, angle, roundIdx, onClose }) {
 
             ${detail.mismatches && detail.mismatches.length > 0 ? html`
               <section class="cell-section">
-                <h4>3 视角分歧（${detail.mismatches.length} 条）</h4>
+                <h4>2 视角分歧（${detail.mismatches.length} 条）</h4>
                 <p class="muted small">
-                  每条记录某 (batch, seq) 下 3 视角的 tflops/gb 差异。
+                  canonical shape 下 2 视角的 prefill/decode tflops/gb 差异。
                   spread &gt; 5% 容差时本轮该节点会被标记为 disputed 进入下一轮。
                 </p>
                 <details>

@@ -356,7 +356,7 @@ export function CalcIterations({ iterations, loading, error, taskId }) {
 
       ${s1.length > 0 ? html`
         <section class="iter-step">
-          <h3>Step 1 · code analysis (3 agents × ${s1.length} round${s1.length === 1 ? "" : "s"})</h3>
+          <h3>Step 1 · code analysis (2 agents × ${s1.length} round${s1.length === 1 ? "" : "s"})</h3>
           ${s1.map((r) => html`
             <${Step1Round} key=${r.round} round=${r}
               onAsk=${taskId ? onAskS1 : null} />

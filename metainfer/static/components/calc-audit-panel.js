@@ -1,21 +1,21 @@
 // Detailed audit panel — renders the streaming [node × angle] grid.
 //
 // Reads /api/tasks/<id>/calc/cells every 3s. Each row is one compound
-// node; columns are the 3 angles (a/b/c) plus a spread% and status.
+// node; columns are the 2 angles (a/b) plus a spread% and status.
 // Cells are clickable — opens CalcCellModal with the agent's thinking
 // + calc.py source.
 //
-// User-controlled batch_size / seq_len inputs at the top re-pick the
-// displayed combo from each cell's grid.json (server-side override via
-// ?batch_size=&seq_len= query params). Defaults to B=1,S=512 which
-// matches the values pre-picked in _state.json.
+// User-controlled batch_size / seq_len inputs at the top re-run each
+// cell's calc.py on the server (via ?batch_size=&seq_len= query params)
+// and override the displayed values. Defaults to B=1,S=512 which matches
+// the canonical shape baked into _state.json.
 
 import { html } from "htm/preact";
 import { useEffect, useState } from "preact/hooks";
 import { getCalcCells } from "app/api";
 import { CalcCellModal } from "app/calc-cell-modal";
 
-const ANGLES = ["a", "b", "c"];
+const ANGLES = ["a", "b"];
 const DEFAULT_BATCH = 1;
 const DEFAULT_SEQ = 512;
 
@@ -81,7 +81,7 @@ export function CalcAuditPanel({ taskId }) {
       <section class="panel">
         <h2>详细审计</h2>
         <p class="muted">
-          S3 尚未启动 — 详细审计在 S1+S2 完成后开始。3 个视角串行运行，
+          S3 尚未启动 — 详细审计在 S1+S2 完成后开始。2 个视角串行运行，
           每视角内部 5 节点并发；每完成一格立即显示。
         </p>
       </section>
@@ -130,12 +130,12 @@ export function CalcAuditPanel({ taskId }) {
             }} />
         </label>
         <span class="muted small">
-          表格内每个 cell 的 tflops/gb 是该 (batch, seq) 组合下的取值，
-          从 cell 的 grid.json 42 组合里挑出。改了之后下一次轮询（3s）生效。
+          表格内每个 cell 的 tflops/gb 是该 (batch, seq) 组合下按需重跑 calc.py 的结果。
+          改了之后下一次轮询（3s）生效。
         </span>
       </div>
       <p class="muted small">
-        点击任意已完成的单元格查看 Agent 思考过程 + calc.py 源码 + 42 组合数值 + 提问。
+        点击任意已完成的单元格查看 Agent 思考过程 + calc.py 源码 + 计算结果 + 提问。
       </p>
       <div class="calc-audit-table-wrapper">
         <table class="calc-table calc-audit-table">
@@ -204,8 +204,8 @@ export function CalcAuditPanel({ taskId }) {
                   <td>
                     ${doneCount === 0
                       ? html`<span class="muted">pending</span>`
-                      : doneCount < 3
-                        ? html`<span class="muted">${doneCount}/3 …</span>`
+                      : doneCount < ANGLES.length
+                        ? html`<span class="muted">${doneCount}/${ANGLES.length} …</span>`
                         : (node.converged
                           ? html`<span class="ok">✓ converged</span>`
                           : html`<span class="warn">⚠ disputed</span>`)}

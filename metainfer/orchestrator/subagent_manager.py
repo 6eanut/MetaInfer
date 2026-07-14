@@ -113,11 +113,18 @@ class AgentResult:
     # full input-token cost again.
     session_id: Optional[str] = None
     # Why the agent failed, if it did:
-    #   "infra"  — killed (timeout / stuck / signal) → orchestrator retries
-    #              the same phase in place without consuming an iteration
-    #   "logic"  — nonzero exit with a "real" error → orchestrator's
-    #              transition table decides what to do
-    failure_mode: Optional[Literal["infra", "logic"]] = None
+    #   "infra"    — killed (timeout / stuck / signal) → orchestrator retries
+    #                the same phase in place without consuming an iteration
+    #   "logic"    — nonzero exit with a "real" error → orchestrator's
+    #                transition table decides what to do
+    #   "budget"   — refused to launch because the task's token-cost
+    #                budget was exhausted. Not retriable; the orchestrator
+    #                should treat the whole task as aborted.
+    failure_mode: Optional[Literal["infra", "logic", "budget"]] = None
+    # Cost / usage pulled from the final ``result`` event of the stream.
+    # None when the agent never produced a result event (killed before
+    # completion, budget-refused, or stream-json parse failure).
+    usage: Optional[Dict[str, Any]] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -142,10 +149,23 @@ class SubAgentManager:
         extra_add_dirs: Optional[List[Path]] = None,
         effort: str = "max",
         snapshot_file: Optional[Path] = None,
+        budget: Any = None,
+        budget_source: str = "orchestrator",
     ) -> None:
         self.claude_bin = claude_bin
         self.default_model = default_model
         self.max_concurrent = max_concurrent
+        # Per-task token / cost budget (TokenBudget instance or None to
+        # disable the circuit breaker). When set, every launch is gated
+        # by ``budget.check_launch_allowed`` (refuses new spawns once the
+        # soft threshold is crossed) and every successful run records its
+        # cost via ``budget.record``. The orchestrator loop separately
+        # polls ``budget.snapshot().exhausted`` to abort gracefully.
+        self.budget = budget
+        # Tag stamped onto every UsageRecord emitted from this manager.
+        # Lets the budget bucket distinguish orchestrator-driven agents
+        # from web-qa-driven analysts when both share a state_dir.
+        self.budget_source = budget_source
         # Claude Code "effort" level — controls how much extended thinking
         # the model is allowed to do per turn. Choices: low / medium / high
         # / max. Iteration logs show reviewers writing only ~550 tokens of
@@ -209,6 +229,26 @@ class SubAgentManager:
         Returns once the agent has either succeeded or exhausted its retries.
         The returned handle carries the final process; see :meth:`result`.
         """
+        # Budget pre-check: refuse to spawn a new subprocess once the
+        # task's cost budget is exhausted. Synthetic failure result so
+        # the orchestrator's failure-mode handling can route accordingly
+        # (failure_mode="budget" → abort the whole task, not retry).
+        if self.budget is not None:
+            refusal = self.budget.check_launch_allowed(spec.name)
+            if refusal:
+                synth = AgentResult(
+                    name=spec.name, role=spec.role,
+                    success=False, returncode=-1, duration_s=0.0,
+                    error=refusal, attempts=0,
+                    failure_mode="budget",
+                )
+                with self._ctrl_lock:
+                    self._results[spec.name] = synth
+                self._write_status(spec, AgentHandle(spec=spec, attempt=0),
+                                   synth, 0, phase="budget_refused")
+                self.dump_snapshot()
+                return AgentHandle(spec=spec, attempt=0)
+
         spec.log_dir.mkdir(parents=True, exist_ok=True)
         spec.prompt_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -219,6 +259,12 @@ class SubAgentManager:
             handle = self._run_once(spec, attempt)
             result = self._materialize_result(handle, spec, attempt)
             last_result = result
+            # Record cost into the budget as soon as we have a result,
+            # BEFORE deciding to retry. Even failed attempts cost money,
+            # and we want the running total to reflect that so the next
+            # launch's pre-check can refuse if we just blew past the
+            # limit on this attempt.
+            self._record_budget(spec, result)
             self._write_status(spec, handle, result, attempt, phase="completed")
             # Surface completion to the WebUI's Live Agents panel.
             self.dump_snapshot()
@@ -226,6 +272,16 @@ class SubAgentManager:
                 with self._ctrl_lock:
                     self._results[spec.name] = result
                 return handle
+            # If the budget just got exhausted by this attempt, no
+            # point retrying — refuse fast so the orchestrator can
+            # surface the abort instead of grinding through max_retries.
+            if result.failure_mode == "budget" or (
+                self.budget is not None
+                and self.budget.snapshot().exhausted
+            ):
+                with self._ctrl_lock:
+                    self._results[spec.name] = result
+                return AgentHandle(spec=spec, attempt=attempt - 1)
             # failed -> retry
             self._write_status(spec, handle, result, attempt, phase="retrying")
             time.sleep(2.0)  # brief backoff
@@ -236,6 +292,28 @@ class SubAgentManager:
             self._results[spec.name] = last_result
         # Return a synthetic handle so caller has something to inspect
         return AgentHandle(spec=spec, attempt=attempt - 1)
+
+    def _record_budget(self, spec: AgentSpec, result: AgentResult) -> None:
+        """Fold this attempt's cost into the budget, if any is configured."""
+        if self.budget is None or result.usage is None:
+            return
+        # Local import to avoid a circular dependency at module load time
+        # (token_budget.py is in the same package but doesn't depend on
+        # this module — still, keeping the import local makes the
+        # contract obvious and lets tests stub it more easily).
+        from .token_budget import usage_from_result_event
+        # phase is not stamped on AgentSpec — the caller knows it. We
+        # could add a phase attr to AgentSpec, but the snapshot's
+        # per_phase bucket is best-effort; "(unknown)" is fine here and
+        # the orchestrator can supply a richer record separately if it
+        # cares about per-phase breakdown.
+        rec = usage_from_result_event(
+            result.usage,
+            agent=spec.name,
+            source=self.budget_source,
+            phase=None,
+        )
+        self.budget.record(rec)
 
     def launch_async(self, spec: AgentSpec, on_done: Optional[callable] = None) -> threading.Thread:
         """Run :meth:`launch` on a background thread."""
@@ -622,8 +700,17 @@ class SubAgentManager:
                 session_id = sid
                 if ev.get("type") == "result":
                     break
+        # Pull the cost / usage block from the final ``result`` event.
+        # This is what the token budget circuit breaker keys off. None
+        # when the agent was killed / crashed before emitting result.
+        usage: Optional[Dict[str, Any]] = None
+        for ev in reversed(events):
+            if ev.get("type") == "result" and isinstance(ev, dict):
+                if "usage" in ev or "total_cost_usd" in ev:
+                    usage = ev
+                    break
         error = None
-        failure_mode: Optional[Literal["infra", "logic"]] = None
+        failure_mode: Optional[Literal["infra", "logic", "budget"]] = None
         success = (rc == 0) and not handle.killed
         if handle.killed:
             error = "killed (see events log tail)"
@@ -647,6 +734,7 @@ class SubAgentManager:
             attempts=attempt,
             session_id=session_id,
             failure_mode=failure_mode,
+            usage=usage,
         )
 
     def _write_status(

@@ -28,6 +28,7 @@ from ..._bootstrap import (
 from ...paths import notebooks_dir as _notebooks_dir
 from ...paths import repo_root as _repo_root
 from ...state import StateStore
+from ...token_budget import TokenBudget
 from .pipeline import Orchestrator, OrchestratorConfig
 
 
@@ -147,6 +148,36 @@ def run_with_requirements(
         extra_claude_args=list(extra_claude_args or []),
     )
 
+    # Build the per-task token/cost budget. Reads ``token_budget`` block
+    # from requirements.json (e.g. {"max_cost_usd": 50.0}); env override
+    # METAINFER_TOKEN_BUDGET_COST_USD wins over both. When no limit is
+    # set, budget is None and the circuit breaker is inert.
+    budget = _build_budget(state_dir, req)
+    if budget is not None:
+        # Mirror every record into timeline.jsonl so the WebUI can draw
+        # a live cost-over-time graph without re-parsing events.jsonl.
+        # We attach this AFTER construction (the budget may already have
+        # loaded historical records from disk; those don't fire the
+        # callback, only new records do).
+        store_for_cb = store
+        budget._on_recorded = lambda rec, snap: store_for_cb.append_timeline(
+            "token_usage",
+            {
+                "agent": rec.agent,
+                "source": rec.source,
+                "phase": rec.phase,
+                "input_tokens": rec.input_tokens,
+                "output_tokens": rec.output_tokens,
+                "cache_read_input_tokens": rec.cache_read_input_tokens,
+                "cost_usd": rec.total_cost_usd,
+                "running_total_cost_usd": snap.total_cost_usd,
+                "running_total_input_tokens": snap.total_input_tokens,
+                "running_total_output_tokens": snap.total_output_tokens,
+                "agent_count": snap.agent_count,
+                "exhausted": snap.exhausted,
+            },
+        )
+
     manager = make_subagent_manager(
         claude_bin=claude_bin,
         model=model,
@@ -160,8 +191,17 @@ def run_with_requirements(
         #     prev-iter diagnostic snapshot lives
         extra_add_dirs=[notebooks_dir, repo_root, logs_root],
         snapshot_file=paths["agents_file"],
+        budget=budget,
     )
-    orch = Orchestrator(req=req, store=store, cfg=cfg, manager=manager)
+    # Wire the hard-exhausted callback NOW that the manager exists.
+    # When the hard threshold is crossed, every in-flight agent gets
+    # SIGTERM'd via the manager's process-group kill (soft-abort policy
+    # for the soft threshold; hard threshold = "stop bleeding right
+    # now"). The callback fires exactly once per task lifetime.
+    if budget is not None and budget.max_cost_usd_hard is not None:
+        budget._on_hard = lambda: manager.shutdown()
+    orch = Orchestrator(req=req, store=store, cfg=cfg, manager=manager,
+                        budget=budget)
 
     print(f"[metainfer] task_id        = {task_id}")
     print(f"[metainfer] state dir      = {state_dir}")
@@ -199,3 +239,58 @@ def _extract_max_iter(req: Dict[str, Any], default: int = 20) -> int:
         return int(v)
     except (TypeError, ValueError):
         return default
+
+
+def _build_budget(state_dir: Path, req: Dict[str, Any]) -> Optional[TokenBudget]:
+    """Construct the per-task :class:`TokenBudget` from req + env.
+
+    Resolution order for the soft cost limit (first match wins):
+      1. ``METAINFER_TOKEN_BUDGET_COST_USD`` env var
+      2. ``requirements.json::token_budget.max_cost_usd`` (nested object —
+         direct requirements.json edit)
+      3. ``requirements.json::token_budget_max_cost_usd`` (flat scalar —
+         what the WebUI new-task form writes when the user fills the
+         "Cost cap" field)
+      4. None — budget circuit breaker disabled
+
+    Hard limit follows the same cascade with the ``_hard`` suffix.
+    """
+    import os
+
+    tb_cfg = (req.get("token_budget")
+              or req.get("answers", {}).get("token_budget")
+              or {})
+    if not isinstance(tb_cfg, dict):
+        tb_cfg = {}
+
+    def _resolve_float(env_key: str, conf_key: str,
+                       flat_key: Optional[str] = None) -> Optional[float]:
+        env_v = os.environ.get(env_key)
+        if env_v:
+            try:
+                return float(env_v)
+            except ValueError:
+                pass
+        # nested object first
+        v = tb_cfg.get(conf_key)
+        if v is None and flat_key:
+            v = req.get(flat_key)
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    soft = _resolve_float("METAINFER_TOKEN_BUDGET_COST_USD", "max_cost_usd",
+                          flat_key="token_budget_max_cost_usd")
+    hard = _resolve_float("METAINFER_TOKEN_BUDGET_COST_USD_HARD",
+                          "max_cost_usd_hard",
+                          flat_key="token_budget_max_cost_usd_hard")
+    if soft is None and hard is None:
+        return None
+    return TokenBudget(
+        state_dir,
+        max_cost_usd=soft,
+        max_cost_usd_hard=hard,
+    )

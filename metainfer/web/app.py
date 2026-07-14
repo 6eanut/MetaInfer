@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -250,6 +251,25 @@ def create_app() -> FastAPI:
                 "ok": True, "action": "restart", "pid": pid,
                 "prior_status": prior_status,
             }
+        if action == "reset":
+            # Destructive: wipe everything except requirements.json so the
+            # task is back to its just-created state. Only allowed when
+            # the orchestrator is stopped — caller must kill first.
+            if launcher.status(task_id).running:
+                raise HTTPException(
+                    409, "task is still running; kill it before resetting",
+                )
+            sd = _state_dir_for(entry)
+            prior_run = _sr.read_run(sd) or {}
+            tid = prior_run.get("task_id") or task_id
+            ttype = prior_run.get("task_type") or entry.type
+            summary = _sr.reset_state_dir(sd, tid, ttype)
+            # Note: we deliberately don't touch the registry here — the
+            # stale pid/finished_at values are inert because launcher.status
+            # reads the (now-wiped) pid file and reports "not running".
+            # The next `launcher.start` will refresh the registry with the
+            # new pid.
+            return {"ok": True, "action": "reset", **summary}
         raise HTTPException(400, f"unknown action: {action}")
 
     # ------------------------------------------------------------------ #
@@ -292,6 +312,144 @@ def create_app() -> FastAPI:
     def task_agents(task_id: str) -> Dict[str, Any]:
         entry = _task_or_404(task_id)
         return _sr.read_agents(_state_dir_for(entry))
+
+    @app.get("/api/tasks/{task_id}/token-budget")
+    def task_token_budget(task_id: str) -> Dict[str, Any]:
+        """Return the task's token-cost budget snapshot.
+
+        Reads ``<state_dir>/token_budget.json`` directly (no in-process
+        TokenBudget construction needed on the read side) and returns a
+        flat dict the WebUI can render as a progress bar. Returns 200
+        with ``{"configured": false}`` when no budget file exists yet
+        — the caller renders nothing in that case.
+        """
+        entry = _task_or_404(task_id)
+        budget_path = _state_dir_for(entry) / "token_budget.json"
+        if not budget_path.exists():
+            return {"configured": False}
+        try:
+            data = json.loads(budget_path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            return {"configured": False, "error": "budget file unreadable"}
+        cfg = data.get("config") or {}
+        totals = data.get("totals") or {}
+        used = float(totals.get("total_cost_usd", 0.0))
+        limit = cfg.get("max_cost_usd")
+        hard = cfg.get("max_cost_usd_hard")
+        exhausted = bool(totals.get("exhausted"))
+        hard_exhausted = bool(totals.get("hard_exhausted"))
+        pct = None
+        if isinstance(limit, (int, float)) and limit > 0:
+            pct = round(min(100.0, (used / float(limit)) * 100.0), 2)
+        return {
+            "configured": True,
+            "used_cost_usd": used,
+            "limit_cost_usd": limit,
+            "hard_limit_cost_usd": hard,
+            "exhausted": exhausted,
+            "hard_exhausted": hard_exhausted,
+            "used_pct": pct,
+            "agent_count": int(totals.get("agent_count", 0)),
+            "total_input_tokens": int(totals.get("total_input_tokens", 0)),
+            "total_output_tokens": int(totals.get("total_output_tokens", 0)),
+            "total_cache_read_input_tokens": int(
+                totals.get("total_cache_read_input_tokens", 0)),
+            "per_source": data.get("per_source") or {},
+            "per_phase": data.get("per_phase") or {},
+        }
+
+    @app.post("/api/tasks/{task_id}/token-budget")
+    def task_token_budget_update(task_id: str, body: dict) -> Dict[str, Any]:
+        """Adjust the task's cost limit at runtime.
+
+        Body: ``{"max_cost_usd": <float|null>, "max_cost_usd_hard": <float|null>}``.
+        Keys are optional — only the ones you pass get updated; pass
+        ``null`` to clear that limit.
+
+        Effects:
+          - Atomically rewrites ``token_budget.json::config`` with the
+            new limits. If the file doesn't yet exist (legacy task
+            created before this feature, or a freshly-created task
+            whose orchestrator hasn't started), it gets CREATED here
+            with empty totals — so you can retroactively cap a task
+            that's already running without budget enforcement.
+          - If the orchestrator is still alive, its in-memory
+            :class:`TokenBudget` notices the file mtime change on its
+            next snapshot/poll and picks up the new limit. No IPC
+            needed.
+          - If the run has already aborted (``final_status=aborted``),
+            the user should click Restart after raising the budget;
+            the new orchestrator process loads the updated limit from
+            disk automatically.
+
+        Returns the post-update snapshot (same shape as the GET endpoint).
+        """
+        entry = _task_or_404(task_id)
+        sd = _state_dir_for(entry)
+        budget_path = sd / "token_budget.json"
+        # Read existing file, mutate config block only, write back.
+        # If no file exists yet, start from an empty skeleton.
+        if budget_path.exists():
+            try:
+                data = json.loads(budget_path.read_text(encoding="utf-8"))
+            except (ValueError, OSError) as exc:
+                raise HTTPException(500, f"cannot read budget file: {exc}")
+        else:
+            data = {
+                "schema_version": 1,
+                "config": {},
+                "totals": {
+                    "total_cost_usd": 0.0,
+                    "total_input_tokens": 0,
+                    "total_output_tokens": 0,
+                    "total_cache_read_input_tokens": 0,
+                    "agent_count": 0,
+                    "exhausted": False,
+                    "hard_exhausted": False,
+                },
+                "per_source": {},
+                "per_phase": {},
+                "records": [],
+            }
+        if not isinstance(data, dict):
+            data = {}
+        cfg = data.setdefault("config", {})
+        if not isinstance(cfg, dict):
+            cfg = {}
+            data["config"] = cfg
+        body = body or {}
+        if "max_cost_usd" in body:
+            v = body["max_cost_usd"]
+            cfg["max_cost_usd"] = (float(v) if v is not None else None)
+        if "max_cost_usd_hard" in body:
+            v = body["max_cost_usd_hard"]
+            cfg["max_cost_usd_hard"] = (float(v) if v is not None else None)
+        # Recompute totals.exhausted so the GET response is immediately
+        # consistent (the orchestrator's hot-reload will fix it on its
+        # own next read, but we want the response to be truthful).
+        totals = data.setdefault("totals", {})
+        if not isinstance(totals, dict):
+            totals = {}
+            data["totals"] = totals
+        # Don't lose existing totals when creating fresh on legacy task
+        totals.setdefault("total_cost_usd", 0.0)
+        used = float(totals.get("total_cost_usd", 0.0))
+        soft = cfg.get("max_cost_usd")
+        hard = cfg.get("max_cost_usd_hard")
+        totals["exhausted"] = bool(
+            isinstance(soft, (int, float)) and used >= soft)
+        totals["hard_exhausted"] = bool(
+            isinstance(hard, (int, float)) and used >= hard)
+        # Atomic write. Bump mtime explicitly via os.utime so the
+        # orchestrator's hot-reload (which keys off mtime) always
+        # notices — even when the write happens within the same
+        # second as the previous one.
+        tmp = budget_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.replace(budget_path)
+        os.utime(budget_path)  # bump mtime to "now"
+        # Echo back the updated snapshot by re-reading via GET handler.
+        return task_token_budget(task_id)
 
     @app.get("/api/tasks/{task_id}/log")
     def task_log(task_id: str, tail_bytes: int = 65536) -> Dict[str, Any]:
@@ -777,11 +935,19 @@ def create_app() -> FastAPI:
     # ------------------------------------------------------------------ #
 
     @app.get("/api/tasks/{task_id}/calc/rough")
-    def calc_rough(task_id: str) -> Dict[str, Any]:
+    def calc_rough(task_id: str, request: Request) -> Dict[str, Any]:
         """Return the S0 rough-pass estimate.
 
         Reads ``step0/rough_results.json``. Returns an empty placeholder
         shape if S0 hasn't run yet.
+
+        Optional query params ``batch_size`` and ``seq_len`` override the
+        canonical shape (B=1, S=512) used when the pipeline ran each
+        per-node script: when either is present we re-run each
+        ``step0/agent_rough/per_node/<compound>.py`` at the requested shape
+        on the fly and override the ``prefill`` / ``decode`` (and legacy
+        ``tflops_picked`` / ``gb_picked``) fields in the response. The
+        on-disk file is never modified — recompute is per-request.
         """
         entry = _task_or_404(task_id)
         if entry.type != "calc-theoretical-value":
@@ -791,26 +957,71 @@ def create_app() -> FastAPI:
         if not rough.exists():
             return {"ok": False, "pending": True, "results": [], "graph": {"sections": []}}
         try:
-            return json.loads(rough.read_text(encoding="utf-8"))
+            data = json.loads(rough.read_text(encoding="utf-8"))
         except ValueError:
             return {"ok": False, "pending": False, "error": "corrupt rough_results.json",
                     "results": [], "graph": {"sections": []}}
+
+        qp = request.query_params
+        bs_str = qp.get("batch_size")
+        sl_str = qp.get("seq_len")
+        if bs_str is None and sl_str is None:
+            return data  # canonical-shape values baked into the JSON
+
+        try:
+            bs = int(bs_str) if bs_str is not None else 1
+            sl = int(sl_str) if sl_str is not None else 512
+        except ValueError:
+            raise HTTPException(400, "batch_size / seq_len must be integers")
+        if bs < 1 or sl < 1:
+            raise HTTPException(400, "batch_size / seq_len must be >= 1")
+
+        # On-demand recompute at the requested shape.
+        from ..orchestrator.tasks.calc_value import deterministic as _det
+        per_node_dir = sd / "step0" / "agent_rough" / "per_node"
+        for row in data.get("results") or []:
+            if not isinstance(row, dict) or not row.get("ok"):
+                continue
+            compound = row.get("compound")
+            if not compound:
+                continue
+            script = per_node_dir / f"{compound}.py"
+            if not script.exists():
+                continue
+            try:
+                mod = _det.load_calc_module(
+                    script, module_name=f"_calc_rough_{compound}",
+                )
+                phases = _det.call_calc(mod, bs, sl)
+                pre = phases["prefill"]
+                dec = phases["decode"]
+                row["prefill"] = pre
+                row["decode"] = dec
+                # Legacy aliases.
+                row["tflops_picked"] = pre["tflops"]
+                row["gb_picked"] = pre["access_gb"]
+            except Exception:  # noqa: BLE001
+                # Leave canonical values in place if recompute fails.
+                continue
+        data["combo"] = {"batch_size": bs, "seq_len": sl}
+        return data
 
     @app.get("/api/tasks/{task_id}/calc/cells")
     def calc_cells(task_id: str, request: Request) -> Dict[str, Any]:
         """Return the S3 streaming cell-state grid.
 
-        Reads ``step3/cells/_state.json`` written by the new angle-serial
-        / node-parallel S3. The UI renders the live audit table directly
+        Reads ``step3/cells/_state.json`` written by the angle-serial /
+        node-parallel S3. The UI renders the live audit table directly
         from this document. Returns an empty shell if S3 hasn't started.
 
         Optional query params ``batch_size`` and ``seq_len`` override the
-        default picked combo (B=1, S=512) shown in each cell: when either
-        is present we walk every cell's ``grid.json`` and pick the
-        matching combo, overriding ``tflops`` / ``gb`` in the response.
-        The on-disk ``_state.json`` is never modified — re-pick runs
-        per-request. Falls back silently to the stored picked value if a
-        cell's grid.json is missing or doesn't contain the requested combo.
+        canonical shape (B=1, S=512) baked into the stored cell values:
+        when either is present we re-run each cell's calc.py at the
+        requested shape on the fly and override ``prefill`` / ``decode``
+        (and legacy ``tflops`` / ``gb``) in the response. The on-disk
+        ``_state.json`` is never modified — recompute is per-request.
+        Falls back silently to the stored value if a cell's calc.py is
+        missing or its recompute raises.
         """
         entry = _task_or_404(task_id)
         if entry.type != "calc-theoretical-value":
@@ -828,7 +1039,7 @@ def create_app() -> FastAPI:
         bs_str = qp.get("batch_size")
         sl_str = qp.get("seq_len")
         if bs_str is None and sl_str is None:
-            return data  # default picked values, no override
+            return data  # canonical-shape values baked into _state.json
 
         try:
             bs = int(bs_str) if bs_str is not None else 1
@@ -838,6 +1049,7 @@ def create_app() -> FastAPI:
         if bs < 1 or sl < 1:
             raise HTTPException(400, "batch_size / seq_len must be >= 1")
 
+        from ..orchestrator.tasks.calc_value import deterministic as _det
         cells_root = sd / "step3" / "cells"
         nodes = data.get("nodes") or {}
         for compound, node in nodes.items():
@@ -845,39 +1057,33 @@ def create_app() -> FastAPI:
             for angle, c in cells.items():
                 if not isinstance(c, dict):
                     continue
-                # status must be a "produced grid" state to re-pick.
+                # Need a usable calc.py to recompute.
                 if c.get("status") not in ("ok", "approximate"):
                     continue
                 round_idx = c.get("round")
                 if round_idx is None:
                     continue
-                grid_path = (
+                calc_path = (
                     cells_root / compound / angle
-                    / f"round_{int(round_idx):02d}" / "grid.json"
+                    / f"round_{int(round_idx):02d}" / "writer" / "calc.py"
                 )
-                if not grid_path.exists():
+                if not calc_path.exists():
                     continue
                 try:
-                    grid = json.loads(grid_path.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
+                    mod = _det.load_calc_module(
+                        calc_path, module_name=f"_calc_cell_{compound}_{angle}",
+                    )
+                    phases = _det.call_calc(mod, bs, sl)
+                    pre = phases["prefill"]
+                    dec = phases["decode"]
+                    c["prefill"] = pre
+                    c["decode"] = dec
+                    # Legacy aliases stay in sync with prefill.
+                    c["tflops"] = pre["tflops"]
+                    c["gb"] = pre["access_gb"]
+                    c["picked_combo"] = {"batch_size": bs, "seq_len": sl}
+                except Exception:  # noqa: BLE001
                     continue
-                for row in grid:
-                    if row.get("batch_size") == bs and row.get("seq_len") == sl:
-                        pre = row.get("prefill") or {}
-                        dec = row.get("decode") or {}
-                        c["prefill"] = {
-                            "tflops": pre.get("tflops", 0.0),
-                            "access_gb": pre.get("access_gb", 0.0),
-                        }
-                        c["decode"] = {
-                            "tflops": dec.get("tflops", 0.0),
-                            "access_gb": dec.get("access_gb", 0.0),
-                        }
-                        # Legacy aliases stay in sync with prefill.
-                        c["tflops"] = pre.get("tflops", 0.0)
-                        c["gb"] = pre.get("access_gb", 0.0)
-                        c["picked_combo"] = {"batch_size": bs, "seq_len": sl}
-                        break
         data["combo"] = {"batch_size": bs, "seq_len": sl}
         return data
 
@@ -886,22 +1092,23 @@ def create_app() -> FastAPI:
         task_id: str, compound: str, angle: str, round_idx: int,
     ) -> Dict[str, Any]:
         """Return one cell's full detail: calc.py source, response.txt
-        (agent thinking), grid.json, and the writer's events.jsonl path
-        so the UI can launch a QA session against this cell.
+        (agent thinking), result.json (single canonical-shape record), and
+        the writer's events.jsonl path so the UI can launch a QA session
+        against this cell.
 
         Path params map directly to the on-disk layout::
 
             step3/cells/<compound>/<angle>/round_<NN>/
                 writer/calc.py
                 writer/response.txt
-                grid.json
+                result.json
                 logs/<spec_name>.attempt<M>.events.jsonl
         """
         entry = _task_or_404(task_id)
         if entry.type != "calc-theoretical-value":
             raise HTTPException(409, "task is not a calc-theoretical-value task")
-        if angle not in ("a", "b", "c"):
-            raise HTTPException(400, "angle must be one of a / b / c")
+        if angle not in ("a", "b"):
+            raise HTTPException(400, "angle must be one of a / b")
         sd = _state_dir_for(entry)
         cell_dir = sd / "step3" / "cells" / compound / angle / f"round_{round_idx:02d}"
         if not cell_dir.exists():
@@ -909,16 +1116,16 @@ def create_app() -> FastAPI:
 
         calc_path = cell_dir / "writer" / "calc.py"
         response_path = cell_dir / "writer" / "response.txt"
-        grid_path = cell_dir / "grid.json"
+        result_path = cell_dir / "result.json"
 
         calc_py = calc_path.read_text(encoding="utf-8") if calc_path.exists() else ""
         response = response_path.read_text(encoding="utf-8") if response_path.exists() else ""
-        grid: Any = []
-        if grid_path.exists():
+        result: Any = None
+        if result_path.exists():
             try:
-                grid = json.loads(grid_path.read_text(encoding="utf-8"))
+                result = json.loads(result_path.read_text(encoding="utf-8"))
             except ValueError:
-                grid = []
+                result = None
 
         # Locate the writer's events.jsonl (attempt-agnostic — pick the
         # highest attempt number that exists).
@@ -929,20 +1136,23 @@ def create_app() -> FastAPI:
             if candidates:
                 events_file = str(candidates[-1])
 
-        # Read sibling cells (other angles at same round) for mismatch
-        # context if all 3 exist.
+        # Read sibling cells (other angle at same round) for mismatch
+        # context if both exist.
+        from ..orchestrator.tasks.calc_value import deterministic as _det
         siblings: Dict[str, Any] = {}
-        for a in ("a", "b", "c"):
-            sib_grid_path = sd / "step3" / "cells" / compound / a / f"round_{round_idx:02d}" / "grid.json"
-            if sib_grid_path.exists():
+        for a in ("a", "b"):
+            sib_result_path = (
+                sd / "step3" / "cells" / compound / a
+                / f"round_{round_idx:02d}" / "result.json"
+            )
+            if sib_result_path.exists():
                 try:
-                    siblings[a] = json.loads(sib_grid_path.read_text(encoding="utf-8"))
+                    siblings[a] = json.loads(sib_result_path.read_text(encoding="utf-8"))
                 except ValueError:
                     pass
         mismatches: List[Dict[str, Any]] = []
-        if len(siblings) == 3:
-            from ..orchestrator.tasks.calc_value import deterministic as _det
-            cmp = _det.compare_calc_grids([siblings[a] for a in ("a", "b", "c")])
+        if len(siblings) == 2:
+            cmp = _det.compare_calc_results([siblings[a] for a in ("a", "b")])
             mismatches = cmp.get("mismatches") or []
 
         return {
@@ -951,7 +1161,7 @@ def create_app() -> FastAPI:
             "round": round_idx,
             "calc_py": calc_py,
             "response": response,
-            "grid": grid,
+            "result": result,
             "events_file": events_file,
             "workdir": str(cell_dir / "writer"),
             "siblings_present": sorted(siblings.keys()),
@@ -984,6 +1194,11 @@ def create_app() -> FastAPI:
             sid = _qa.start_qa_session(sd, body or {})
         except _qa.EventsFileNotFound as exc:
             raise HTTPException(404, str(exc))
+        except _qa.BudgetExhausted as exc:
+            # 429 + Retry-After-ish body so the client can surface a
+            # meaningful "task over budget" message instead of a generic
+            # 500. Body shape matches FastAPI's default error envelope.
+            raise HTTPException(429, str(exc))
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         return {"session_id": sid, "task_id": task_id}

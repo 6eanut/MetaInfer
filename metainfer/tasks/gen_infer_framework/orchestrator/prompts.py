@@ -30,10 +30,11 @@ NOTEBOOKS_HINT = """A knowledge base of reference designs, known pitfalls, and w
 examples lives in the `notebooks/` directory.
 
 Read it EFFICIENTLY:
-- Use the Read tool directly. Do NOT spawn sub-agents (no Agent / Task /
-  TaskOutput / Explore tool calls) — each sub-agent cold-starts a separate
-  `claude -p` process and burns 1-3 minutes of startup time per call,
-  which dominates your budget without producing better answers.
+- Use the Read tool directly. Do NOT spawn sub-agents FOR READING (no Agent
+  / Task / TaskOutput / Explore tool calls to read files) — each sub-agent
+  cold-starts a separate `ccb` process and burns 1-3 minutes of startup
+  time per call. Reading a file yourself takes seconds; delegating it to a
+  sub-agent costs 100× more and adds zero value.
 - Start with `Glob notebooks/**/*.md` to see the layout, then Read only
   the files whose names match this iteration's task (typically 3-6 files).
   Do NOT read every notebook "to be complete".
@@ -41,6 +42,35 @@ Read it EFFICIENTLY:
   contents are already in your context window.
 - Hard cap: at most ~8 Read calls to notebooks for planning, ~4 for
   implement / review / perf-plan."""
+
+IMPLEMENT_PARALLEL_HINT = """# Parallel implementation strategy (IMPLEMENTER ONLY)
+
+You will typically need to write **3+ independent source files** in one
+iteration (e.g. `engine.py`, `scheduler.py`, `server.py`, `config.py`).
+Writing them sequentially burns 20-40 minutes. Use parallel sub-agents
+to write them simultaneously:
+
+1. **Read `plan.md` first.** Identify which files are independent (no
+   cross-file imports during initial writing).
+2. **For each independent file, spawn ONE parallel Agent** that ONLY
+   writes that file. Each sub-agent prompt should include:
+   - The task requirements (frozen section above)
+   - The relevant excerpt from `plan.md` for THAT file
+   - The relevant notebook page(s) for that file's domain
+   - An explicit instruction: "Write exactly `<filename>` and nothing else"
+3. **Spawn all writing agents in ONE message** so they run in parallel.
+   You can spawn up to 5 agents at once.
+4. **After all agents finish**, read the files they wrote and:
+   - Fix import paths so cross-file references resolve
+   - Ensure consistent naming (class names, function signatures) across files
+   - Run `test.sh` to verify the whole system works together
+5. **Do NOT delegate READING to sub-agents.** You read `plan.md`, the
+   notebooks, and any reference files yourself. Sub-agents only WRITE.
+
+Why this saves time: 5 files × 6 minutes each sequentially = 30 minutes.
+5 files in parallel = ~8 minutes (longest single file) + 2 minutes of
+glue work = ~10 minutes total. The sub-agent startup overhead (1-3 min
+each) is well worth it for implementer workloads."""
 
 
 # Subdirectory (relative to iter_dir/.metainfer-logs/) where the previous
@@ -424,10 +454,14 @@ def _prev_logs_section(
     """Render the 'previous iteration diagnostics' block.
 
     Only emitted when there IS a prev_failure (i.e. we're retrying after a
-    failed C step). When emitted, it tells the agent in no uncertain terms
-    to READ the actual log files before writing any code — the prev_failure
-    text is a summary, the real root cause is usually in server.stderr.log
-    or the per-case judge reasons inside oracle-report.json.
+    failed C or E step). When emitted, it tells the agent in no uncertain
+    terms to READ the actual log files before writing any code.
+
+    The block auto-discovers which files exist in the prev-iter snapshot
+    rather than assuming C_test-specific filenames — E_perf_test failures
+    produce different artifacts (perf_report.json, perf-server.*.log), and
+    the retrospective.md often has better root cause analysis than either
+    oracle's raw output.
 
     ``prev_logs_dir`` is the ABSOLUTE path to the prev-iter snapshot
     directory (typically ``<cwd>/.metainfer/logs/<task_id>/<NNN>/prev-iter/``).
@@ -438,46 +472,102 @@ def _prev_logs_section(
     if not prev_failure:
         return ""
     if prev_logs_dir is None:
-        # No absolute path available — fall back to the legacy relative
-        # pointer. Should not happen in the new layout, but keeps the
-        # prompt useful if a caller forgets to pass the path.
-        snap = f".metainfer-logs/{PREV_ITER_LOGS_SUBDIR}"
-        p_oracle = f"{snap}/oracle-report.json"
-        p_stderr = f"{snap}/server.stderr.log"
-        p_stdout = f"{snap}/server.stdout.log"
-        p_judge = f"{snap}/judge.*.log"
-        loc_phrase = f"your working directory under `{snap}/`"
+        snap_str: str = f".metainfer-logs/{PREV_ITER_LOGS_SUBDIR}"
+        snap_path: Optional[Path] = None
+        loc_phrase = f"your working directory under `{snap_str}/`"
     else:
-        snap = prev_logs_dir
-        p_oracle = snap / "oracle-report.json"
-        p_stderr = snap / "server.stderr.log"
-        p_stdout = snap / "server.stdout.log"
-        p_judge = snap / "judge.*.log"
-        loc_phrase = f"`{snap}/`"
+        snap_path = prev_logs_dir
+        snap_str = str(snap_path)
+        loc_phrase = f"`{snap_path}/`"
+
+    # Build file pointers, separated by purpose. Reuse the same
+    # descriptions that _render_oracle_failure uses for C files, and
+    # add E-perf-specific entries.
+    file_entries: list[str] = []
+    if snap_path is not None and snap_path.is_dir():
+        existing = {p.name for p in snap_path.iterdir() if p.is_file()}
+    else:
+        existing = set()
+
+    # ---- C_test artifacts ----
+    if "oracle-report.json" in existing:
+        p = f"{snap_str}/oracle-report.json"
+        file_entries.append(
+            f"  - {p}\n"
+            "    Full structured verdict: every test case's prompt, the server's actual\n"
+            "    response, the judge's verdict + reason, http status, latency."
+        )
+    if "server.stderr.log" in existing:
+        p = f"{snap_str}/server.stderr.log"
+        file_entries.append(
+            f"  - {p}\n"
+            "    The server's stderr capture — Python tracebacks, OOM messages, CUDA\n"
+            "    errors, \"address already in use\", etc. For a crashed/hung server this\n"
+            "    is almost always where the root cause lives."
+        )
+    if "server.stdout.log" in existing:
+        p = f"{snap_str}/server.stdout.log"
+        file_entries.append(
+            f"  - {p}\n"
+            "    Server stdout — startup banner, model load progress, \"Uvicorn running\n"
+            "    on ...\". Useful for confirming whether the server even started."
+        )
+
+    # ---- E_perf_test artifacts ----
+    if "perf_report.json" in existing:
+        p = f"{snap_str}/perf_report.json"
+        file_entries.append(
+            f"  - {p}\n"
+            "    Structured perf sweep: per-concurrency throughput, latency percentiles,\n"
+            "    error counts per concurrency level. When num_requests=0, the server was\n"
+            "    not responding at all — check perf-server.stderr.log."
+        )
+    if "perf-server.stderr.log" in existing:
+        p = f"{snap_str}/perf-server.stderr.log"
+        file_entries.append(
+            f"  - {p}\n"
+            "    Perf oracle server stderr — why the serve.sh under perf load failed.\n"
+            "    OOM, CUDA errors, port conflicts, or request-handling crashes live here."
+        )
+    if "perf-server.stdout.log" in existing:
+        p = f"{snap_str}/perf-server.stdout.log"
+        file_entries.append(
+            f"  - {p}\n"
+            "    Perf oracle server stdout — startup banner, model load progress, request\n"
+            "    throughput. Confirms whether serve.sh booted successfully under perf load."
+        )
+
+    # ---- Review / analysis ----
+    if "retrospective.md" in existing:
+        p = f"{snap_str}/retrospective.md"
+        file_entries.append(
+            f"  - {p}\n"
+            "    The previous iteration's retrospective. Written by a reviewer agent AFTER\n"
+            "    seeing the full test results, it often contains the best root cause\n"
+            "    analysis and concrete fix suggestions. READ THIS FIRST."
+        )
+
+    # Fallback: list everything in the snapshot.
+    if not file_entries:
+        if snap_path is not None and snap_path.is_dir():
+            names = sorted(p.name for p in snap_path.iterdir() if p.is_file())
+            if names:
+                file_entries = [f"  - {snap_str}/{n}" for n in names]
+
+    file_list = "\n".join(file_entries)
+
     return f"""
 
 # Previous iteration's diagnostic logs (READ BEFORE CODING)
-The previous C step failed. Its diagnostic artifacts have been copied into
+The previous iteration failed. Its diagnostic artifacts have been copied into
 {loc_phrase}:
 
-  - {p_oracle}
-    Full structured verdict: every test case's prompt, the server's actual
-    response, the judge's verdict + reason, http status, latency. This is
-    the authoritative record of what went wrong.
-  - {p_stderr}
-    The server's stderr capture — Python tracebacks, OOM messages, CUDA
-    errors, "address already in use", etc. **For a crashed/hung server this
-    is almost always where the root cause lives.**
-  - {p_stdout}
-    Server stdout — startup banner, model load progress, "Uvicorn running
-    on ...". Useful for confirming whether the server even started.
-  - {p_judge}
-    The LLM-judge sub-agent's raw output per case (when judge_mode=llm).
+{file_list}
 
 The `prev_failure` text above is a condensed summary. BEFORE writing any
-code, open these files (especially `server.stderr.log` and the failing
-cases' entries in `oracle-report.json`) and identify the concrete root
-cause. Quote the relevant lines in your plan/commit message.
+code, open these files (especially `server.stderr.log`, `perf-server.stderr.log`,
+and `retrospective.md`) and identify the concrete root cause. Quote the
+relevant lines in your plan/commit message.
 """
 
 
@@ -801,6 +891,8 @@ If a previous failure is shown, your FIRST commit must address it.
 {_inline_traceback_section(prev_snap)}{_prev_logs_section(prev_failure, prev_snap)}
 {_perf_plan_section(perf_plan)}
 {_review_feedback_section(review_feedback)}
+
+{IMPLEMENT_PARALLEL_HINT}
 
 # Deliverables
 1. The code described in the plan, inside `{iter_dir}`.

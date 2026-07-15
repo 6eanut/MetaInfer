@@ -59,9 +59,16 @@ jobs:
           python -c "
           from metainfer.server.app import create_app
           app = create_app()
-          routes = [r.path for r in app.routes]
-          assert any('/api/sys-shell/tasks' in r for r in routes), 'missing task routes'
-          print('WebUI app boots OK; routes:', len(routes))
+          def _collect(routes, out):
+              for r in routes:
+                  if hasattr(r, 'path'):
+                      out.append(r.path)
+                  if hasattr(r, 'routes'):
+                      _collect(r.routes, out)
+          collected = []
+          _collect(app.routes, collected)
+          assert any('/api/sys-shell/tasks' in r for r in collected), 'missing task routes'
+          print('WebUI app boots OK; routes:', len(collected))
           "
 
   lint:

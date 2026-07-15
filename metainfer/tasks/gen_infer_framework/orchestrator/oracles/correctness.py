@@ -323,7 +323,7 @@ def _start_server(
     # oracle, etc.) can leave model weights stranded in VRAM; our serve.sh
     # then OOMs at load time and the C step fails with a confusing "out
     # of memory" that has nothing to do with the agent's code.
-    from ....gpu_preflight import preflight_gpu
+    from metainfer.orchestrator.gpu_preflight import preflight_gpu
     preflight_gpu(label="c-oracle")
 
     log_fp = open(report_dir / "server.stdout.log", "wb")

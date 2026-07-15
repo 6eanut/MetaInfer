@@ -96,9 +96,14 @@ class LivenessChecker:
                 _log.exception("liveness scan iteration failed; will retry")
 
     def _scan_once(self) -> None:
-        """One pass: check every registry task that claims to be running.
+        """One pass: probe every task in the registry.
 
         Visible for tests — call directly to avoid the asyncio sleep loop.
+
+        Process state (pid/started_at/finished_at) is NOT cached in the
+        registry — it lives only in each task's orchestrator.pid. So we
+        must call status() on every task; we cannot pre-filter. The check
+        is intentionally cheap (one file read + one /proc stat per task).
         """
         try:
             entries = _tasks.list_tasks()
@@ -107,12 +112,6 @@ class LivenessChecker:
             return
 
         for entry in entries:
-            # Skip tasks the registry already considers done. The pid
-            # check mirrors what `list_tasks` consumers use to render
-            # the running pill — if it's already None, the UI already
-            # shows stopped.
-            if entry.pid is None or entry.finished_at is not None:
-                continue
             self._check_one(entry.id)
 
     def _check_one(self, task_id: str) -> None:

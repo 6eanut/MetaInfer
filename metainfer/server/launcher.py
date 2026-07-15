@@ -255,13 +255,11 @@ class LocalLauncher:
         )
         log_fp.close()  # child holds the fd now; parent doesn't need it
         spawn_time = time.time()
-        # Cache pid in the registry so the task list view doesn't have to
-        # stat every state_dir to render status.
-        _tasks.update_task(
-            task_id, pid=proc.pid, started_at=spawn_time, finished_at=None,
-        )
         # Record in runtime.json so reconciliation on next WebUI start
-        # can recognize the process as ours.
+        # can recognize the process as ours. Process state (pid,
+        # started_at) is owned by orchestrator.pid + runtime.json
+        # ONLY — never cached in the registry. See
+        # :class:`metainfer.server.tasks.TaskEntry` for why.
         if self._boot_id:
             _runtime.record_task_spawn(
                 task_id, proc.pid, state_dir, self._boot_id,
@@ -274,27 +272,32 @@ class LocalLauncher:
         pid = data.get("pid")
         finished_at = data.get("finished_at")
         started_at = data.get("started_at")
+        # finished_at 是 pid 文件里的权威"已退出"信号——它由 orchestrator
+        # 自身的 graceful exit、launcher 的 _reap_dead_pid_file、以及
+        # spawn 失败清理路径盖戳，任何一条都意味着进程确实没了。多节点
+        # NFS 场景下尤其关键：本机 /proc 永远看不到兄弟节点上的进程，
+        # 唯一可靠的"已停止"判据就是这个字段，而不是本机 os.kill(pid, 0)。
+        if finished_at is not None:
+            return ProcStatus(
+                running=False, pid=pid, started_at=started_at,
+                finished_at=finished_at,
+                exit_hint=data.get("exit_hint") or "pid-file-finished",
+            )
         if pid is None:
-            # Pid file is "cleared" (orchestrator exited cleanly) iff
-            # finished_at is set; otherwise the orchestrator hasn't
-            # started or its pid file was wiped.
-            if finished_at is not None:
-                return ProcStatus(
-                    running=False, pid=None, started_at=started_at,
-                    finished_at=finished_at, exit_hint="pid-file-cleared",
-                )
+            # 既没有 pid 也没有 finished_at：orchestrator 还没启动过，
+            # 或者它的 pid 文件被擦了。
             return ProcStatus(
                 running=False, pid=None, started_at=None,
                 finished_at=None, exit_hint="no-pid-file",
             )
-        # VALIDATED liveness: check that the kernel start time of `pid`
-        # matches what we recorded. A bare os.kill(pid, 0) check would
-        # pass even if the original process died and the PID was
-        # recycled to an unrelated process.
+        # 既没有 finished_at、pid 又存在：才走本机 liveness 探测。
+        # 这一支只覆盖"orchestrator 硬死、还没来得及盖 finished_at"的场景
+        # （SIGKILL / OOM / 内核 panic）。校验 kernel starttime 与 started_at
+        # 匹配可以挡住 PID 复用导致的误判。
         alive = _proc.validate_pid_started_at(pid, started_at)
         return ProcStatus(
             running=alive, pid=pid, started_at=started_at,
-            finished_at=finished_at if not alive else None,
+            finished_at=None,
             exit_hint="pid-alive" if alive else "pid-dead",
         )
 
@@ -357,13 +360,10 @@ class LocalLauncher:
                 )
         except Exception:  # noqa: BLE001 — best-effort cleanup
             pass
-        try:
-            _tasks.update_task(
-                task_id, pid=None, started_at=started_at,
-                finished_at=now,
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        # Process state cleanup is done — orchestrator.pid was stamped
+        # above. The registry does NOT cache pid/finished_at (that was
+        # a SSOT violation; launcher.status() reads orchestrator.pid
+        # directly). run.json + timeline get updated below for the UI.
         try:
             from . import state_reader as _sr
             sd = _paths.task_dir(task_id)

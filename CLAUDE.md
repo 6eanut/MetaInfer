@@ -38,7 +38,6 @@ $METAINFER_ROOT/                                (默认 <cwd>；多节点用共�
 - WebUI 重置任务时**同时**清两个目录（`reset_state_dir(state_dir, workspace_dir, ...)`）。
 - Orchestrator CLI 必须显式接受 `--state-dir` **和** `--workspace-dir`；launcher 同时传两个。
 - 多节点场景：每个节点只写自己的 `nodes/<hostname>/`，中央控制器扫 `nodes/*/` 看全局。
-- **不支持向后兼容**：老的单层 `state_dir/code/` 布局作废；in-flight 任务 reset 重建。
 
 ## 关于项目测试
 
@@ -46,7 +45,7 @@ $METAINFER_ROOT/                                (默认 <cwd>；多节点用共�
 
 ## 添加新任务类型 (task type)
 
-每个 task 都是**完全自包含**的功能包，所有属于 X 的 orchestrator、web handler、前端、测试、表单 schema 都跟着 X 走，放在同一个目录下。**没有「基础 task」和「扩展 task」的区分** —— 每个任务类型都是对等的 plugin。新增一个任务类型 X 的步骤（**完全不需要修改** `metainfer/web/app.py`、`metainfer/static/index.html`，也不需要碰公共的 `metainfer/static/components/`、`metainfer/static/views/`）：
+每个 task 都是**完全自包含**的功能包，所有属于 X 的 orchestrator、web handler、前端、测试、表单 schema 都跟着 X 走，放在同一个目录下。**没有「基础 task」和「扩展 task」的区分** —— 每个任务类型都是对等的 plugin，shell 本身也是 `sys-shell` plugin。新增一个任务类型 X 的步骤（**完全不需要修改** `metainfer/web/app.py`、`metainfer/tasks/sys_shell/static/index.html`，也不需要碰公共的 `metainfer/tasks/sys_shell/static/components/`、`metainfer/tasks/sys_shell/static/views/`）：
 
 ### 0. 目录结构（一个 task 包 = 一个完整功能包）
 
@@ -66,7 +65,7 @@ metainfer/tasks/X/                         # X 是 package 名（snake_case）
 └── tests/                                 # X 的所有测试（orchestrator + web plugin）
 ```
 
-参考实现：`metainfer/tasks/calc_value/` 和 `metainfer/tasks/gen_infer_framework/`。
+参考实现：`metainfer/tasks/calc_value/` 和 `metainfer/tasks/gen_infer_framework/`。系统 shell 本身也是 plugin，见 `metainfer/tasks/sys_shell/`（无 orchestrator，仅有 web_server_handler + static）。
 
 ### 1. Orchestrator 侧（在 task 包内）
 - `metainfer/tasks/X/orchestrator/`：至少包含 `cli.py`（入口）、`pipeline.py`（迭代循环）、`orchestrator.py`（启动器）、`plugin.py`（`TaskPlugin` 注册）、`phases.py`（状态机节点/边）。
@@ -85,16 +84,16 @@ metainfer/tasks/X/                         # X 是 package 名（snake_case）
   - `detail_view_module="app/X-detail"`：detail body 视图的 importmap key（shell 会 `import(detailViewModule)` 动态加载）。对应的 `X-detail.js` 必须存在于 `static/` 目录下（见下面 importmap 自动发现）。
   - `frontend_dir=Path(__file__).resolve().parent.parent / "static"`：指向 task 包里的 `static/` 目录，会被自动 mount 到 `/static/plugins/<type>/`
   - `importmap_entries={...}`（**可选，绝大多数情况留空**）：`create_app` 会**自动**遍历 `frontend_dir/*.js` 并按 `app/<文件名去 .js>` 注册 importmap，指向 `/static/plugins/<type>/<file>?v=CACHE_BUST`。所以只要文件名跟 importmap key 一致（`X-detail.js` ↔ `app/X-detail`），就不用列。**只有在以下两种情况才需要手动填 `importmap_entries`**：(a) 想用非 `app/<stem>` 形式的 key；(b) 想 override shell 的同名 key（例如用自己的 `state-graph.js` 替换公共 `app/state-graph`），服务端 merge 让 plugin 优先。
-  - `extra_stylesheets=["X.css"]`（可选）：CSS 文件名列表（相对于 `frontend_dir`）。`create_app` 会在 shell 的 `styles.css` 后面注入对应的 `<link rel="stylesheet" href="/static/plugins/<type>/<file>?v=TOKEN">`。**X 专属样式只能走这条路**，不允许往公共 `metainfer/static/styles.css` 里加 task-specific CSS。路径校验会拒绝任何 `..` 逃逸 `frontend_dir` 的尝试。
+  - `extra_stylesheets=["X.css"]`（可选）：CSS 文件名列表（相对于 `frontend_dir`）。`create_app` 会在 shell 的 `styles.css` 后面注入对应的 `<link rel="stylesheet" href="/static/plugins/<type>/<file>?v=TOKEN">`。**X 专属样式只能走这条路**，不允许往公共 `metainfer/tasks/sys_shell/static/styles.css` 里加 task-specific CSS。路径校验会拒绝任何 `..` 逃逸 `frontend_dir` 的尝试。
   - `qa_config=...`：QA pathsolver（即使是 frontend-driven 的简单实现也要有，参考 `gen_infer_framework/web_server_handler/_qa.py`）
-  - `build_router=...`（按需）：X 专属 HTTP 路由。签名 `(plugin) -> fastapi.APIRouter`，**返回一个携带相对路径的 router**（不要写 `/api/tasks/{task_id}/...` 前缀），shell 会把它 mount 到 `/api/tasks/{task_id}/task`。Router 内部用 `task_id: str = Path(...)` 拿路径参数、用 `from metainfer.web._helpers import task_or_404, state_dir_for, workspace_dir_for, require_task_type` 解析磁盘目标。**需要 QA 的 task 直接在 build_router 里调** `from metainfer.web.qa_routes import register_qa_routes; register_qa_routes(router, plugin, prefix="/qa")`，不要复制 QA 路由壳。**任何 task 专属端点（iterations / charts / state-graph / retrospective / ...）都走这条路** —— shell 不再 host 任何 task-specific endpoint。
+  - `build_router=...`（按需）：X 专属 HTTP 路由。签名 `(plugin) -> fastapi.APIRouter`，**返回一个携带相对路径的 router**（不要写 `/api/{type}/...` 前缀），shell 会把它 mount 到 `/api/{type}`（类型前缀路由，多一个 `{task_id}` 路径参数给任务类型）。Router 内部用 `task_id: str = Path(...)` 拿路径参数、用 `from metainfer.web._helpers import task_or_404, state_dir_for, workspace_dir_for, require_task_type` 解析磁盘目标。唯一例外是 `sys-shell`，它的 router 被 mount 到 `/api/sys-shell`（无 `{task_id}`），因为 shell 不是任务。**需要 QA 的 task 直接在 build_router 里调** `from metainfer.web.qa_routes import register_qa_routes; register_qa_routes(router, plugin, prefix="/qa")`，不要复制 QA 路由壳。**任何 task 专属端点（iterations / charts / state-graph / retrospective / ...）都走这条路** —— shell 不再 host 任何 task-specific endpoint。
   - `extra_watch_paths=...`（可选）：告诉 SSE watcher 额外要 watch mtime 的文件（比如增量刷新用的中间产物），签名 `(entry) -> List[Path]`。公共 `sse.py` 不再硬编码任何 task 路径。
 - `metainfer/tasks/X/web_server_handler/_state_readers.py`（按需）：X 专属的 state_dir 读取函数（`read_iterations` / `read_charts` / `read_state_graph` / `read_retrospective` 等）放这里，**不要往公共 `metainfer/web/state_reader.py` 里加**。`build_router` 里 import 这些 reader 喂给响应。参考 `calc_value/web_server_handler/_state_readers.py`。
-- `metainfer/tasks/X/static/X-detail.js`：X 的详情 body 组件。**Props**：`{ taskId, run, status, data }`，其中 `data = { run, timeline, agents, loadState, lastErr, refreshShell }` 是 shell 提供的**纯 chrome 数据**（只含 timeline / agents）。**X 自己的视图数据（iterations / charts / state-graph / retrospective）由 X-detail.js 自己 fetch**（命中 `/api/tasks/<id>/task/...`，参考 X-runtime-api.js）。X 专属 widget（charts/state-graph/iterations-table/retrospective-modal）放在 `static/X-*.js`，由 importmap 自动挂到 `app/X-*`；shell 不再提供任何 task-specific widget。
-- `metainfer/tasks/X/static/X-runtime-api.js`（按需）：X 专属的 fetch helper（命中 `/api/tasks/<id>/task/...`）放这里，不要往公共 `metainfer/static/components/api.js` 里加。参考 `calc_value/static/calc-runtime-api.js`。它会随 importmap 自动发现挂到 `app/X-runtime-api`。
+- `metainfer/tasks/X/static/X-detail.js`：X 的详情 body 组件。**Props**：`{ taskId, run, status, data }`，其中 `data = { run, timeline, agents, loadState, lastErr, refreshShell }` 是 shell 提供的**纯 chrome 数据**（只含 timeline / agents）。**X 自己的视图数据（iterations / charts / state-graph / retrospective）由 X-detail.js 自己 fetch**（命中 `/api/{type}/<id>/...`，参考 X-runtime-api.js）。X 专属 widget（charts/state-graph/iterations-table/retrospective-modal）放在 `static/X-*.js`，由 importmap 自动挂到 `app/X-*`；shell 不再提供任何 task-specific widget。
+- `metainfer/tasks/X/static/X-runtime-api.js`（按需）：X 专属的 fetch helper（命中 `/api/{type}/<id>/...`）放这里，不要往公共 `metainfer/tasks/sys_shell/static/components/api.js` 里加。参考 `calc_value/static/calc-runtime-api.js`。它会随 importmap 自动发现挂到 `app/X-runtime-api`。
 - `metainfer/tasks/X/static/X.css`（按需）：X 专属样式（包括 X 自己的 phase pill 颜色），配合 `extra_stylesheets=["X.css"]` 注入。参考 `calc_value/static/calc.css`、`gen_infer_framework/static/gf.css`。
-- **无需修改** `metainfer/static/index.html`、`metainfer/static/styles.css`、`metainfer/static/components/`、`metainfer/static/views/`、`metainfer/web/app.py`、`metainfer/web/forms.py`、`metainfer/web/sse.py`、`metainfer/web/state_reader.py` —— 新加 task 包**全程只改自己目录内的文件**。
-- **`metainfer/static/views/task-detail.js` 是 shell**：负责 header / 控制按钮（Kill / Restart / Reset）/ BudgetBar / Reset modal / 拉取 **shell-only 数据**（run / timeline / agents），然后根据 `detail_view_module` 动态 import plugin 的 body 组件，把上述数据通过 `data` prop 传下去。Retrospective modal、iterations table、charts、state-graph 等都由 plugin body 自己管 —— shell 不知道这些概念存在。
+- **无需修改** `metainfer/tasks/sys_shell/static/index.html`、`metainfer/tasks/sys_shell/static/styles.css`、`metainfer/tasks/sys_shell/static/components/`、`metainfer/tasks/sys_shell/static/views/`、`metainfer/web/app.py`、`metainfer/web/forms.py`、`metainfer/web/sse.py`、`metainfer/web/state_reader.py` —— 新加 task 包**全程只改自己目录内的文件**。
+- **`metainfer/tasks/sys_shell/static/views/task-detail.js` 是 shell**：负责 header / 控制按钮（Kill / Restart / Reset）/ BudgetBar / Reset modal / 拉取 **shell-only 数据**（run / timeline / agents），然后根据 `detail_view_module` 动态 import plugin 的 body 组件，把上述数据通过 `data` prop 传下去。Retrospective modal、iterations table、charts、state-graph 等都由 plugin body 自己管 —— shell 不知道这些概念存在。
 - **`phases_module` 协议**（可选）：如果 task 想要 state-graph 渲染，task 包的 `phases.py` 必须导出 `graph_payload(current, last_outcome, last_label) -> dict`，返回 `{current, nodes, edges, active_edge, last_outcome, terminal_nodes, outcome_legend}`。**由 task 自己的 `_state_readers.py` 调用这个函数**（shell 的 `state_reader.py` 完全不认识 task 类型）。
 
 ### 4. 测试（跟着 X 走）
@@ -107,6 +106,8 @@ metainfer/tasks/X/                         # X 是 package 名（snake_case）
 ### 6. 公共层契约（shell ↔ task 包的边界）
 
 shell 极其薄，只管「任务生命周期 + 预算 + 通用 chrome」。task 包要能跑起来，必须遵守以下**文件 / 行为契约** —— shell 认这些契约，不认 task 的具体 schema。
+
+**URL 架构**：shell 自身作为 `sys-shell` plugin 挂载在 `/api/sys-shell`（task-type-agnostic 端点：CRUD、lifecycle、monitoring），各 task plugin 挂载在 `/api/{task_type}/{task_id}`（type-specific 端点）。路径冲突天然不存在——每个 task type 独占一个 URL prefix。
 
 **(a) `timeline.jsonl` envelope**
 
@@ -164,12 +165,12 @@ python -m <TaskPlugin.cli_module> run <requirements.json> \
 ```python
 def build_router(plugin: WebPlugin) -> APIRouter:
     router = APIRouter()
-    @router.get("/iterations")           # 相对路径，不要写 /api/tasks/{task_id}/...
+    @router.get("/iterations")           # 相对路径，不要写 /api/{type}/{task_id}/...
     def _(task_id: str, ...): ...
     return router
 ```
 
-- shell 调 `build_router(plugin)` 拿到 router，然后 `app.include_router(router, prefix=f"/api/tasks/{{task_id}}/task")`。
+- shell 调 `build_router(plugin)` 拿到 router，然后 `app.include_router(router, prefix=f"/api/{{type}}/{{task_id}}")`。
 - router 内部声明 `task_id: str` 路径参数即可（mount prefix 已经 carry 它）。
 - 用 `from metainfer.web._helpers import task_or_404, state_dir_for, workspace_dir_for, require_task_type` 解析 task。
 - **shell 不再 host 任何 task-specific endpoint**（曾经的 `/iterations`、`/charts`、`/state-graph`、`/retrospective` 都挪到 plugin router）。

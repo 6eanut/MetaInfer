@@ -34,7 +34,7 @@ export function QAModal({ taskId, target, onClose }) {
         agent: target.agent ?? "",
       });
       const r = await fetch(
-        `/api/tasks/${taskId}/calc/qa?${qs.toString()}`,
+        `/api/calc-theoretical-value/${taskId}/calc/qa?${qs.toString()}`,
         { cache: "no-store" },
       );
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -64,7 +64,7 @@ export function QAModal({ taskId, target, onClose }) {
       }
       try {
         const r = await fetch(
-          `/api/tasks/${taskId}/calc/qa/${active.sid}`,
+          `/api/calc-theoretical-value/${taskId}/calc/qa/${active.sid}`,
           { cache: "no-store" },
         );
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -94,7 +94,7 @@ export function QAModal({ taskId, target, onClose }) {
     if (!q || !target?.events_file) return;
     setSubmitErr(null);
     try {
-      const r = await fetch(`/api/tasks/${taskId}/calc/qa/start`, {
+      const r = await fetch(`/api/calc-theoretical-value/${taskId}/calc/qa/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

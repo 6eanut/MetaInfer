@@ -1,6 +1,6 @@
 // Detailed audit panel — renders the streaming [node × angle] grid.
 //
-// Reads /api/tasks/<id>/calc/cells every 3s. Each row is one compound
+// Reads /api/calc-theoretical-value/<id>/calc/cells every 3s. Each row is one compound
 // node; columns are the 2 angles (a/b) plus a spread% and status.
 // Cells are clickable — opens CalcCellModal with the agent's thinking
 // + calc.py source.

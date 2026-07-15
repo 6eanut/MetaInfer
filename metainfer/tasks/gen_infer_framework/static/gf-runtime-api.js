@@ -1,12 +1,12 @@
 // Fetch helpers for gen_infer_framework's task-specific endpoints.
 //
-// All routes live under /api/tasks/<id>/task/* (mounted by the shell
-// from gf's web_server_handler router). The shell api.js intentionally
-// does NOT know about these — every task package owns its own runtime
-// fetcher.
+// All routes live under /api/gen-infer-framework/<id>/* (mounted by
+// the shell from gf's web_server_handler router). The shell api.js
+// intentionally does NOT know about these — every task package owns
+// its own runtime fetcher.
 
 const TASK_BASE = (taskId) =>
-  `/api/tasks/${encodeURIComponent(taskId)}/task`;
+  `/api/gen-infer-framework/${encodeURIComponent(taskId)}`;
 
 export async function getIterations(taskId) {
   const r = await fetch(`${TASK_BASE(taskId)}/iterations`);

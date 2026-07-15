@@ -3,7 +3,7 @@
 Each task type that needs HTTP routes / readers / QA support / a custom
 detail view registers a :class:`WebPlugin` here. The main ``create_app``
 iterates :func:`all_plugins` and mounts each plugin's ``build_router``
-result under ``/api/tasks/{task_id}/task`` — the shell itself only hosts
+result under ``/api/{type}/{task_id}`` — the shell itself only hosts
 task-agnostic endpoints (lifecycle, timeline, agents, token-budget).
 
 Registration is a side-effect of importing the task package:
@@ -81,7 +81,7 @@ class WebPlugin:
         register_routes (REMOVED): historical hook that mutated the
             FastAPI app directly. Replaced by :attr:`build_router`,
             which returns an :class:`fastapi.APIRouter` that the shell
-            mounts under ``/api/tasks/{task_id}/task``. Plugins no
+            mounts under ``/api/{type}/{task_id}``. Plugins no
             longer receive the FastAPI app or :class:`WebDeps`.
         detail_view_module: Optional importmap key (e.g.
             ``"app/calc-viz"``) the frontend should dynamically import
@@ -121,7 +121,7 @@ class WebPlugin:
             ``frontend_dir``) that ``create_app`` should inject as
             ``<link>`` tags in ``index.html``. Use this to ship
             task-type-specific styles without editing the shell's
-            ``metainfer/static/styles.css``. Each entry becomes
+            ``metainfer/tasks/sys_shell/static/styles.css``. Each entry becomes
             ``/static/plugins/<type>/<filename>?v=<token>``.
         extra_watch_paths: Optional callable that returns extra files
             (under or outside ``state_dir``) the SSE watcher should
@@ -136,9 +136,8 @@ class WebPlugin:
     build_router: Optional[Callable[["WebPlugin"], "APIRouter"]] = None
     """Build and return an :class:`fastapi.APIRouter` carrying all of
     this plugin's task-specific routes (relative paths only). The shell
-    mounts it at ``/api/tasks/{task_id}/task`` so every plugin's routes
-    land under that single prefix — the shell itself no longer hosts
-    any task-specific endpoints (no ``/iterations``, ``/charts``,
+    mounts it at ``/api/{type}/{task_id}`` — the shell itself no longer
+    hosts any task-specific endpoints (no ``/iterations``, ``/charts``,
     ``/state-graph``, ``/retrospective``).
 
     Routes inside the router see ``task_id`` as a path param (declared

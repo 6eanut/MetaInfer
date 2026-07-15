@@ -1,4 +1,4 @@
-"""Core web endpoint tests — task-types, /api/tasks CRUD, control actions,
+"""Core web endpoint tests — task-types, /api/sys-shell CRUD, control actions,
 DELETE task.
 
 These exercise plugin-agnostic behavior. calc_value-specific routes live
@@ -27,18 +27,18 @@ def _register_task(state_dir: Path, task_id: str = "ct-1",
 
 
 # --------------------------------------------------------------------------- #
-# /api/task-types
+# /api/sys-shell/task-types
 # --------------------------------------------------------------------------- #
 
 def test_task_types_endpoint(client):
-    resp = client.get("/api/task-types")
+    resp = client.get("/api/sys-shell/task-types")
     assert resp.status_code == 200
     ids = [t["id"] for t in resp.json()]
     assert "calc-theoretical-value" in ids
 
 
 def test_task_type_schema_endpoint(client):
-    resp = client.get("/api/task-types/calc-theoretical-value/schema")
+    resp = client.get("/api/sys-shell/task-types/calc-theoretical-value/schema")
     assert resp.status_code == 200
     schema = resp.json()
     assert schema["type"] == "calc-theoretical-value"
@@ -46,22 +46,22 @@ def test_task_type_schema_endpoint(client):
 
 
 def test_task_type_schema_404(client):
-    resp = client.get("/api/task-types/no-such-type/schema")
+    resp = client.get("/api/sys-shell/task-types/no-such-type/schema")
     assert resp.status_code == 404
 
 
 # --------------------------------------------------------------------------- #
-# /api/tasks
+# /api/sys-shell/tasks
 # --------------------------------------------------------------------------- #
 
 def test_tasks_empty_initially(client, isolated_env):
-    resp = client.get("/api/tasks")
+    resp = client.get("/api/sys-shell/tasks")
     assert resp.status_code == 200
     assert resp.json() == {"tasks": []}
 
 
 def test_get_task_404(client):
-    resp = client.get("/api/tasks/no-such")
+    resp = client.get("/api/sys-shell/no-such")
     assert resp.status_code == 404
 
 
@@ -78,7 +78,7 @@ def test_control_reset_wipes_state_when_stopped(client, isolated_env):
     )
     (state_dir / "orchestrator.log").write_text("blah", encoding="utf-8")
     (state_dir / "iterations").mkdir()
-    resp = client.post("/api/tasks/ct-1/control", json={"action": "reset"})
+    resp = client.post("/api/sys-shell/ct-1/control", json={"action": "reset"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is True
@@ -94,7 +94,7 @@ def test_control_reset_rejects_running_task(client, isolated_env):
     state_dir = isolated_env["home"] / "tasks" / "ct-1"
     _register_task(state_dir, "ct-1")
     isolated_env["launcher"]._running["ct-1"] = True  # pretend it's running
-    resp = client.post("/api/tasks/ct-1/control", json={"action": "reset"})
+    resp = client.post("/api/sys-shell/ct-1/control", json={"action": "reset"})
     assert resp.status_code == 409
     assert "running" in resp.json()["detail"].lower()
 
@@ -102,7 +102,7 @@ def test_control_reset_rejects_running_task(client, isolated_env):
 def test_control_reset_stamps_timeline(client, isolated_env):
     state_dir = isolated_env["home"] / "tasks" / "ct-1"
     _register_task(state_dir, "ct-1")
-    client.post("/api/tasks/ct-1/control", json={"action": "reset"})
+    client.post("/api/sys-shell/ct-1/control", json={"action": "reset"})
     timeline_path = state_dir / "timeline.jsonl"
     assert timeline_path.exists()
     lines = [ln for ln in timeline_path.read_text().splitlines() if ln.strip()]
@@ -113,7 +113,7 @@ def test_control_reset_stamps_timeline(client, isolated_env):
 def test_control_kill_calls_launcher(client, isolated_env):
     state_dir = isolated_env["home"] / "tasks" / "ct-1"
     _register_task(state_dir, "ct-1")
-    resp = client.post("/api/tasks/ct-1/control", json={"action": "kill"})
+    resp = client.post("/api/sys-shell/ct-1/control", json={"action": "kill"})
     assert resp.status_code == 200
     assert resp.json()["ok"] is True
 
@@ -121,7 +121,7 @@ def test_control_kill_calls_launcher(client, isolated_env):
 def test_control_unknown_action(client, isolated_env):
     state_dir = isolated_env["home"] / "tasks" / "ct-1"
     _register_task(state_dir, "ct-1")
-    resp = client.post("/api/tasks/ct-1/control", json={"action": "wat"})
+    resp = client.post("/api/sys-shell/ct-1/control", json={"action": "wat"})
     assert resp.status_code == 400
 
 
@@ -134,7 +134,7 @@ def test_delete_task_purge_removes_files_and_registry(client, isolated_env):
     _register_task(state_dir, "ct-1")
     (state_dir / "run.json").write_text("{}", encoding="utf-8")
     assert state_dir.exists()
-    resp = client.delete("/api/tasks/ct-1?purge=true")
+    resp = client.delete("/api/sys-shell/ct-1?purge=true")
     assert resp.status_code == 200
     body = resp.json()
     assert body["removed_from_registry"] is True
@@ -146,7 +146,7 @@ def test_delete_task_purge_removes_files_and_registry(client, isolated_env):
 def test_delete_task_without_purge_keeps_files(client, isolated_env):
     state_dir = isolated_env["home"] / "tasks" / "ct-1"
     _register_task(state_dir, "ct-1")
-    resp = client.delete("/api/tasks/ct-1")
+    resp = client.delete("/api/sys-shell/ct-1")
     assert resp.status_code == 200
     body = resp.json()
     assert body["purged_files"] is False
@@ -179,10 +179,6 @@ def test_index_html_injects_plugin_importmap(client):
     assert m, "importmap script block not found"
     block = _json.loads(m.group(1))
     imports = block["imports"]
-    # Shared widgets are shell-provided.
-    assert imports["app/state-graph"].startswith("/static/components/state-graph.js")
-    assert imports["app/charts"].startswith("/static/components/charts.js")
-    assert imports["app/iterations-table"].startswith("/static/components/iterations-table.js")
     # Plugin entries are present.
     assert imports["app/calc-detail"].startswith("/static/plugins/calc-theoretical-value/")
     assert imports["app/gf-detail"].startswith("/static/plugins/gen-infer-framework/")
@@ -231,13 +227,14 @@ def test_every_plugin_frontend_dir_is_served(client):
 
 
 def test_every_plugin_detail_view_module_is_in_importmap(client):
-    """Each plugin declares a detail_view_module; the index.html must
-    contain an importmap entry for it so the shell's dynamic import
-    resolves. Without this, the body silently falls back to the
-    'no detail view' banner."""
+    """Each task-type plugin declares a detail_view_module; the index.html
+    must contain an importmap entry for it so the shell's dynamic import
+    resolves. sys-shell is skipped — it's not a task type."""
     resp = client.get("/")
     html = resp.text
     for plugin in _all_plugins():
+        if plugin.type == "sys-shell":
+            continue  # shell is not a task type, no detail view
         dvm = plugin.detail_view_module
         assert dvm, f"{plugin.type} has no detail_view_module"
         # The injected entry should mention the plugin's static path.

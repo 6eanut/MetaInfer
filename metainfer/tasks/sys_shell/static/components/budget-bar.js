@@ -1,5 +1,5 @@
 // Token / cost budget progress bar. Rendered at the top of the task
-// detail view. Polls GET /api/tasks/<id>/token-budget and renders:
+// detail view. Polls GET /api/sys-shell/<id>/token-budget and renders:
 //
 //   ┌─────────────────────────────────────────────────────────┐
 //   │ Token budget   $1.23 / $50.00  (2.46%)  ━━━━━━━━━━━━━━━ │

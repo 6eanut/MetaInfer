@@ -1,12 +1,12 @@
 """FastAPI router for the gen-infer-framework task type.
 
 Builds a single :class:`fastapi.APIRouter` that the shell mounts under
-``/api/tasks/{task_id}/task``. Routes provided:
+``/api/{type}/{task_id}``. Routes provided:
 
-    /api/tasks/{task_id}/task/iterations[/{n}[/retrospective]]
-    /api/tasks/{task_id}/task/charts
-    /api/tasks/{task_id}/task/state-graph
-    /api/tasks/{task_id}/task/qa[/start|/<sid>]
+    /api/{type}/{task_id}/iterations[/{n}[/retrospective]]
+    /api/{type}/{task_id}/charts
+    /api/{type}/{task_id}/state-graph
+    /api/{type}/{task_id}/qa[/start|/<sid>]
 
 These used to be shell endpoints. They've been pulled into the task
 package because the iteration record schema (perf / goal /

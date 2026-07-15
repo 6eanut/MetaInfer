@@ -25,7 +25,7 @@ _STATIC_PREFIX = f"/static/plugins/{PLUGIN_TYPE}"
 # That covers ``app/gf-detail`` for free. We only need to populate this
 # dict to OVERRIDE shell entries (e.g. ship a divergent ``app/state-graph``
 # for this task type). The shell's default widgets (in
-# ``metainfer/static/components/``) are inherited as-is.
+# ``metainfer/tasks/sys_shell/static/components/``) are inherited as-is.
 _IMPORTMAP_ENTRIES: dict = {}
 
 plugin = WebPlugin(

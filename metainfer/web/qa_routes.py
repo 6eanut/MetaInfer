@@ -4,8 +4,8 @@ This helper adds the ``POST /qa/start`` + ``GET /qa/{sid}`` +
 ``GET /qa`` triplet for a task type, backed by the task-type-agnostic
 :mod:`metainfer.web.qa` engine. The triplet is mounted onto whatever
 APIRouter the plugin is building (relative paths only) — the shell
-mounts that router under ``/api/tasks/{task_id}/task`` so the routes
-end up at ``/api/tasks/{task_id}/task{prefix}``.
+mounts that router under ``/api/{type}/{task_id}`` so the routes
+end up at ``/api/{type}/{task_id}{prefix}``.
 
 Two modes are supported by the same routes:
 
@@ -50,7 +50,7 @@ def register_qa_routes(
 
     Routes are RELATIVE — the caller is responsible for mounting the
     router at the right absolute prefix (the shell does this at
-    ``/api/tasks/{task_id}/task``).
+    ``/api/{type}/{task_id}``).
 
     ``prefix`` is the URL path suffix appended after the mount point;
     defaults to ``"/qa"``. Plugins can override (e.g. ``"/calc/qa"``).

@@ -3,7 +3,7 @@
 // /calc/... lives here so other task packages don't have to import (or
 // edit) calc_value's URLs.
 
-const TASK_SCOPE = (taskId) => `/api/tasks/${encodeURIComponent(taskId)}`;
+const TASK_SCOPE = (taskId) => `/api/calc-theoretical-value/${encodeURIComponent(taskId)}`;
 
 export async function getCalcRough(taskId, batchSize, seqLen) {
   let url = `${TASK_SCOPE(taskId)}/calc/rough`;

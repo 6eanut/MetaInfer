@@ -32,11 +32,16 @@ def test_every_task_type_has_a_web_plugin():
     """Each registered task type must own a web plugin package — peer
     design, no "base" vs "extension" split. Both calc-theoretical-value
     and gen-infer-framework register a WebPlugin with at minimum a
-    detail_view_module + frontend_dir + qa_config + label/description."""
+    detail_view_module + frontend_dir + qa_config + label/description.
+
+    sys-shell is excluded — it's the system shell, not a task type.
+    """
     types = {p.type for p in registry.all_plugins()}
     assert "calc-theoretical-value" in types
     assert "gen-infer-framework" in types
     for p in registry.all_plugins():
+        if p.type == "sys-shell":
+            continue  # shell is not a task type
         # detail_view_module + frontend_dir are how the shell dispatches
         # the body. Every plugin needs them.
         assert p.detail_view_module, f"{p.type} missing detail_view_module"

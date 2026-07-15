@@ -60,7 +60,7 @@ function App() {
   useEffect(() => {
     let es;
     try {
-      es = new EventSource("/api/events");
+      es = new EventSource("/api/sys-shell/events");
       es.addEventListener("hello", () => { /* stream alive */ });
       es.addEventListener("task_changed", (e) => {
         try {

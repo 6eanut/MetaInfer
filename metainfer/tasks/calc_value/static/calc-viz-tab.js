@@ -22,7 +22,7 @@ export function CalcVizTab({ taskId }) {
   const refreshSummary = useCallback(async () => {
     if (!taskId) return;
     try {
-      const r = await fetch(`/api/tasks/${taskId}/calc/summary`, { cache: "no-store" });
+      const r = await fetch(`/api/calc-theoretical-value/${taskId}/calc/summary`, { cache: "no-store" });
       setSummary(r.ok ? await r.json() : null);
     } catch (e) { /* keep last */ }
   }, [taskId]);
@@ -91,7 +91,7 @@ export function CalcVizTab({ taskId }) {
       <section class="panel calc-viz-panel">
         <h2>可视化</h2>
         <iframe class="calc-iframe"
-          src=${`/api/tasks/${taskId}/calc/viz`}
+          src=${`/api/calc-theoretical-value/${taskId}/calc/viz`}
           sandbox="allow-scripts allow-same-origin" />
       </section>
     ` : html`

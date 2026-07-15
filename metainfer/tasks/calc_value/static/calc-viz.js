@@ -51,7 +51,7 @@ export function CalcVizView({ taskId, run, status }) {
           .catch(() => ({ events: [] })),
         withTimeout(getAgents(taskId)).catch(() => ({ ts: 0, agents: [] })),
         withTimeout(
-          fetch(`/api/tasks/${taskId}/calc/summary`, { cache: "no-store" })
+          fetch(`/api/calc-theoretical-value/${taskId}/calc/summary`, { cache: "no-store" })
             .then((r) => r.ok ? r.json() : null)
         ).catch(() => null),
       ]);
@@ -70,7 +70,7 @@ export function CalcVizView({ taskId, run, status }) {
     if (!taskId) return;
     setIterErr(null);
     try {
-      const r = await fetch(`/api/tasks/${taskId}/calc/iterations`,
+      const r = await fetch(`/api/calc-theoretical-value/${taskId}/calc/iterations`,
         { cache: "no-store" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       setIterations(await r.json());
@@ -110,7 +110,7 @@ export function CalcVizView({ taskId, run, status }) {
     setComputeErr(null);
     try {
       const r = await fetch(
-        `/api/tasks/${taskId}/calc/compute?batch_size=${batchSize}&seq_len=${seqLen}`,
+        `/api/calc-theoretical-value/${taskId}/calc/compute?batch_size=${batchSize}&seq_len=${seqLen}`,
         { cache: "no-store" },
       );
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -223,7 +223,7 @@ export function CalcVizView({ taskId, run, status }) {
             </div>
           ` : null}
           <iframe class="calc-iframe"
-            src=${`/api/tasks/${taskId}/calc/viz`}
+            src=${`/api/calc-theoretical-value/${taskId}/calc/viz`}
             sandbox="allow-scripts allow-same-origin" />
         </section>
       ` : html`

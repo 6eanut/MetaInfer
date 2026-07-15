@@ -1,12 +1,12 @@
 // Fetch helpers for calc_value's task-specific endpoints.
 //
-// All routes live under /api/tasks/<id>/task/* (mounted by the shell
+// All routes live under /api/calc-theoretical-value/<id>/* (mounted by the shell
 // from calc_value's web_server_handler router). The shell api.js
 // intentionally does NOT know about these — every task package owns
 // its own runtime fetcher.
 
 const TASK_BASE = (taskId) =>
-  `/api/tasks/${encodeURIComponent(taskId)}/task`;
+  `/api/calc-theoretical-value/${encodeURIComponent(taskId)}`;
 
 export async function getIterations(taskId) {
   const r = await fetch(`${TASK_BASE(taskId)}/iterations`);

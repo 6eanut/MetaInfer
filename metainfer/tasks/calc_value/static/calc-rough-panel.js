@@ -1,5 +1,5 @@
 // Rough estimate panel — renders S0's quick back-of-envelope numbers.
-// Polls /api/tasks/<id>/calc/rough every few seconds until S0 produces
+// Polls /api/calc-theoretical-value/<id>/calc/rough every few seconds until S0 produces
 // rough_results.json; then renders a per-node table.
 
 import { html } from "htm/preact";

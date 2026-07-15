@@ -1,34 +1,34 @@
 // Thin fetch wrappers. Every call returns parsed JSON or throws.
 //
 // All endpoints are task-scoped: pass `taskId` everywhere. The API base
-// is `/api/tasks/<id>/...`. Task-list / type metadata sit at the top level.
+// is `/api/sys-shell/<id>/...`. Task-type endpoints live at `/api/<type>/<id>/...`.
 
 export async function listTaskTypes() {
-  const r = await fetch("/api/task-types");
+  const r = await fetch("/api/sys-shell/task-types");
   if (!r.ok) throw new Error(`task-types: ${r.status}`);
   return r.json();
 }
 
 export async function loadFormSchema(taskType) {
-  const r = await fetch(`/api/task-types/${encodeURIComponent(taskType)}/schema`);
+  const r = await fetch(`/api/sys-shell/task-types/${encodeURIComponent(taskType)}/schema`);
   if (!r.ok) throw new Error(`schema ${taskType}: ${r.status}`);
   return r.json();
 }
 
 export async function listTasks() {
-  const r = await fetch("/api/tasks");
+  const r = await fetch("/api/sys-shell/tasks");
   if (!r.ok) throw new Error(`tasks: ${r.status}`);
   return r.json();
 }
 
 export async function getTask(taskId) {
-  const r = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`);
+  const r = await fetch(`/api/sys-shell/${encodeURIComponent(taskId)}`);
   if (!r.ok) throw new Error(`task ${taskId}: ${r.status}`);
   return r.json();
 }
 
 export async function createTask(payload) {
-  const r = await fetch("/api/tasks", {
+  const r = await fetch("/api/sys-shell/tasks", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -46,7 +46,7 @@ export async function createTask(payload) {
 
 export async function deleteTask(taskId, purge = false) {
   const r = await fetch(
-    `/api/tasks/${encodeURIComponent(taskId)}?purge=${purge ? "1" : "0"}`,
+    `/api/sys-shell/${encodeURIComponent(taskId)}?purge=${purge ? "1" : "0"}`,
     { method: "DELETE" },
   );
   if (!r.ok) throw new Error(`delete ${taskId}: ${r.status}`);
@@ -54,7 +54,7 @@ export async function deleteTask(taskId, purge = false) {
 }
 
 export async function controlTask(taskId, action, extra = {}) {
-  const r = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/control`, {
+  const r = await fetch(`/api/sys-shell/${encodeURIComponent(taskId)}/control`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action, ...extra }),
@@ -79,9 +79,9 @@ export async function controlTask(taskId, action, extra = {}) {
 //
 // Task-specific data (iterations / charts / state-graph / retrospective)
 // is fetched by each plugin's own runtime-api module against
-// /api/tasks/<id>/task/*. The shell stays ignorant of those shapes.
+// /api/<type>/<id>/... . The shell stays ignorant of those shapes.
 
-const TASK_SCOPE = (taskId) => `/api/tasks/${encodeURIComponent(taskId)}`;
+const TASK_SCOPE = (taskId) => `/api/sys-shell/${encodeURIComponent(taskId)}`;
 
 export async function getRun(taskId) {
   const r = await fetch(`${TASK_SCOPE(taskId)}/run`);

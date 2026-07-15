@@ -1,7 +1,7 @@
 // gen-infer-framework task detail body.
 //
 // Rendered by the task-detail shell when detail_view_module === "app/gf-detail".
-// Fetches its own iterations/charts/state-graph from /api/tasks/<id>/task/*
+// Fetches its own iterations/charts/state-graph from /api/gen-infer-framework/<id>/*
 // (gf's web_server_handler router) and composes the panels using gf-shipped
 // widgets (gf-state-graph / gf-iterations-table / gf-charts plus the
 // shell-shared agents-panel / timeline).

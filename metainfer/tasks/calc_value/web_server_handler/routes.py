@@ -2,20 +2,20 @@
 
 This module builds a single :class:`fastapi.APIRouter` carrying every
 HTTP route calc_value exposes. The shell mounts it under
-``/api/tasks/{task_id}/task`` so every route below lands at:
+``/api/{type}/{task_id}`` so every route below lands at:
 
-    /api/tasks/{task_id}/task/calc/graph
-    /api/tasks/{task_id}/task/calc/compute
-    /api/tasks/{task_id}/task/calc/viz
-    /api/tasks/{task_id}/task/calc/summary
-    /api/tasks/{task_id}/task/calc/iterations
-    /api/tasks/{task_id}/task/calc/rough
-    /api/tasks/{task_id}/task/calc/cells
-    /api/tasks/{task_id}/task/calc/cell/{compound}/{angle}/{round_idx}
-    /api/tasks/{task_id}/task/calc/qa[/start|/<sid>]
-    /api/tasks/{task_id}/task/iterations[/{n}[/retrospective]]
-    /api/tasks/{task_id}/task/charts
-    /api/tasks/{task_id}/task/state-graph
+    /api/{type}/{task_id}/calc/graph
+    /api/{type}/{task_id}/calc/compute
+    /api/{type}/{task_id}/calc/viz
+    /api/{type}/{task_id}/calc/summary
+    /api/{type}/{task_id}/calc/iterations
+    /api/{type}/{task_id}/calc/rough
+    /api/{type}/{task_id}/calc/cells
+    /api/{type}/{task_id}/calc/cell/{compound}/{angle}/{round_idx}
+    /api/{type}/{task_id}/calc/qa[/start|/<sid>]
+    /api/{type}/{task_id}/iterations[/{n}[/retrospective]]
+    /api/{type}/{task_id}/charts
+    /api/{type}/{task_id}/state-graph
 
 The first block (``/calc/...``) reads calc-specific artifacts from the
 task's ``workspace_dir`` via :mod:`._readers`. The second block

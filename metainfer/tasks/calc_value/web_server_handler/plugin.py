@@ -23,7 +23,7 @@ _STATIC_PREFIX = f"/static/plugins/{PLUGIN_TYPE}"
 # the dict below to OVERRIDE shell entries — e.g. ship a divergent
 # ``app/state-graph`` for this task type. The shell's default
 # ``app/state-graph`` / ``app/charts`` / ``app/iterations-table`` widgets
-# (in ``metainfer/static/components/``) are inherited as-is.
+# (in ``metainfer/tasks/sys_shell/static/components/``) are inherited as-is.
 _IMPORTMAP_ENTRIES: dict = {}
 
 

@@ -3,7 +3,7 @@
 // Rendered by the task-detail shell when detail_view_module === "app/calc-detail".
 // Owns the tab UI (rough / audit / viz / runtime). The first three tabs are
 // calc-specific components; "runtime" fetches its own iterations/charts/graph
-// data from /api/tasks/<id>/task/* and renders the panel grid using
+// data from /api/calc-theoretical-value/<id>/* and renders the panel grid using
 // calc-shipped widgets (calc-state-graph / calc-iterations-table / calc-charts
 // plus the shell-shared agents-panel / timeline).
 //

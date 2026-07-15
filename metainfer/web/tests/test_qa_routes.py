@@ -52,12 +52,12 @@ def fake_plugin(tmp_path, isolated_env) -> WebPlugin:
     ))
     app = FastAPI()
     # Mirror how the shell mounts plugin routers: build a relative
-    # APIRouter and include it under /api/tasks/{task_id}. This
+    # APIRouter and include it under /api/__test_qa__/{task_id}. This
     # exercises the post-refactor contract (register_qa_routes now
     # mounts RELATIVE paths onto whatever router/app it receives).
     router = APIRouter()
     register_qa_routes(router, plugin, prefix="/qa")
-    app.include_router(router, prefix="/api/tasks/{task_id}")
+    app.include_router(router, prefix="/api/__test_qa__/{task_id}")
     plugin._test_app = app  # type: ignore[attr-defined]
     yield plugin
     # Tear down so other tests don't see this plugin / task.
@@ -78,20 +78,20 @@ def test_qa_routes_reject_wrong_type(fake_plugin):
         state_dir="/tmp/x", workspace_dir="/tmp/x", created_at=0.0,
     ))
     c = TestClient(fake_plugin._test_app)
-    # /api/tasks/<id>/qa/start on a non-matching task
-    r = c.post("/api/tasks/other-1/qa/start", json={"question": "q"})
+    # /api/__test_qa__/<id>/qa/start on a non-matching task
+    r = c.post("/api/__test_qa__/other-1/qa/start", json={"question": "q"})
     assert r.status_code == 409
 
 
 def test_qa_routes_404_unknown_session(fake_plugin):
     c = TestClient(fake_plugin._test_app)
-    r = c.get("/api/tasks/qa-1/qa/no-such-session")
+    r = c.get("/api/__test_qa__/qa-1/qa/no-such-session")
     assert r.status_code == 404
 
 
 def test_qa_routes_list_empty(fake_plugin):
     c = TestClient(fake_plugin._test_app)
-    r = c.get("/api/tasks/qa-1/qa")
+    r = c.get("/api/__test_qa__/qa-1/qa")
     assert r.status_code == 200
     assert r.json() == {"sessions": []}
 
@@ -101,7 +101,7 @@ def test_qa_routes_resolve_target_on_missing_events(fake_plugin):
     resolve_target; if the resolved file doesn't exist, the engine raises
     EventsFileNotFound → 404."""
     c = TestClient(fake_plugin._test_app)
-    r = c.post("/api/tasks/qa-1/qa/start",
+    r = c.post("/api/__test_qa__/qa-1/qa/start",
                json={"agent": "ghost", "question": "what did you do?"})
     assert r.status_code == 404
 
@@ -123,7 +123,7 @@ def test_qa_routes_passthrough_events_file(fake_plugin, monkeypatch, isolated_en
     monkeypatch.setattr(_qa, "start_qa_session", _fake_start)
 
     c = TestClient(fake_plugin._test_app)
-    r = c.post("/api/tasks/qa-1/qa/start", json={
+    r = c.post("/api/__test_qa__/qa-1/qa/start", json={
         "events_file": str(events_file),
         "question": "what",
     })

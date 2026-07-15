@@ -4,7 +4,7 @@ One agent reads graph.json + the calc/ dir layout and produces
 ``viz.html`` — a self-contained page with:
 * SVG graph of nodes
 * batch_size + seq_len input controls
-* JS that fetches ``/api/tasks/<id>/calc/compute?...`` and updates the
+* JS that fetches ``/api/calc-theoretical-value/<id>/calc/compute?...`` and updates the
   per-node TFLOPs/GB badges
 * totals bar
 
@@ -174,7 +174,7 @@ async function recompute() {{
   if (!b || !s) return;
   const err = document.getElementById("error");
   err.textContent = "";
-  const url = `${{API_BASE}}/api/tasks/${{TASK_ID}}/calc/compute?batch_size=${{b}}&seq_len=${{s}}`;
+  const url = `${{API_BASE}}/api/calc-theoretical-value/${{TASK_ID}}/calc/compute?batch_size=${{b}}&seq_len=${{s}}`;
   try {{
     const r = await fetch(url, {{ cache: "no-store" }});
     if (!r.ok) throw new Error("HTTP " + r.status);
@@ -273,7 +273,7 @@ def run_step4_visualize(
     common = {
         "graph_json": json.dumps(graph, indent=2, ensure_ascii=False),
         "calc_dir": str(calc_dir),
-        "compute_url": "/api/tasks/{task_id}/calc/compute",
+        "compute_url": "/api/calc-theoretical-value/{task_id}/calc/compute",
     }
 
     name = "viz_builder"

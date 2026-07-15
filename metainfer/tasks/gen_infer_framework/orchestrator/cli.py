@@ -1,7 +1,7 @@
 """CLI for the gen-infer-framework orchestrator subprocess.
 
 The orchestrator runs as a child of the WebUI server (see
-:mod:`metainfer.web.launcher`). One orchestrator per task, spawned when
+:mod:`metainfer.server.launcher`). One orchestrator per task, spawned when
 the user submits a new task via the web form, exits when the task
 completes or stops.
 
@@ -27,7 +27,7 @@ DEFAULT_CLAUDE_BIN = "ccb"
 
 # Claude Code permission mode for sub-agents. Sub-agents are non-interactive
 # (`-p` with stdin), so `default` mode hangs on every Edit/Write prompt.
-# See the longer rationale in metainfer.web.forms / SKILL docs.
+# See the longer rationale in metainfer.server.forms / SKILL docs.
 DEFAULT_PERMISSION_MODE = "bypassPermissions"
 _VALID_PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions", "auto")
 

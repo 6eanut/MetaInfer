@@ -3,7 +3,7 @@
 The current QA flow is **frontend-driven**: the iterations reader
 exposes ``events_file`` + ``target_workdir`` per agent entry, so the
 generic ``/qa/start`` route just forwards those to
-:mod:`metainfer.web.qa`. No server-side path resolution is needed for
+:mod:`metainfer.server.qa`. No server-side path resolution is needed for
 the WebUI case.
 
 This module is also the home for **server-side resolution** of
@@ -22,7 +22,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from metainfer.web._helpers import find_events_file
+from metainfer.server._helpers import find_events_file
 
 PLUGIN_TYPE = "gen-infer-framework"
 

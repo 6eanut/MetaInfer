@@ -5,7 +5,7 @@ Top-level subpackages:
 
 - :mod:`metainfer.orchestrator` — the ABCDEF orchestrator that spawns
   Claude Code sub-agents. Runs as a per-task subprocess.
-- :mod:`metainfer.web` — FastAPI WebUI backend (the main process).
+- :mod:`metainfer.server` — FastAPI WebUI backend (the main process).
 - :mod:`metainfer.static` — frontend SPA (Preact, served by the WebUI).
 """
 

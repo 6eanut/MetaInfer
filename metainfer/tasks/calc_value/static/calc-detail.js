@@ -41,7 +41,7 @@ const withTimeout = (p, ms = 8000) =>
 
 function useRuntimeData(taskId) {
   // Fetches iterations / charts / graph — calc-specific endpoints
-  // mounted by calc_value's web_server_handler router.
+  // mounted by calc_value's server router.
   const [data, setData] = useState({
     iterations: [], charts: null, graph: null,
   });

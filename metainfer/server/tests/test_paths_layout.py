@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from metainfer.web import paths
+from metainfer.server import paths
 
 
 def test_root_dir_defaults_to_cwd(monkeypatch):

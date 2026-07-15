@@ -9,7 +9,7 @@ Pluggable task layout (post task-package refactor)::
     │   ├── orchestrator/              ← THIS package (shared framework)
     │   │   └── paths.py               ← this file
     │   ├── tasks/                     ← task packages (one per task type)
-    │   │   └── <task_pkg>/            ← orchestrator/ + web_server_handler/ + static/ + tests/ + form.yaml
+    │   │   └── <task_pkg>/            ← orchestrator/ + server/ + static/ + tests/ + form.yaml
     │   ├── web/
     │   └── static/
 
@@ -17,7 +17,7 @@ Each task type is fully self-contained: its form schema lives at
 ``metainfer/tasks/<task_pkg>/form.yaml``, its knowledge base (if any)
 lives at ``metainfer/tasks/<task_pkg>/notebooks/`` (resolved by the
 task package itself, not by this module), and its label / description
-/ detail view live on its :class:`metainfer.web.registry.WebPlugin`.
+/ detail view live on its :class:`metainfer.server.registry.WebPlugin`.
 The framework never hardcodes the identity of any single task package.
 
 All paths derive from ``__file__`` — no walk-up search, no env vars,

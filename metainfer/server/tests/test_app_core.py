@@ -10,9 +10,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from metainfer.web import tasks as _tasks
-from metainfer.web.registry import all_plugins as _all_plugins
-from metainfer.web.tasks import TaskEntry
+from metainfer.server import tasks as _tasks
+from metainfer.server.registry import all_plugins as _all_plugins
+from metainfer.server.tasks import TaskEntry
 
 
 def _register_task(state_dir: Path, task_id: str = "ct-1",
@@ -188,8 +188,8 @@ def test_plugin_can_override_shell_importmap_entry():
     """If a plugin registers an entry whose key collides with a shell
     entry, the plugin's URL wins. This is the override mechanism for
     task packages that need to diverge from a shared widget."""
-    from metainfer.web import registry
-    from metainfer.web.app import create_app
+    from metainfer.server import registry
+    from metainfer.server.app import create_app
     fake = registry.WebPlugin(
         type="__test_override__",
         label="t", description="t",
@@ -269,8 +269,8 @@ def test_plugin_stylesheets_skip_path_escape():
     its own mount point. Filename validation rejects forward slashes,
     backslashes, leading dots, absolute paths, and ``..`` traversal
     BEFORE the resolve/relative_to defense-in-depth check runs."""
-    from metainfer.web import registry
-    from metainfer.web.app import create_app
+    from metainfer.server import registry
+    from metainfer.server.app import create_app
     from pathlib import Path
     calc = registry.get("calc-theoretical-value")
     fake = registry.WebPlugin(
@@ -330,8 +330,8 @@ def test_plugin_stylesheets_skip_missing_files():
     doesn't actually exist under ``frontend_dir`` should be skipped,
     rather than emit a ``<link>`` that 404s. Catches typos in plugin
     config (e.g. declaring ``calc.css`` before creating it)."""
-    from metainfer.web import registry
-    from metainfer.web.app import create_app
+    from metainfer.server import registry
+    from metainfer.server.app import create_app
     calc = registry.get("calc-theoretical-value")
     fake = registry.WebPlugin(
         type="__test_css_missing__",
@@ -375,8 +375,8 @@ def test_plugin_auto_importmap_discovers_every_js():
     JS file and no explicit importmap_entries."""
     import re
     import tempfile
-    from metainfer.web import registry
-    from metainfer.web.app import create_app
+    from metainfer.server import registry
+    from metainfer.server.app import create_app
     with tempfile.TemporaryDirectory() as td:
         d = tempfile.mkdtemp(dir=td)
         # Drop a fake plugin JS file
@@ -408,8 +408,8 @@ def test_auto_discovery_does_not_silently_override_shell_entry():
     ``importmap_entries`` override can replace a shell entry."""
     import re
     import tempfile
-    from metainfer.web import registry
-    from metainfer.web.app import create_app
+    from metainfer.server import registry
+    from metainfer.server.app import create_app
     with tempfile.TemporaryDirectory() as td:
         d = tempfile.mkdtemp(dir=td)
         # Drop a file whose stem collides with a shell widget key.

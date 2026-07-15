@@ -8,7 +8,7 @@
     ./serve.py --host 0.0.0.0 --port 8765
 
 这个脚本不依赖 `pip install` —— 它把仓库根目录加到 sys.path，
-然后直接调用 metainfer.web.app:main()。如果你已经 `pip install -e .`
+然后直接调用 metainfer.server.app:main()。如果你已经 `pip install -e .`
 或 `pip install metainfer`，也可以用 `metainfer-web` 命令，等价的。
 """
 
@@ -32,7 +32,7 @@ def main() -> int:
 
     # 延迟 import，确保 sys.path 已经修好。
     try:
-        from metainfer.web.app import create_app
+        from metainfer.server.app import create_app
     except ImportError as e:
         sys.stderr.write(
             f"[metainfer] 无法加载 metainfer 包: {e}\n"

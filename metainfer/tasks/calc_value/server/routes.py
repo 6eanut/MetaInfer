@@ -25,7 +25,7 @@ reads the orchestrator's iteration records / phases from ``state_dir``
 live with the task package.
 
 Type guard is enforced at the route layer via
-:func:`metainfer.web._helpers.require_task_type` for safety.
+:func:`metainfer.server._helpers.require_task_type` for safety.
 """
 
 from __future__ import annotations
@@ -35,13 +35,13 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
-from metainfer.web._helpers import (
+from metainfer.server._helpers import (
     require_task_type,
     state_dir_for,
     task_or_404,
     workspace_dir_for,
 )
-from metainfer.web.qa_routes import register_qa_routes
+from metainfer.server.qa_routes import register_qa_routes
 
 from . import _readers, _state_readers
 
@@ -50,7 +50,7 @@ PLUGIN_TYPE = "calc-theoretical-value"
 
 def build_router(plugin) -> APIRouter:
     """Build the calc_value router. ``plugin`` is the WebPlugin itself,
-    passed in by :func:`metainfer.web.app.create_app` so we can hand it
+    passed in by :func:`metainfer.server.app.create_app` so we can hand it
     to the generic QA helper without a circular import."""
     router = APIRouter()
 

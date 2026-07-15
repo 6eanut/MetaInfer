@@ -3,13 +3,13 @@
 The current calc qa flow is **frontend-driven**: the iterations reader
 already exposes ``events_file`` + ``target_workdir`` per agent, so the
 calc ``/qa/start`` route just forwards those to the generic
-:mod:`metainfer.web.qa`. No server-side path resolution is needed.
+:mod:`metainfer.server.qa`. No server-side path resolution is needed.
 
 This module is here as the home for **future** server-side resolution
 if/when we want to support requests of the form
 ``{step, round, agent}`` instead of explicit ``events_file`` paths
 (e.g. for CLI/scripted QA callers). It satisfies the
-:class:`metainfer.web.registry.QAConfigLike` protocol so it can be
+:class:`metainfer.server.registry.QAConfigLike` protocol so it can be
 registered on the plugin.
 """
 
@@ -18,7 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from metainfer.web._helpers import find_events_file
+from metainfer.server._helpers import find_events_file
 
 PLUGIN_TYPE = "calc-theoretical-value"
 

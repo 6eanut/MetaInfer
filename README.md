@@ -64,7 +64,7 @@ pip install -r requirements.txt   # fastapi, uvicorn, pyyaml（纯 Python）
 ```bash
 ./serve.py --host 0.0.0.0 --port 9000   # 自定义监听
 METAINFER_PORT=9000 ./serve.py           # 用环境变量
-python -m metainfer.web.app              # 不用 serve.py 包装
+python -m metainfer.server.app              # 不用 serve.py 包装
 metainfer-web                            # 需要先 pip install -e .
 ```
 
@@ -257,7 +257,7 @@ Add `override_component: <name>` to delegate to a task-specific widget
 
 1. Add `tasks/<new-task>.yaml` (form schema).
 2. Register the task type in `metainfer/orchestrator/paths.py:TASK_TYPES`
-   and add metadata to `metainfer/web/forms.py:TASK_TYPE_META`.
+   and add metadata to `metainfer/server/forms.py:TASK_TYPE_META`.
 3. If correctness needs an objective check, add an oracle under
    `metainfer/orchestrator/oracles/<new-task>/` and register it in
    `metainfer/orchestrator/oracles/__init__.py`.

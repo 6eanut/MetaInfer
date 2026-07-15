@@ -99,7 +99,7 @@ def _orchestrator_cmd(
 
     The orchestrator receives BOTH ``--state-dir`` (metadata + logs) and
     ``--workspace-dir`` (generated artifacts) — they're parallel trees
-    under the per-node root; see :mod:`metainfer.web.paths`.
+    under the per-node root; see :mod:`metainfer.server.paths`.
 
     Note: ``args[0]`` is set to ``metainfer-orchestrator`` rather than
     the python binary path. This makes the process trivially findable
@@ -162,7 +162,7 @@ class LocalLauncher:
 
     def __init__(self, boot_id: Optional[str] = None) -> None:
         """``boot_id`` is the WebUI session id (see
-        :mod:`metainfer.web.runtime`). Recorded with each spawn so we
+        :mod:`metainfer.server.runtime`). Recorded with each spawn so we
         can tell which session owns which orchestrator. May be None —
         e.g. for ad-hoc CLI use of the launcher."""
         self._boot_id = boot_id
@@ -387,7 +387,7 @@ def get_default_launcher() -> LocalLauncher:
 
     The launcher is created lazily on first call. If the WebUI has
     already stamped its boot_id into runtime.json (see
-    :func:`metainfer.web.runtime.record_webui_start`), the launcher
+    :func:`metainfer.server.runtime.record_webui_start`), the launcher
     picks that up automatically — spawn records get tagged with it."""
     global _DEFAULT
     if _DEFAULT is None:

@@ -51,16 +51,16 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           # testpaths in pytest.ini picks up every package-local tests/
-          # dir (orchestrator, web, each task package under metainfer/tasks/).
+          # dir (orchestrator, server, each task package under metainfer/tasks/).
           python -m pytest -v --tb=short
 
       - name: Smoke-import the WebUI app
         run: |
           python -c "
-          from metainfer.web.app import create_app
+          from metainfer.server.app import create_app
           app = create_app()
           routes = [r.path for r in app.routes]
-          assert any('/api/tasks' in r for r in routes), 'missing task routes'
+          assert any('/api/sys-shell/tasks' in r for r in routes), 'missing task routes'
           print('WebUI app boots OK; routes:', len(routes))
           "
 

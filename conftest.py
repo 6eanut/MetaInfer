@@ -25,7 +25,7 @@ if s not in sys.path:
     sys.path.insert(0, s)
 
 # -- isolate test state from repo --------------------------------------------
-# Must happen BEFORE any sub-conftest imports ``metainfer.web.app``, because
+# Must happen BEFORE any sub-conftest imports ``metainfer.server.app``, because
 # ``app = create_app()`` at module level calls ``reconcile()`` which creates
 # ``nodes/<hostname>/`` under ``METAINFER_ROOT`` (default: cwd).
 if "METAINFER_ROOT" not in os.environ:

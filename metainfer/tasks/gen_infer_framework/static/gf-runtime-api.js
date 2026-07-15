@@ -1,7 +1,7 @@
 // Fetch helpers for gen_infer_framework's task-specific endpoints.
 //
 // All routes live under /api/gen-infer-framework/<id>/* (mounted by
-// the shell from gf's web_server_handler router). The shell api.js
+// the shell from gf's server router). The shell api.js
 // intentionally does NOT know about these — every task package owns
 // its own runtime fetcher.
 

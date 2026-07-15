@@ -9,7 +9,7 @@ task-agnostic endpoints (lifecycle, timeline, agents, token-budget).
 Registration is a side-effect of importing the task package:
 ``metainfer/tasks/__init__.py`` auto-discovers sibling packages, and
 each task package's ``__init__.py`` imports its own
-``web_server_handler.plugin`` submodule so the ``register(...)`` call
+``server.plugin`` submodule so the ``register(...)`` call
 fires. Adding a new task-type plugin only requires dropping a package
 under ``metainfer/tasks/<name>/`` — no edits to ``app.py``.
 """
@@ -26,7 +26,7 @@ from fastapi import APIRouter
 class QAConfigLike(Protocol):
     """Minimal protocol a plugin's ``qa_config`` should satisfy.
 
-    The plugin tells the generic :mod:`metainfer.web.qa` engine how to
+    The plugin tells the generic :mod:`metainfer.server.qa` engine how to
     locate a target agent's transcript and working directory. Different
     task types have different on-disk layouts, so each plugin provides
     its own pathsolver.
@@ -59,7 +59,7 @@ class WebDeps:
     current ``build_router(plugin)`` protocol no longer passes deps —
     plugins are expected to read everything they need from the
     :class:`WebPlugin` and from on-disk state via
-    :mod:`metainfer.web._helpers`. Kept here as a stable type so older
+    :mod:`metainfer.server._helpers`. Kept here as a stable type so older
     plugin code / tests that import it don't break during the
     transition; safe to remove once no references remain.
     """
@@ -142,12 +142,12 @@ class WebPlugin:
 
     Routes inside the router see ``task_id`` as a path param (declared
     in the shell's mount prefix) and should use the standard helpers
-    from :mod:`metainfer.web._helpers` (``task_or_404``,
+    from :mod:`metainfer.server._helpers` (``task_or_404``,
     ``require_task_type``, ``state_dir_for``, ``workspace_dir_for``)
     to resolve the on-disk targets.
 
     Plugins that want offline-QA support typically call
-    :func:`metainfer.web.qa_routes.register_qa_routes` from inside
+    :func:`metainfer.server.qa_routes.register_qa_routes` from inside
     their ``build_router`` to fold the generic QA triplet in. Plugins
     with no custom routes leave this ``None``.
 

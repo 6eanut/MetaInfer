@@ -27,7 +27,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from metainfer.web._helpers import find_events_file
+from metainfer.server._helpers import find_events_file
 
 # Lazy import — the deterministic helpers live in the orchestrator
 # subpackage; importing them eagerly at module load would slow the

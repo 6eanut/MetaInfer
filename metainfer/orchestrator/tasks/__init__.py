@@ -66,7 +66,7 @@ def all_tasks() -> List[TaskPlugin]:
 
 def all_cli_modules() -> List[str]:
     """Convenience for process detectors: every registered CLI module
-    path. Used by :func:`metainfer.web.proc.is_orchestrator_process` to
+    path. Used by :func:`metainfer.server.proc.is_orchestrator_process` to
     recognize orchestrator subprocesses regardless of task type."""
     return [p.cli_module for p in _REGISTRY.values()]
 

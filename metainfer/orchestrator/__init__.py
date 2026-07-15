@@ -18,7 +18,7 @@ NOT require editing any file in this package; the registry is populated
 by side-effect of importing the task package.
 
 The WebUI dispatches to orchestrators via the registry; see
-``metainfer.web.launcher``.
+``metainfer.server.launcher``.
 """
 
 __version__ = "0.3.0"

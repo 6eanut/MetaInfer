@@ -2,14 +2,14 @@
 
 Registers the detail view + QA pathsolver for the multi-iteration
 ABCDEF pipeline. Peer of
-:mod:`metainfer.tasks.calc_value.web_server_handler.plugin`.
+:mod:`metainfer.tasks.calc_value.server.plugin`.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from metainfer.web.registry import WebPlugin, register
+from metainfer.server.registry import WebPlugin, register
 
 from ._qa import CONFIG as _QA_CONFIG
 from .routes import build_router

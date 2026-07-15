@@ -3,7 +3,7 @@
 Each task type ships a ``form.yaml`` inside its self-contained task package
 at ``metainfer/tasks/<task_pkg>/form.yaml`` (see CLAUDE.md for the layout).
 The task-type's friendly label + description live on its WebPlugin
-(``metainfer/tasks/<task_pkg>/web_server_handler/plugin.py``); this module
+(``metainfer/tasks/<task_pkg>/server/plugin.py``); this module
 reads them from the registry, so adding a new task type does NOT require
 editing any central metadata table.
 

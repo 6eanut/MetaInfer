@@ -1,7 +1,7 @@
 """calc_value plugin route tests — the ``/api/tasks/<id>/calc/...`` family.
 
 Generic web endpoints (task-types, CRUD, control) live in
-``metainfer/web/tests/test_app_core.py``.
+``metainfer/server/tests/test_app_core.py``.
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from metainfer.web import tasks as _tasks
-from metainfer.web.tasks import TaskEntry
+from metainfer.server import tasks as _tasks
+from metainfer.server.tasks import TaskEntry
 
 
 def _register_calc_task(
@@ -39,7 +39,7 @@ def _seed_calc_task(client, isolated_env, *, with_rough=False, with_final=False,
     metadata lives under ``state_dir``.
     """
     state_dir = isolated_env["home"] / "tasks" / "ct-1"
-    from metainfer.web import paths as _paths
+    from metainfer.server import paths as _paths
     workspace_dir = _paths.workspace_dir("ct-1")
     entry = _register_calc_task(state_dir, "ct-1", workspace_dir=workspace_dir)
     if with_rough:
@@ -227,7 +227,7 @@ def test_calc_cells_ondemand_recompute(client, isolated_env):
     calc.py. We materialize a calc.py at the expected cell path that
     returns shape-dependent numbers."""
     _seed_calc_task(client, isolated_env, with_cells_state=True)
-    from metainfer.web import paths as _paths
+    from metainfer.server import paths as _paths
     workspace_dir = _paths.workspace_dir("ct-1")
     calc_path = workspace_dir / "step3" / "cells" / "layer__attn" / "a" / "round_00" / "writer" / "calc.py"
     calc_path.parent.mkdir(parents=True, exist_ok=True)

@@ -7,4 +7,4 @@ its ``TaskPlugin`` (orchestrator-side dispatch) and its ``WebPlugin``
 """
 
 from .orchestrator import plugin as _task_plugin  # noqa: F401 — registers TaskPlugin
-from .web_server_handler import plugin as _web_plugin  # noqa: F401 — registers WebPlugin
+from .server import plugin as _web_plugin  # noqa: F401 — registers WebPlugin

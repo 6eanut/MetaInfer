@@ -1,6 +1,6 @@
 """Shared HTTP helpers for the WebUI.
 
-These used to live inline in :mod:`metainfer.web.app`; they're extracted
+These used to live inline in :mod:`metainfer.server.app`; they're extracted
 here so per-task-type plugin routes can use them without circular
 imports against ``app.py``.
 """

@@ -26,7 +26,7 @@ dev = [
 
 [project.scripts]
 # Main WebUI server (the long-lived main process)
-metainfer-web = "metainfer.web.app:main"
+metainfer-web = "metainfer.server.app:main"
 # Per-task orchestrator subprocess entry point
 metainfer-orchestrator = "metainfer.orchestrator.cli:main"
 

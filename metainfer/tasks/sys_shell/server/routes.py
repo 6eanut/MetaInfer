@@ -4,7 +4,7 @@ All routes are mounted at ``/api/sys-shell`` by ``create_app``. Each is
 a relative-path endpoint (no ``/api/sys-shell`` prefix); the shell's
 mount prefix carries it.
 
-Moved here from ``metainfer/web/app.py`` so the shell is a true task
+Moved here from ``metainfer/server/app.py`` so the shell is a true task
 package alongside calc_value / gen_infer_framework.
 """
 
@@ -20,18 +20,18 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, HTTPException, Request
 from starlette.responses import StreamingResponse
 
-from metainfer.web import launcher as _launcher
-from metainfer.web import forms as _forms
-from metainfer.web import paths as _paths
-from metainfer.web import sse as _sse
-from metainfer.web import state_reader as _sr
-from metainfer.web import tasks as _tasks
-from metainfer.web._helpers import (
+from metainfer.server import launcher as _launcher
+from metainfer.server import forms as _forms
+from metainfer.server import paths as _paths
+from metainfer.server import sse as _sse
+from metainfer.server import state_reader as _sr
+from metainfer.server import tasks as _tasks
+from metainfer.server._helpers import (
     state_dir_for as _state_dir_for,
     task_or_404 as _task_or_404,
     workspace_dir_for as _workspace_dir_for,
 )
-from metainfer.web.registry import get as _get_web_plugin
+from metainfer.server.registry import get as _get_web_plugin
 
 
 def _plugin_view_hint(task_type: str) -> Dict[str, Any]:

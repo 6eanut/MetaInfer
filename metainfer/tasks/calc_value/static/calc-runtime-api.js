@@ -1,7 +1,7 @@
 // Fetch helpers for calc_value's task-specific endpoints.
 //
 // All routes live under /api/calc-theoretical-value/<id>/* (mounted by the shell
-// from calc_value's web_server_handler router). The shell api.js
+// from calc_value's server router). The shell api.js
 // intentionally does NOT know about these — every task package owns
 // its own runtime fetcher.
 

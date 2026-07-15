@@ -1,14 +1,14 @@
 """Startup reconciliation: bring runtime.json + registry.json in sync
 with the actual process table.
 
-Called once at WebUI startup (see :func:`metainfer.web.app.create_app`).
+Called once at WebUI startup (see :func:`metainfer.server.app.create_app`).
 Does three things:
 
 1. **Stamp** this WebUI session into ``runtime.json`` (pid, boot_id,
-   started_at). See :func:`metainfer.web.runtime.record_webui_start`.
+   started_at). See :func:`metainfer.server.runtime.record_webui_start`.
 
 2. **Scan** ``/proc`` for every ``metainfer-orchestrator`` process on
-   the host (see :func:`metainfer.web.proc.list_orchestrator_processes`).
+   the host (see :func:`metainfer.server.proc.list_orchestrator_processes`).
 
 3. **Reconcile**:
 

@@ -13,9 +13,9 @@ from typing import Any, Dict, List
 
 import pytest
 
-from metainfer.web import launcher as _launcher
-from metainfer.web import tasks as _tasks
-from metainfer.web.launcher import ProcStatus
+from metainfer.server import launcher as _launcher
+from metainfer.server import tasks as _tasks
+from metainfer.server.launcher import ProcStatus
 
 
 class FakeLauncher:
@@ -73,7 +73,7 @@ def isolated_env(monkeypatch):
         monkeypatch.setattr(_launcher, "_DEFAULT", fake)
         # Force the tasks registry to re-resolve its path under the new root.
         _tasks._REGISTRY_PATH = None  # type: ignore[attr-defined]
-        from metainfer.web import paths as _paths
+        from metainfer.server import paths as _paths
         home = _paths.home_dir()
         yield {
             "root": root,

@@ -1,6 +1,6 @@
 """Task registry: durable list of all tasks the WebUI knows about.
 
-Stored at ``<node_dir>/.metainfer/registry.json`` (see :mod:`metainfer.web.paths`
+Stored at ``<node_dir>/.metainfer/registry.json`` (see :mod:`metainfer.server.paths`
 for the node-rooted layout). Each entry pins a task to its ``state_dir``
 (metadata + logs), its ``workspace_dir`` (generated artifacts), the task
 type, the launcher used to spawn it, and the last-known PID + status. The

@@ -4,7 +4,7 @@ Goal
 ----
 Every Claude Code (``ccb``) subprocess a task spawns — whether driven by
 the orchestrator's :class:`SubAgentManager` or by the WebUI's on-demand
-analyst (:mod:`metainfer.web.qa`) — emits one ``stream-json`` ``result``
+analyst (:mod:`metainfer.server.qa`) — emits one ``stream-json`` ``result``
 event at the end of its run, carrying a ``usage`` block and
 ``total_cost_usd``. This module turns those numbers into a single
 authoritative running total + a soft-abort circuit breaker for the

@@ -22,12 +22,12 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, HTTPException
 
-from metainfer.web._helpers import (
+from metainfer.server._helpers import (
     require_task_type,
     state_dir_for,
     task_or_404,
 )
-from metainfer.web.qa_routes import register_qa_routes
+from metainfer.server.qa_routes import register_qa_routes
 
 from . import _state_readers
 
@@ -36,7 +36,7 @@ PLUGIN_TYPE = "gen-infer-framework"
 
 def build_router(plugin) -> APIRouter:
     """Build the gf router. ``plugin`` is the WebPlugin itself, passed
-    in by :func:`metainfer.web.app.create_app` so we can hand it to the
+    in by :func:`metainfer.server.app.create_app` so we can hand it to the
     generic QA helper without a circular import."""
     router = APIRouter()
 

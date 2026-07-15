@@ -2,7 +2,7 @@
 
 Covers plugin registration + QA pathsolver tuple-lookup behavior. The
 detail-view dispatch is exercised end-to-end in
-``metainfer/web/tests/test_app_core.py``.
+``metainfer/server/tests/test_app_core.py``.
 """
 
 from __future__ import annotations
@@ -12,11 +12,11 @@ from pathlib import Path
 
 import pytest
 
-from metainfer.tasks.gen_infer_framework.web_server_handler._qa import (
+from metainfer.tasks.gen_infer_framework.server._qa import (
     GenInferQAConfig,
     _resolve_gf_events_file,
 )
-from metainfer.web.registry import get as _get_plugin
+from metainfer.server.registry import get as _get_plugin
 
 
 def test_plugin_registered():

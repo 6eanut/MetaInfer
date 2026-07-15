@@ -250,7 +250,7 @@ def _write_index(state_dir: Path, data: Dict[str, Any]) -> None:
 @contextmanager
 def _index_lock(state_dir: Path):
     """Exclusive flock on qa_sessions/index.lock. Cross-process safe —
-    matches the registry-lock pattern in metainfer/web/tasks.py:_lock().
+    matches the registry-lock pattern in metainfer/server/tasks.py:_lock().
     Held across the read-modify-write so two concurrent starts can't
     lose each other's entries or fight over a shared tmp file.
     """

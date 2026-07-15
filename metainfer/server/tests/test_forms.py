@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from metainfer.web import forms
-from metainfer.web import registry
+from metainfer.server import forms
+from metainfer.server import registry
 import metainfer.tasks  # noqa: F401 — side effect: auto-discover
 
 

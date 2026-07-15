@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List
 
-from metainfer.web._helpers import workspace_dir_for
-from metainfer.web.registry import WebPlugin, register
+from metainfer.server._helpers import workspace_dir_for
+from metainfer.server.registry import WebPlugin, register
 
 from ._qa import CONFIG as _QA_CONFIG
 from .routes import build_router
@@ -35,7 +35,7 @@ def _extra_watch_paths(entry) -> List[Path]:
     ``step3/cells/_state.json``); the audit panel refetches on each
     change. These live under ``workspace_dir``, not ``state_dir``, so
     we have to point the watcher at them explicitly. See
-    :func:`metainfer.web.sse._scan_task` for how this hook is consumed.
+    :func:`metainfer.server.sse._scan_task` for how this hook is consumed.
     """
     wd = workspace_dir_for(entry)
     return [

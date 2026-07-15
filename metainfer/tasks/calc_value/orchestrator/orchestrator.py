@@ -138,7 +138,7 @@ def run_with_requirements(
     set_process_name("metainfer-cv-orch")
 
     if state_dir is None or workspace_dir is None:
-        from metainfer.web import paths as _web_paths
+        from metainfer.server import paths as _web_paths
         if state_dir is None:
             state_dir = _web_paths.task_dir(task_id)
         if workspace_dir is None:

@@ -134,7 +134,7 @@ def registry_lock_path() -> Path:
 def runtime_path() -> Path:
     """Live runtime state: which WebUI instance is running + which
     orchestrator PIDs it spawned. Used for crash-recovery reconciliation
-    on WebUI restart — see :mod:`metainfer.web.runtime`."""
+    on WebUI restart — see :mod:`metainfer.server.runtime`."""
     return home_dir() / "runtime.json"
 
 

@@ -6,9 +6,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from metainfer.testing import isolated_env  # noqa: F401 — re-export as fixture
-from metainfer.web import app as app_module
-from metainfer.web import tasks as _tasks
-from metainfer.web.tasks import TaskEntry
+from metainfer.server import app as app_module
+from metainfer.server import tasks as _tasks
+from metainfer.server.tasks import TaskEntry
 
 
 @pytest.fixture

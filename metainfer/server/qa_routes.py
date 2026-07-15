@@ -2,7 +2,7 @@
 
 This helper adds the ``POST /qa/start`` + ``GET /qa/{sid}`` +
 ``GET /qa`` triplet for a task type, backed by the task-type-agnostic
-:mod:`metainfer.web.qa` engine. The triplet is mounted onto whatever
+:mod:`metainfer.server.qa` engine. The triplet is mounted onto whatever
 APIRouter the plugin is building (relative paths only) — the shell
 mounts that router under ``/api/{type}/{task_id}`` so the routes
 end up at ``/api/{type}/{task_id}{prefix}``.
@@ -17,7 +17,7 @@ Two modes are supported by the same routes:
   ``plugin.qa_config.resolve_target(state_dir, body)`` to map the tuple
   to an ``events_file`` path before invoking the engine.
 
-The plugin's :class:`~metainfer.web.registry.WebPlugin` already holds a
+The plugin's :class:`~metainfer.server.registry.WebPlugin` already holds a
 ``qa_config``; this helper just consumes it.
 """
 

@@ -1,4 +1,4 @@
-"""Tests for metainfer.web.state_reader — read helpers + reset_state_dir.
+"""Tests for metainfer.server.state_reader — read helpers + reset_state_dir.
 
 The reset feature is the user-visible "Reset button" requirement: wipe
 everything except requirements.json so the task returns to its just-
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from metainfer.web import state_reader as sr
+from metainfer.server import state_reader as sr
 
 
 # --------------------------------------------------------------------------- #

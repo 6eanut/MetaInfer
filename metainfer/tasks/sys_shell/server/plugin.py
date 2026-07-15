@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from metainfer.web.registry import WebPlugin, register
+from metainfer.server.registry import WebPlugin, register
 
 PLUGIN_TYPE = "sys-shell"
 _FRONTEND_DIR = Path(__file__).resolve().parent.parent / "static"

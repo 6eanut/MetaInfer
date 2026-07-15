@@ -9,10 +9,10 @@ import pytest
 from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
-from metainfer.web import tasks as _tasks
-from metainfer.web.qa_routes import register_qa_routes
-from metainfer.web.registry import WebPlugin
-from metainfer.web.tasks import TaskEntry
+from metainfer.server import tasks as _tasks
+from metainfer.server.qa_routes import register_qa_routes
+from metainfer.server.registry import WebPlugin
+from metainfer.server.tasks import TaskEntry
 
 
 class _FakeQAConfig:
@@ -39,7 +39,7 @@ def fake_plugin(tmp_path, isolated_env) -> WebPlugin:
         label="t", description="t",
         qa_config=_FakeQAConfig(),
     )
-    from metainfer.web.registry import register as _register, _REGISTRY
+    from metainfer.server.registry import register as _register, _REGISTRY
     _register(plugin)
     state_dir = isolated_env["home"] / "tasks" / "qa-1"
     state_dir.mkdir(parents=True)
@@ -119,7 +119,7 @@ def test_qa_routes_passthrough_events_file(fake_plugin, monkeypatch, isolated_en
         started["payload"] = payload
         return "sid-xyz"
 
-    import metainfer.web.qa as _qa
+    import metainfer.server.qa as _qa
     monkeypatch.setattr(_qa, "start_qa_session", _fake_start)
 
     c = TestClient(fake_plugin._test_app)

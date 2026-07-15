@@ -882,7 +882,7 @@ class Orchestrator:
                 n=n, iter_dir=iter_dir, ctx=ctx, rec=rec,
                 this_perf=None, e_ok=False, e_error=err,
             )
-            return P.INFRA_FAIL, None, f"E (perf oracle) crashed: {err}"
+            return P.INFRA_FAIL, None, self._render_e_failure(n, err)
 
         # The oracle writes perf_report.json; reuse the existing parser.
         perf = self._read_perf_report(n, iter_dir)
@@ -899,7 +899,7 @@ class Orchestrator:
             # oracle that can't get numbers usually means the server
             # wouldn't boot or answer, which is the same class of problem
             # as a crashed C step. Don't burn a C-repair slot on it.
-            return P.INFRA_FAIL, perf, f"E (perf oracle): {e_error}"
+            return P.INFRA_FAIL, perf, self._render_e_failure(n, e_error)
         return P.OK, perf, None
 
     def _write_retrospective(
@@ -1504,6 +1504,43 @@ class Orchestrator:
                      "(server error output — first place to look for crashes)")
         lines.append(f"  - {snap / 'server.stdout.log'}   "
                      "(server stdout — startup banner, model load info)")
+        return "\n".join(lines)
+
+    def _render_e_failure(self, iter_num: int, e_error: str) -> str:
+        """Compose a structured failure description for an E_perf_test failure.
+
+        Mirrors :meth:`_render_oracle_failure` for the C step — surfaces the
+        error text AND explicit absolute pointers to the prev-iter diagnostic
+        files so the next iteration's planner can read the perf server logs
+        and retrospective before replanning.
+
+        Without this, the planner sees only ``"perf oracle produced no usable
+        data"`` and replans blind, hitting the same E failure again.
+        """
+        from metainfer.orchestrator.iteration import PREV_ITER_LOGS_SUBDIR
+
+        next_logs = self._logs_dir_for(iter_num + 1)
+        snap = next_logs / PREV_ITER_LOGS_SUBDIR
+
+        lines: List[str] = []
+        lines.append(f"[iter {iter_num:03d} E_perf_test INFRA_FAIL] {e_error}")
+        lines.append("")
+        lines.append(
+            "Diagnostic files from this failed iteration will be copied into "
+            f"the next iteration's logs snapshot at `{snap}/`. READ them "
+            "before replanning — this is the second E failure in a row, so "
+            "the root cause is likely systematic, not a transient glitch:"
+        )
+        lines.append(f"  - {snap / 'retrospective.md'}        "
+                     "(reviewer's root cause analysis — READ THIS FIRST)")
+        lines.append(f"  - {snap / 'perf_report.json'}       "
+                     "(perf sweep: per-concurrency throughput, error counts)")
+        lines.append(f"  - {snap / 'perf-server.stderr.log'}  "
+                     "(serve.sh error output — OOM, port conflict, crash)")
+        lines.append(f"  - {snap / 'perf-server.stdout.log'}  "
+                     "(serve.sh stdout — startup banner, model load info)")
+        lines.append(f"  - {snap / 'server.stderr.log'}       "
+                     "(C-test server errors — if E failed, C may hold stale clues)")
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ #

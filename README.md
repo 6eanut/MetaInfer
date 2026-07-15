@@ -1,302 +1,209 @@
-# MetaInfer
+<p align="center">
+  <img src="https://raw.githubusercontent.com/MetaInfer/MetaInfer/main/docs/logo.png" alt="MetaInfer" width="200" onerror="this.style.display='none'">
+</p>
 
-MetaInfer is a lightweight **Web application** that orchestrates
-LLM-driven inference engineering tasks. Each task spawns a per-task
-deterministic Python orchestrator subprocess that drives Claude Code
-sub-agents through an ABCDEF loop (Plan → Implement → Test → Review →
-Perf Test → Perf Plan). The WebUI is the long-lived main process;
-orchestrators come and go per task.
+<h1 align="center">MetaInfer</h1>
 
-## What it does
+<p align="center">
+  <em>LLM-driven inference engineering — deterministic orchestration, immutable oracles.</em>
+</p>
 
-Three task types ship out of the box. Each runs the same ABCDEF state
-machine; only the correctness check differs:
+<p align="center">
+  <a href="https://github.com/MetaInfer/MetaInfer/actions/workflows/ci.yml">
+    <img src="https://github.com/MetaInfer/MetaInfer/actions/workflows/ci.yml/badge.svg" alt="CI">
+  </a>
+  <a href="https://pypi.org/project/metainfer">
+    <img src="https://img.shields.io/pypi/v/metainfer?color=blue" alt="PyPI">
+  </a>
+  <a href="https://www.python.org/downloads/">
+    <img src="https://img.shields.io/badge/python-%3E%3D3.9-blue" alt="Python">
+  </a>
+  <a href="https://github.com/MetaInfer/MetaInfer/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
+  </a>
+</p>
 
-| Task type | When to use | Correctness check |
-|---|---|---|
-| **`gen-infer-framework`** | Build a model-specific inference server with an OpenAI-compatible HTTP API | Immutable oracle boots `serve.sh`, sends fixed prompts, dispatches an LLM-judge sub-agent to verdict each response |
-| **`port-model`** | Port a new model into vLLM / SGLang / TensorRT-LLM | Agent-authored `test.sh` (JSON contract) |
-| **`opt-kernel`** | Optimize an existing GPU kernel for a target shape & GPU | Agent-authored `test.sh` with perf metrics |
+<p align="center">
+  <a href="https://star-history.com/#MetaInfer/MetaInfer&Date">
+    <img src="https://api.star-history.com/svg?repos=MetaInfer/MetaInfer&type=Date" alt="Star History" width="600">
+  </a>
+</p>
 
-```
-┌──────────────────────────────────────────────────────────┐
-│  Browser (Preact SPA, no build step)                     │
-│   • task tabs + new-task overlay                          │
-│   • live: state graph · iterations · charts · agents     │
-└─────────────────────┬────────────────────────────────────┘
-                      │ HTTP + SSE
-┌─────────────────────┴────────────────────────────────────┐
-│  WebUI Server (FastAPI, 主进程)                           │
-│   • form schema (tasks/*.yaml)                           │
-│   • task registry (~/.metainfer/registry.json)           │
-│   • LocalLauncher: spawn/kill orchestrator subprocesses  │
-│   • SSE: file mtime watch → browser refresh              │
-└──────┬───────────────────────────────────┬───────────────┘
-       │ subprocess                        │ (future) HTTP
-┌──────┴──────────────┐               ┌────┴──────────────┐
-│ Orchestrator #1     │   ...         │ Remote Node       │
-│ (per-task child)    │               │  HTTP API         │
-│  ABCDEF pipeline    │               └───────────────────┘
-│  subagent manager   │
-│  ccb -p sub-agents  │
-└─────────────────────┘
-```
+---
 
-The Launcher Protocol is the seam for future multi-machine
-collaboration — a `RemoteLauncher` will implement the same interface
-over HTTPS, so the WebUI manages remote orchestrators without code
-changes.
+<p align="center">
+  <a href="README_CN.md">中文文档</a>
+</p>
+
+---
+
+## What is MetaInfer?
+
+MetaInfer is a lightweight web application that runs LLM-driven inference
+engineering tasks. You describe what you want (a model-specific inference
+server, a theoretical FLOPs analysis), and MetaInfer spawns a
+deterministic Python orchestrator that drives Claude Code sub-agents
+through a structured pipeline.
+
+- **WebUI** — long-lived FastAPI main process with a Preact SPA frontend
+- **Orchestrator** — one short-lived subprocess per task; crashes never
+  take down the dashboard
+- **File-system state** — no database, no message queue; everything is
+  observable JSON on disk
+
+### Built-in task types
+
+| Type | What it does |
+|---|---|
+| **`gen-infer-framework`** | Build a model-specific inference server with an OpenAI-compatible HTTP API. An immutable oracle boots `serve.sh`, sends fixed prompts, and dispatches an LLM judge to verdict correctness. |
+| **`calc-theoretical-value`** | Compute theoretical FLOPs and memory-traffic for an LLM forward pass. Fully read-only deterministic pipeline: model inspection → memory modeling → compute graph → visualization. |
+| **`example`** | Canonical skeleton for building new task types. Copy, rename, uncomment `register()`, implement your pipeline — no shared code touched. |
 
 ## Quick start
 
 ```bash
-git clone https://github.com/<your-org>/MetaInfer.git
+git clone https://github.com/MetaInfer/MetaInfer.git
 cd MetaInfer
-pip install -r requirements.txt   # fastapi, uvicorn, pyyaml（纯 Python）
-./serve.py                        # 启动 WebUI，前台运行
+pip install -r requirements.txt
+./serve.py
 ```
 
-打开浏览器访问 <http://127.0.0.1:8765>。点 **+ New Task**，选任务类型，
-填表单提交，看面板实时更新。
-
-**其他启动方式**（等价）：
+Open [http://127.0.0.1:8765](http://127.0.0.1:8765), click **+ New Task**,
+pick a type, fill the form, and watch the dashboard come alive.
 
 ```bash
-./serve.py --host 0.0.0.0 --port 9000   # 自定义监听
-METAINFER_PORT=9000 ./serve.py           # 用环境变量
-python -m metainfer.server.app              # 不用 serve.py 包装
-metainfer-web                            # 需要先 pip install -e .
+# Other ways to start
+./serve.py --host 0.0.0.0 --port 9000
+METAINFER_PORT=9000 ./serve.py
+python -m metainfer.server.app
 ```
 
-> 不需要 `pip install`：`serve.py` 自己会把仓库根目录加到 `sys.path`，
-> 直接 `import metainfer`。装包只是为了拿到 `metainfer-web` 命令。
+> **No install required.** `serve.py` adds the repo root to `sys.path`.
+> Install `pip install -e .` only if you want the `metainfer-web` and
+> `metainfer-orchestrator` console scripts.
 
-## Install（可选，推荐用于生产/常用）
-
-```bash
-pip install -e .
-```
-
-That installs two entry points:
-
-- `metainfer-web` — the WebUI server (the long-lived main process)
-- `metainfer-orchestrator` — per-task orchestrator (spawned by the
-  WebUI; you don't usually invoke this directly)
-
-Runtime deps are pure Python (`fastapi`, `uvicorn`, `pyyaml`); no
-compiled extensions. The only external binary is `ccb` (Claude Code),
-which the orchestrator shells out to for sub-agents.
-
-## Usage
-
-Start the WebUI（任选一种，详见 Quick start）：
-
-```bash
-./serve.py                        # 推荐：仓库根目录直接启动
-metainfer-web                     # 装包后可用
-```
-
-Open the URL, click **+ New Task**, pick a task type, fill the form.
-On submit the WebUI:
-
-1. Writes `requirements.json` to `~/.metainfer/tasks/<id>/`
-2. Adds the task to the registry (`~/.metainfer/registry.json`)
-3. Spawns `python -m metainfer.orchestrator.cli run <req.json>
-   --state-dir ~/.metainfer/tasks/<id>/` as a subprocess
-4. Watches the task's state files; SSE pushes diffs to every open tab
-
-Switch between tasks via the tab strip. Click an iteration row to read
-its retrospective (the orchestrator's postmortem markdown). Kill or
-restart a task from the header buttons.
-
-### Configuring the Claude Code binary
-
-Sub-agents shell out to `ccb` by default. Override per-task with the
-**Extra orchestrator args** field in the new-task form, or set
-`METAINFER_CLAUDE_BIN` in the environment:
-
-```bash
-METAINFER_CLAUDE_BIN=/usr/local/bin/claude metainfer-web
-```
-
-Precedence: `--claude-bin` flag (passed via extra args) >
-`METAINFER_CLAUDE_BIN` env var > `ccb` default.
-
-Sub-agents run in `bypassPermissions` mode with `IS_SANDBOX=1` so they
-don't hang on permission prompts. Override with
-`METAINFER_PERMISSION_MODE` if you need stricter control.
-
-### Driving the orchestrator directly
-
-The WebUI is the intended entry point, but for debugging you can spawn
-an orchestrator by hand:
-
-```bash
-metainfer-orchestrator run requirements.json --state-dir /tmp/task-debug
-```
-
-This skips the registry — the WebUI won't show the task — but writes
-the same observable files (`run.json`, `iterations/`, `agents.json`,
-`timeline.jsonl`).
-
-## Repository layout
+## Architecture
 
 ```
-MetaInfer/
-├── pyproject.toml                  # package + console scripts
-├── README.md
-│
-├── metainfer/                      # top-level Python package
-│   ├── orchestrator/               # per-task subprocess
-│   │   ├── cli.py                  # entry: metainfer-orchestrator run <req>
-│   │   ├── orchestrator.py         # run_with_requirements(): spawn → run → exit
-│   │   ├── pipeline.py             # ABCDEF main loop
-│   │   ├── phases.py               # TRANSITIONS table (data) + graph helpers
-│   │   ├── state.py                # cross-process-safe JSON state store
-│   │   ├── subagent_manager.py     # Claude Code subprocess lifecycle
-│   │   ├── iteration.py            # numbered iteration folder management
-│   │   ├── prompts/                # prompt templates for A/B/C/D/E/F agents
-│   │   └── oracles/                # immutable correctness oracles
-│   │
-│   ├── web/                        # WebUI backend
-│   │   ├── app.py                  # FastAPI: routes + SSE + static mount
-│   │   ├── launcher.py             # LocalLauncher (Protocol = seam for remote)
-│   │   ├── tasks.py                # registry.json CRUD (fcntl.flock-guarded)
-│   │   ├── forms.py                # tasks/*.yaml → frontend form schema
-│   │   ├── state_reader.py         # read-only file → JSON for every panel
-│   │   ├── paths.py                # ~/.metainfer/{registry,tasks}/...
-│   │   └── sse.py                  # polling file watcher → SSE broadcast
-│   │
-│   └── static/                     # frontend (Preact + HTM, no build step)
-│       ├── index.html              # importmap for preact/htm/chart.js/marked
-│       ├── main.js                 # SPA entry: shell + tabstrip + SSE
-│       ├── components/             # state-graph, charts, agents, timeline, form…
-│       ├── views/                  # task-detail, new-task
-│       ├── vendor/                 # preact/htm/chart.js/marked (local, no CDN)
-│       └── styles.css              # design tokens + components
-│
-├── tasks/                          # LEGACY stub form schemas (opt-kernel.yaml, port-model.yaml)
-│
-└── legacy/                         # archived pre-refactor skill bundle
+┌─────────────────────────────────────────────────────────┐
+│  Browser (Preact + HTM, no build step)                   │
+│  Task tabs · live state graph · iterations · agents     │
+└────────────────────┬────────────────────────────────────┘
+                     │  HTTP + SSE
+┌────────────────────┴────────────────────────────────────┐
+│  WebUI Server (FastAPI, main process)                    │
+│  Form schemas · task registry · process lifecycle        │
+│  SSE: file watcher → browser push                        │
+└───┬──────────────────────────────────────┬──────────────┘
+    │ subprocess (LocalLauncher)           │ (future) HTTP
+┌───┴───────────────┐              ┌──────┴──────────────┐
+│ Orchestrator #1   │   ...        │ Remote Node          │
+│ Per-task child    │              │ RemoteLauncher       │
+│ Task pipeline     │              │ over HTTPS           │
+│ Sub-agent manager │              └─────────────────────┘
+└───────────────────┘
 ```
 
-Note: each task package's knowledge base lives inside its package —
-e.g. `metainfer/tasks/gen_infer_framework/notebooks/` — not at the
-top level. Form schemas for full task types live at
-`metainfer/tasks/<pkg>/form.yaml`; legacy stub types still ship
-`tasks/<type>.yaml`.
-└── legacy/                         # archived pre-refactor skill bundle
-```
+> **The Launcher Protocol** is the extension point for multi-machine
+> collaboration. Swap `LocalLauncher` for a `RemoteLauncher` that
+> dispatches spawn/kill over HTTPS — no other code changes.
 
-### Per-task on-disk layout
+## How it works
 
-Each task gets **two parallel directories**: a workspace for generated
-artifacts and a state directory for metadata/logs. Both live under
-the current node's subtree, so a multi-node deployment sharing a
-filesystem never collides.
+Each task gets **two parallel directories** under the current node:
 
-```
-$METAINFER_ROOT/                          (defaults to <cwd>)
+```text
+$METAINFER_ROOT/                  (defaults to cwd)
 └── nodes/
-    └── <hostname>/                       (or $METAINFER_NODE_ID)
+    └── <node_id>/                (hostname; override with $METAINFER_NODE_ID)
         ├── workspaces/
-        │   └── <id>/                     ← iteration-generated artifacts
-        │       ├── (gen-infer-framework)
-        │       │   ├── 001/ 002/ …       iteration source trees
-        │       │   └── (calc-theoretical-value)
-        │       │       └── step0/ … step4/
+        │   └── <task_id>/        ← generated artifacts
         └── .metainfer/
-            ├── registry.json             global task list
-            ├── runtime.json              WebUI + orchestrator PIDs
-            └── tasks/<id>/               ← metadata + logs per task
-                ├── requirements.json     # frozen inputs from the form
-                ├── orchestrator.pid      # lifecycle markers
-                ├── orchestrator.log      # stdout+stderr of the subprocess
-                ├── run.json              # RunStatus: phase, iteration, final_status
-                ├── timeline.jsonl        # append-only event stream
-                ├── agents.json           # latest SubAgentManager snapshot
-                ├── iterations/*.json     # (gf only) one record per iteration
-                └── logs/<NNN>/           # (gf only) per-iter prompts/oracle/server
+            ├── registry.json     ← global task list
+            └── tasks/<task_id>/  ← metadata, logs, timeline, iter records
 ```
 
-All WebUI panels derive from these files. There's no in-memory state
-shared between the WebUI and the orchestrator — they communicate
-solely through the filesystem. This is what lets a WebUI restart pick
-up exactly where the old one left off, and what lets a central
-controller scan `nodes/*/` to see global state across a shared
-filesystem.
-
-Override the root with `METAINFER_ROOT` (shared mount point for
-multi-node) and the node id with `METAINFER_NODE_ID` (defaults to
-`socket.gethostname()`).
+The WebUI writes `requirements.json`, spawns the orchestrator, then
+**watches files** for changes — all panels derive from JSON on disk.
+No in-memory state, no IPC. Restart the WebUI and it picks up exactly
+where it left off.
 
 ## Extending
 
-### New form fields
+### New task type
 
-Edit `tasks/<task_type>.yaml`. Each entry is one field:
+Copy the skeleton. It's fully annotated — form schema, pipeline,
+web routes, QA endpoints, static assets, tests.
 
-```yaml
-- key: my_new_field
-  question: "What value for X?"   # shown as help text
-  header: "X"                     # short label
-  required: true
-  form: text                      # text|textarea|select|multiselect|file|number
-  # OR use multi/options to infer the widget:
-  multi: false
-  options:
-    - label: "A"
-      description: "implies ..."
+```bash
+cp -r metainfer/tasks/example metainfer/tasks/<your_task>
+# 1. Replace X-type-id / X / example with your own ids
+# 2. Uncomment register() in __init__.py, orchestrator/plugin.py, server/plugin.py
+# 3. Implement orchestrator/pipeline.py
+# 4. Add tests
 ```
 
-Add `override_component: <name>` to delegate to a task-specific widget
-(future task-specific widgets register in
-`metainfer/static/components/form-renderer.js`).
+**Nothing else in the repo needs to change.** See `metainfer/tasks/example/`
+for the complete annotated skeleton and `CLAUDE.md` for contract details.
 
-### New task types
+### New form fields
 
-1. Add `tasks/<new-task>.yaml` (form schema).
-2. Register the task type in `metainfer/orchestrator/paths.py:TASK_TYPES`
-   and add metadata to `metainfer/server/forms.py:TASK_TYPE_META`.
-3. If correctness needs an objective check, add an oracle under
-   `metainfer/orchestrator/oracles/<new-task>/` and register it in
-   `metainfer/orchestrator/oracles/__init__.py`.
-4. The transition table in `phases.py` automatically routes
-   `gen-infer-framework`-style tasks to the oracle path; otherwise the
-   agent writes its own `test.sh`.
+Edit your task's `form.yaml`:
+
+```yaml
+- key: model_path
+  question: "Path to model weights?"
+  header: "Model"
+  required: true
+  form: text              # text | textarea | select | multiselect | file | number
+  options:                # only for select / multiselect
+    - label: "Option A"
+      description: "What it means"
+```
 
 ### Knowledge base
 
-Drop markdown files into `metainfer/tasks/<task_pkg>/notebooks/<topic>/`.
-Prompt templates already tell sub-agents to consult the `notebooks/`
-path passed to them — no code change required. Each task package owns
-its own knowledge base.
-Keep each file short: one concept, one example, one gotcha list.
+Drop markdown files into `metainfer/tasks/<pkg>/notebooks/`. Prompt
+templates already reference the notebooks directory — no code changes
+needed.
 
-## Design notes
+## Repository
 
-- **WebUI as main process.** The server is the only long-lived thing.
-  Per-task orchestrators run as subprocesses; a crash takes down only
-  that task, never the dashboard. Future multi-machine work adds a
-  `RemoteLauncher` that dispatches spawn/kill over HTTPS to a remote
-  node running its own LocalLauncher.
-- **Determinism over agency.** Long-running, multi-day tasks diverge
-  if the LLM drives control flow. The orchestrator is plain Python;
-  sub-agents only do work, never decide what runs next.
-- **Data-driven state machine.** `phases.py:TRANSITIONS` is the single
-  source of truth for the ABCDEF graph; the frontend auto-derives its
-  flow diagram from this table, so adding an edge or phase needs no UI
-  code.
-- **File-based state.** Everything goes through `StateStore` JSON
-  files so the WebUI can observe state from a separate process without
-  IPC. The same files survive WebUI restarts.
-- **No-build frontend.** Preact + HTM via an importmap. The browser
-  loads ES modules directly; no transpile step, no bundler. Vendor
-  files are local (not CDN) so the app works offline / behind a proxy.
-- **Iteration folders.** Each iteration gets a fresh copy of the
-  previous iteration's directory, so a bad iteration never poisons a
-  good one.
-- **Immutable oracles.** For tasks where the agent would otherwise
-  grade its own homework (e.g. inference-framework correctness), the
-  oracle ships with the package, lives outside the iteration directory,
-  and is the source of truth for pass/fail.
+```text
+MetaInfer/
+├── pyproject.toml
+├── serve.py
+├── README.md / README_CN.md
+│
+├── metainfer/
+│   ├── server/                WebUI backend (FastAPI)
+│   │   ├── app.py             create_app, plugin routing, static mount
+│   │   ├── launcher.py        LocalLauncher (Protocol → RemoteLauncher extension)
+│   │   ├── registry.py        registry.json CRUD with fcntl.flock
+│   │   ├── forms.py           form.yaml → frontend schema
+│   │   ├── state_reader.py    file → JSON (shell-level fields only)
+│   │   ├── sse.py             mtime watcher → SSE broadcast
+│   │   ├── reconcile.py       orphan orchestrator cleanup on startup
+│   │   └── qa.py / qa_routes.py  QA endpoint framework
+│   │
+│   ├── orchestrator/          per-task subprocess framework
+│   │   ├── state.py           cross-process-safe JSON StateStore
+│   │   ├── subagent_manager.py  Claude Code subprocess lifecycle
+│   │   ├── agent_pool.py      multi-agent concurrency
+│   │   ├── token_budget.py    token / cost tracking
+│   │   ├── gpu_preflight.py   GPU VRAM cleanup before oracle runs
+│   │   └── tasks/             TaskPlugin auto-discovery
+│   │
+│   └── tasks/                 one package per task type
+│       ├── example/           canonical skeleton (commented-out, ready to copy)
+│       ├── sys_shell/         shell UI + task lifecycle API
+│       ├── gen_infer_framework/
+│       └── calc_value/
+```
+
+## License
+
+MIT
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture details, design
+principles, and how to add new task types.

@@ -251,9 +251,7 @@ class Orchestrator:
 
     def run(self) -> None:
         task_id = self.req.get("task_id", "task")
-        _, is_resume = self.store.init_or_resume(
-            task_id=task_id, task_type=self.req.get("task_type", "unknown"),
-        )
+        _, is_resume = self.store.init_or_resume(task_id=task_id)
 
         resume_from: Optional[Dict[str, Any]] = None
         if is_resume:

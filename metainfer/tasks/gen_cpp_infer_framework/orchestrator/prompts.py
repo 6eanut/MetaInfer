@@ -173,12 +173,32 @@ of this iteration chasing a phantom bug.
 
 Required preflight recipe (run it as a separate Bash turn BEFORE the boot):
 
+  **CRITICAL — never kill your own ancestors.** You run inside a process
+  tree: `orchestrator (python) → ccb / claude → this agent's bash`. If
+  any of those ancestors appears in the GPU pid list (e.g. the orchestrator
+  touched GPU once for a probe), killing them kills the entire task — the
+  dashboard freezes, agents.json stops updating, and the iteration is
+  lost. The recipe below walks `$$`'s ancestor chain and EXCLUDES every
+  PID in it before any kill.
+
   ```bash
+  # Build the ancestor PID set ONCE: this bash → claude/ccb → orchestrator → ...
+  # Never kill any of these — killing an ancestor kills the whole iteration.
+  ancestors=" $$"
+  _p=$PPID
+  while [ "$_p" -gt 1 ] 2>/dev/null; do
+    ancestors="$ancestors $_p"
+    _p=$(ps -o ppid= -p "$_p" 2>/dev/null | tr -d ' ')
+    [ -z "$_p" ] && break
+  done
+  is_ancestor() { case " $ancestors " in *" $1 "*) return 0;; *) return 1;; esac; }
+
   # NVIDIA
   if command -v nvidia-smi >/dev/null; then
       nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits \
         | awk -F', ' '$2+0 >= 128 {print $1}' \
         | while read pid; do
+            if is_ancestor "$pid"; then echo "SKIP ancestor pid=$pid (do not kill)"; continue; fi
             echo "killing orphan GPU pid=$pid"
             kill -TERM "$pid" 2>/dev/null || true
           done
@@ -190,6 +210,7 @@ Required preflight recipe (run it as a separate Bash turn BEFORE the boot):
       rocm-smi --showpids 2>/dev/null \
         | grep -oE '\\b[0-9]{4,}\\b' \
         | while read pid; do
+            if is_ancestor "$pid"; then echo "SKIP ancestor pid=$pid (do not kill)"; continue; fi
             # Only kill processes you can attribute to python / ccb / metainfer
             cmd=$(ps -o comm= -p "$pid" 2>/dev/null || true)
             case "$cmd" in
@@ -206,6 +227,7 @@ Required preflight recipe (run it as a separate Bash turn BEFORE the boot):
     case "$tgt" in
       /dev/dri/renderD*|/dev/nvidia*)
         pid=$(echo "$f" | awk -F/ '{print $3}')
+        if is_ancestor "$pid"; then continue; fi
         cmd=$(ps -o comm= -p "$pid" 2>/dev/null || true)
         case "$cmd" in
           python*|ccb*|claude*) kill -TERM "$pid" 2>/dev/null || true ;;
@@ -223,15 +245,20 @@ Rules:
 1. **Run this every time before booting**, not just once at the start of
    B. Your own prior manual C++ server run may have crashed and left VRAM
    behind; the next boot will collide with it.
-2. **Only kill python / ccb / claude processes.** Never kill X, your
-   shell, or unrelated daemons that happen to hold the render node for
-   display.
-3. **If the preflight shows zero occupants, proceed immediately** — don't
+2. **Never kill your own ancestors.** The `is_ancestor` guard above is
+   mandatory; without it, a stray `python*` match on the orchestrator or
+   `ccb*` match on your parent kills the whole task. If you rewrite the
+   recipe, keep the ancestor-exclusion walk.
+3. **Only kill python / ccb / claude processes that are NOT your
+   ancestors.** Never kill X, your shell, or unrelated daemons that
+   happen to hold the render node for display.
+4. **If the preflight shows zero occupants, proceed immediately** — don't
    waste the turn. The point is to catch orphans, not to make you do
    ceremony.
-4. **If `kill -TERM` doesn't free the VRAM after 3 seconds, escalate**:
+5. **If `kill -TERM` doesn't free the VRAM after 3 seconds, escalate**:
    `kill -9 $pid`. CUDA/ROCm contexts sometimes need a hard kill.
-5. **The orchestrator's C and E oracles already run this same check** —
+   Re-check `is_ancestor` before the `-9` — never SIGKILL an ancestor.
+6. **The orchestrator's C and E oracles already run this same check** —
    you don't need to add anything to serve.sh itself. The check is YOUR
    responsibility only during local B-phase debugging."""
 

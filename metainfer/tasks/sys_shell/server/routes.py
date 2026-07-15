@@ -228,9 +228,8 @@ def build_router(plugin):
             sd = _state_dir_for(entry)
             prior_run = _sr.read_run(sd) or {}
             tid = prior_run.get("task_id") or task_id
-            ttype = prior_run.get("task_type") or entry.type
             wd = _workspace_dir_for(entry)
-            summary = _sr.reset_state_dir(sd, wd, tid, ttype)
+            summary = _sr.reset_state_dir(sd, wd, tid)
             return {"ok": True, "action": "reset", **summary}
         raise HTTPException(400, f"unknown action: {action}")
 

@@ -4,6 +4,55 @@
 - 文件系统即数据库；server 与 orchestrator 解耦，通过文件系统传递状态
 - 多节点通过共享文件系统协同，每个节点只写自己的 `nodes/<node_id>/`
 
+## 数据一致性：单一数据源（Single Source of Truth）
+
+**文件系统即数据库**这一选择的代价是：失去数据库内置的一致性约束。任何"同一份事实"被存到多个文件，都会在并发/重启/部分写入下漂移，最终表现为难以排查的功能 bug。下列原则**强制执行**：
+
+### 原则
+
+1. **每份事实有且只有一个权威文件**（source of truth）。其他文件需要这份信息时，要么从权威源读取后派生（运行时计算），要么显式声明为"不可回读的历史快照"（写完只用于展示/审计，不再驱动逻辑）。
+2. **严禁双向同步**。如果 A 是权威、B 是缓存，B 只能由 A 单向派生；绝不存在"B 改了回写 A"或"A、B 互相更新"的路径。
+3. **冷重启路径必须重新走权威源**。任何在内存/进程里持有的状态（limit、pid、status）一旦进程退出就丢失；重启时只能从权威文件读，不能从 requirements.json / form 副本读"为了方便"。
+4. **新增字段时先问"谁是权威"**。不要图省事把值复制到第二个文件——短期的省事会变成长期的 bug 工厂。
+5. **历史快照必须标注**。某文件如果只是建任务时的表单记录（之后不再驱动运行时），必须在 schema 注释里写明："historical record, runtime reads from <other_file>"。
+
+### 已确立的权威源（参考）
+
+| 数据 | 权威源 | 历史快照 / 派生 |
+|---|---|---|
+| 预算阈值 | `token_budget.json::config.max_cost_usd` | `requirements.json::token_budget_max_cost_usd`（建任务时表单值，运行时不再读） |
+| 预算累计 | `token_budget.json::totals` | `timeline.jsonl` 的 `token_usage` 事件（展示用，从权威派生） |
+| 运行时状态 | `run.json`（phase / iteration / **finished / final_status**） | `registry.json`（缓存，由 reconcile 从 run.json 派生） |
+| 任务规格 | `requirements.json`（task_type / form / label / created_at） | `registry.json::type/label`（缓存）；run.json 不再存 task_type |
+| 进程存活 | OS 进程表（`/proc/<pid>`） | `orchestrator.pid` / `runtime.json::tasks.<id>.pid`（reconcile 时从进程表验证） |
+| 进程退出时间 | `orchestrator.pid::finished_at`（进程级元数据） | `registry.json::finished_at`（**派生缓存**——每个写 orchestrator.pid 的地方必须同时 update_task 镜像，reconcile 也会重导） |
+
+### 已知反模式（**禁止**）
+
+- **双写**：同一字段被两个文件各持一份，且都被运行时读取 → 必然漂移。
+  - 已修复的例子：`requirements.json::token_budget_max_cost_usd` 和 `token_budget.json::config.max_cost_usd` 曾经都被读，导致 WebUI 调整预算后冷重启失效（commit 待补）。
+  - 已修复的例子：`task_type` 曾经同时存在 requirements.json / run.json / registry.json，已从 run.json 移除（orchestrator 加载时 load_run 过滤未知字段，兼容旧文件）。
+  - 已修复的例子：`created_at` 曾经同时存在 registry.json / run.json，已从 run.json 移除（registry.json::created_at 是唯一权威源）。
+- **构造函数参数压过文件**：构造函数从 A 文件读值传入，`_load()` 看到"非 None"就跳过 B 文件——这等价于把 A 钉死为权威。正确做法是构造函数只传"env override"，文件值由 `_load()` 单独决定。
+- **多 task 包复制同一份解析逻辑**：每个 task orchestrator 自己实现一遍 cascade → 修一个 bug 要改 N 处。共享逻辑下沉到 `metainfer/orchestrator/` 公共层。
+- **字段别名 + 多 reader 各写一份 fallback 链**：例如 requirements.json 曾经既支持扁平 `target_model` 又支持嵌套 `answers.target_model` / `form.target_model`，每个 reader 自己写 `req.get("x") or (req.get("answers") or {}).get("x")` —— 12+ 处复制，每处 null 处理略有不同。已加 `metainfer.orchestrator.requirements.req_field()` 统一读取，所有 task 包的读取都应走这个 helper。
+
+### requirements.json 扁平化规约
+
+WebUI 的 `create_task` 把表单 answers **扁平展开**到顶层（`{"task_id":..., "target_model":..., "max_iterations":"50", ...}`），没有 `answers` 或 `form` 子键。
+
+- **写**：只写扁平。新代码不要在 requirements.json 里塞 `answers` / `form` 子字典。
+- **读**：用 `metainfer.orchestrator.requirements.req_field(req, key)` / `req_field_int` / `req_field_float`。helper 内部保留对历史嵌套形式的兼容（旧文件、test fixture），但 production 路径只走扁平。
+- **新加字段**：在 task 的 `form.yaml` 里声明 → WebUI 自动写入扁平顶层 → reader 用 `req_field` 读。不需要改 requirements.json 的 schema 文档。
+
+### Code review 检查清单
+
+提交前自问：
+- [ ] 我新增/修改的字段，是否已经有别的文件存了？如果是，谁是权威？
+- [ ] 我的代码读这个字段时，读的是权威源，还是某个缓存？
+- [ ] 冷重启后，我的逻辑还能拿到正确值吗？（写一个测试覆盖 restart 场景）
+- [ ] 我有没有把"派生量"当"权威量"写到磁盘？（派生量应每次计算，不持久化）
+
 ## 运行时目录结构
 
 每个 task 占用 **两个并列子树**，挂在 `$METAINFER_ROOT/nodes/<node_id>/` 下：

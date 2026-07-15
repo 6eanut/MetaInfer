@@ -235,9 +235,11 @@ class TokenBudget:
             "per_phase": self._per_phase,
             "records": [asdict(r) for r in self._records],
         }
+        from metainfer.server.filelock import lock_file
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        tmp.replace(self.path)
+        with lock_file(self.path):
+            tmp.replace(self.path)
 
     # ------------------------------------------------------------------ #
     # Mutators

@@ -97,3 +97,38 @@ def req_field_float(
         return float(v)
     except (TypeError, ValueError):
         return default
+
+
+def req_summary_lines(req: Dict[str, Any]) -> List[str]:
+    """Format the flat requirement fields as ``- key: value`` bullet lines
+    for agent prompts.  Handles the legacy ``answers`` dict nesting for
+    backwards-compat (old WebUI versions that didn't flatten).
+
+    Callers should NOT implement their own iteration + skip set logic —
+    this function is the single source for the per-task frozen-requirements
+    section that appears at the top of orchestrator prompts.
+    """
+    lines = [
+        f"- task_type: {req.get('task_type', '?')}",
+        f"- task_id: {req.get('task_id', '?')}",
+        f"- raw_request: {req.get('raw_request', '')}",
+    ]
+    _skip = {"task_type", "task_id", "raw_request", "answers"}
+    for k, v in req.items():
+        if k in _skip:
+            continue
+        # Type hint / non-single-value fields — format inline; the prompt
+        # engine (claude) handles lists and tuples natively anyway, but
+        # the "- k: v" table makes it skimmable.
+        if isinstance(v, (list, tuple)):
+            v = ", ".join(str(x) for x in v) if v else "(none)"
+        lines.append(f"- {k}: {v}")
+    # Backwards-compat: also surface legacy ``answers`` nesting if present.
+    answers = req.get("answers") or {}
+    for k, v in answers.items():
+        if k in _skip:
+            continue
+        if isinstance(v, (list, tuple)):
+            v = ", ".join(str(x) for x in v) if v else "(none)"
+        lines.append(f"- {k}: {v} (legacy)")
+    return lines

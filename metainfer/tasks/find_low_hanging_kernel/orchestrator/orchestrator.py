@@ -57,15 +57,8 @@ def _task_subdirs(state_dir: Path, workspace_dir: Path) -> Dict[str, Path]:
 
 
 def _parse_max_validator_rounds(req: Dict[str, Any], default: int = 5) -> int:
-    raw = req.get("max_validator_rounds")
-    if raw is None:
-        raw = (req.get("form") or {}).get("max_validator_rounds")
-    if raw in (None, ""):
-        return default
-    try:
-        return max(1, int(raw))
-    except (TypeError, ValueError):
-        return default
+    from metainfer.orchestrator.requirements import req_field_int
+    return req_field_int(req, "max_validator_rounds", default)
 
 
 def run_with_requirements(

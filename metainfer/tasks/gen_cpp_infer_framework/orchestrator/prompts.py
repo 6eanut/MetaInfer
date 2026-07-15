@@ -25,6 +25,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from metainfer.orchestrator.requirements import req_field
 from .hardware import render_hardware_profile
 
 
@@ -630,25 +631,8 @@ def _render_req(req: Dict[str, Any]) -> str:
     e.g. the agent knew the model name from ``raw_request`` but not the
     on-disk path, so its serve.sh always fell back to a mock dir.
     """
-    lines = [f"- task_type: {req.get('task_type', '?')}",
-             f"- task_id: {req.get('task_id', '?')}",
-             f"- raw_request: {req.get('raw_request', '')}"]
-    # Top-level structured fields — the actual contract (model path,
-    # hardware, perf target, etc.). Skip the ones already rendered above
-    # and any internal bookkeeping keys.
-    _skip = {"task_type", "task_id", "raw_request", "answers"}
-    for k, v in req.items():
-        if k in _skip:
-            continue
-        if isinstance(v, (list, tuple)):
-            v = ", ".join(str(x) for x in v) if v else "(none)"
-        lines.append(f"- {k}: {v}")
-    # Backwards-compat: also surface legacy ``answers`` nesting if present.
-    answers = req.get("answers") or {}
-    for k, v in answers.items():
-        if isinstance(v, (list, tuple)):
-            v = ", ".join(str(x) for x in v) if v else "(none)"
-        lines.append(f"- {k}: {v}")
+    from metainfer.orchestrator.requirements import req_summary_lines
+    lines = req_summary_lines(req)
     return "\n".join(lines) + render_hardware_profile(req)
 
 
@@ -833,7 +817,7 @@ def _deliverables_for_task(task_type: str, iter_dir: Path, req: Dict[str, Any]) 
     For other task types, the agent writes ``test.sh`` itself.
     """
     if task_type == "gen-cpp-infer-framework":
-        target_model = req.get("target_model") or (req.get("answers") or {}).get("target_model") or "<path from requirements>"
+        target_model = req_field(req, "target_model") or "<path from requirements>"
         return f"""2. A C++ inference framework tree inside `{iter_dir}`. Required files:
    - `{iter_dir}/CMakeLists.txt`
    - `{iter_dir}/build.sh` (pre-created system-owned file; DO NOT modify)

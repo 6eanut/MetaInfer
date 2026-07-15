@@ -2,8 +2,9 @@
 
 Each task type that needs HTTP routes / readers / QA support / a custom
 detail view registers a :class:`WebPlugin` here. The main ``create_app``
-iterates :func:`all_plugins` and hands each plugin a chance to mount its
-routes onto the FastAPI app.
+iterates :func:`all_plugins` and mounts each plugin's ``build_router``
+result under ``/api/tasks/{task_id}/task`` — the shell itself only hosts
+task-agnostic endpoints (lifecycle, timeline, agents, token-budget).
 
 Registration is a side-effect of importing the task package:
 ``metainfer/tasks/__init__.py`` auto-discovers sibling packages, and
@@ -19,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol
 
-from fastapi import FastAPI
+from fastapi import APIRouter
 
 
 class QAConfigLike(Protocol):
@@ -52,16 +53,17 @@ class QAConfigLike(Protocol):
 
 @dataclass
 class WebDeps:
-    """Shared core state handed to every plugin's ``register_routes``.
+    """Reserved for future shell → plugin injections.
 
-    Plugins should NOT hold references to the FastAPI ``app`` beyond
-    their ``register_routes`` call — the same plugin could in principle
-    be registered against multiple apps in tests.
+    Historically handed to ``register_routes(app, deps, plugin)``. The
+    current ``build_router(plugin)`` protocol no longer passes deps —
+    plugins are expected to read everything they need from the
+    :class:`WebPlugin` and from on-disk state via
+    :mod:`metainfer.web._helpers`. Kept here as a stable type so older
+    plugin code / tests that import it don't break during the
+    transition; safe to remove once no references remain.
     """
     repo_root: Path
-    # An optional callable that returns a launcher, so plugins can
-    # trigger orchestrator restarts / control actions. Currently set
-    # by ``create_app`` post-construction.
     get_launcher: Optional[Callable[[], Any]] = None
 
 
@@ -76,12 +78,11 @@ class WebPlugin:
             picker and as the task's default label. Required.
         description: One-line description shown under the label in the
             type picker. Required.
-        register_routes: Optional callable that mounts routes onto the
-            FastAPI app. Receives ``(app, deps, plugin)`` — the plugin
-            argument is the plugin itself, so the callback can use its
-            ``qa_config``, ``type``, etc. without re-importing the
-            plugin module (which would create a circular import).
-            Plugins with no custom routes leave this ``None``.
+        register_routes (REMOVED): historical hook that mutated the
+            FastAPI app directly. Replaced by :attr:`build_router`,
+            which returns an :class:`fastapi.APIRouter` that the shell
+            mounts under ``/api/tasks/{task_id}/task``. Plugins no
+            longer receive the FastAPI app or :class:`WebDeps`.
         detail_view_module: Optional importmap key (e.g.
             ``"app/calc-viz"``) the frontend should dynamically import
             to render this task's detail view. ``None`` → default view.
@@ -132,7 +133,29 @@ class WebPlugin:
     type: str
     label: str = ""
     description: str = ""
-    register_routes: Optional[Callable[[FastAPI, WebDeps, "WebPlugin"], None]] = None
+    build_router: Optional[Callable[["WebPlugin"], "APIRouter"]] = None
+    """Build and return an :class:`fastapi.APIRouter` carrying all of
+    this plugin's task-specific routes (relative paths only). The shell
+    mounts it at ``/api/tasks/{task_id}/task`` so every plugin's routes
+    land under that single prefix — the shell itself no longer hosts
+    any task-specific endpoints (no ``/iterations``, ``/charts``,
+    ``/state-graph``, ``/retrospective``).
+
+    Routes inside the router see ``task_id`` as a path param (declared
+    in the shell's mount prefix) and should use the standard helpers
+    from :mod:`metainfer.web._helpers` (``task_or_404``,
+    ``require_task_type``, ``state_dir_for``, ``workspace_dir_for``)
+    to resolve the on-disk targets.
+
+    Plugins that want offline-QA support typically call
+    :func:`metainfer.web.qa_routes.register_qa_routes` from inside
+    their ``build_router`` to fold the generic QA triplet in. Plugins
+    with no custom routes leave this ``None``.
+
+    NOTE: this replaces the historical ``register_routes(app, deps,
+    plugin)`` hook. The shell no longer hands plugins a chance to
+    mutate the FastAPI app directly — every plugin's HTTP surface goes
+    through this router so the URL boundary stays crisp."""
     detail_view_module: Optional[str] = None
     detail_view_export: str = "default"
     qa_config: Optional[Any] = None

@@ -424,6 +424,18 @@ body {
 }
 
 /* ------------------------- Status pills ------------------------- */
+/*
+ * Shell ships ONLY semantic pill colors here. Phase names (A_plan /
+ * prepare / etc.) are task-specific vocabulary and must be colored by
+ * each plugin's own stylesheet via ``extra_stylesheets``. Plugins map
+ * their phase names by adding entries like:
+ *
+ *     .pill.<your_phase_name> { background: ...; color: ...; }
+ *
+ * The shell's own header pill gets one of the semantic classes below
+ * (.running / .success / .failed / .idle) because the shell owns
+ * RunStatus.final_status / running / idle.
+ */
 .pill {
   display: inline-block;
   padding: 1px 7px;
@@ -434,20 +446,15 @@ body {
   vertical-align: middle;
   white-space: nowrap;
 }
-.pill.running,
-.pill.A_plan, .pill.B_implement, .pill.C_test,
-.pill.D_review, .pill.E_perf_test, .pill.F_perf_plan {
-  background: rgba(88,166,255,0.15);
-  color: var(--accent-2);
-}
+.pill.running    { background: rgba(88,166,255,0.15); color: var(--accent-2); }
 .pill.success,
-.pill.finished { background: rgba(63,185,80,0.18); color: var(--ok); }
+.pill.finished   { background: rgba(63,185,80,0.18); color: var(--ok); }
 .pill.failed,
 .pill.failed_terminal { background: rgba(248,81,73,0.18); color: var(--err); }
 .pill.interrupted,
-.pill.stuck { background: rgba(210,153,34,0.18); color: var(--warn); }
+.pill.stuck      { background: rgba(210,153,34,0.18); color: var(--warn); }
 .pill.idle,
-.pill.unknown { background: rgba(125,135,148,0.18); color: var(--muted); }
+.pill.unknown    { background: rgba(125,135,148,0.18); color: var(--muted); }
 
 /* ------------------------- State graph ------------------------- */
 .state-graph {

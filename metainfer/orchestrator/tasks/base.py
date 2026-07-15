@@ -32,7 +32,8 @@ all pick up the new task type via the registry.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Tuple
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,17 @@ class TaskPlugin:
         lazily and calls ``graph_payload(current, last_outcome,
         last_label)`` to render the per-task-type phase diagram. Set to
         empty string if the task has no state graph at all.
+    diagnostic_globs:
+        Filename globs that :class:`metainfer.orchestrator.iteration.IterationWorkspace`
+        should copy forward from the previous iteration's logs dir into
+        the new iteration's ``prev-iter/`` subdir. Empty by default —
+        tasks that don't run an iteration loop (or don't produce
+        diagnostic files) leave this empty. Tasks that DO want
+        copy-forward (e.g. gen_infer_framework's oracle / judge / test
+        logs) declare the patterns here.
+
+        Conventionally read from the plugin descriptor when the
+        pipeline constructs its ``IterationWorkspace``.
 
     Notes
     -----
@@ -74,6 +86,7 @@ class TaskPlugin:
     task_type: str
     cli_module: str
     phases_module: str = ""
+    diagnostic_globs: Tuple[str, ...] = field(default_factory=tuple)
 
 
 __all__ = ["TaskPlugin"]

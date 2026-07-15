@@ -68,7 +68,18 @@ export async function controlTask(taskId, action, extra = {}) {
   return data;
 }
 
-// ---- Per-task observable panels (all read files under state_dir) -------- //
+// ---- Shell-owned observable endpoints ------------------------------------ //
+//
+// The shell only fetches what its OWN chrome renders:
+//   - run.json           → header (phase pill / iter counter / controls)
+//   - timeline.jsonl     → activity feed
+//   - agents.json        → sub-agent panel
+//   - token_budget.json  → budget bar
+//   - orchestrator.log   → log tail
+//
+// Task-specific data (iterations / charts / state-graph / retrospective)
+// is fetched by each plugin's own runtime-api module against
+// /api/tasks/<id>/task/*. The shell stays ignorant of those shapes.
 
 const TASK_SCOPE = (taskId) => `/api/tasks/${encodeURIComponent(taskId)}`;
 
@@ -78,37 +89,11 @@ export async function getRun(taskId) {
   return r.json();
 }
 
-export async function getIterations(taskId) {
-  const r = await fetch(`${TASK_SCOPE(taskId)}/iterations`);
-  if (!r.ok) throw new Error(`iterations: ${r.status}`);
-  return r.json();
-}
-
-export async function getRetrospective(taskId, n) {
-  const r = await fetch(
-    `${TASK_SCOPE(taskId)}/iterations/${n}/retrospective`,
-  );
-  if (!r.ok) throw new Error(`retro ${n}: ${r.status}`);
-  return r.json();
-}
-
 export async function getTimeline(taskId, since = 0) {
   const r = await fetch(
     `${TASK_SCOPE(taskId)}/timeline?since=${since}`,
   );
   if (!r.ok) throw new Error(`timeline: ${r.status}`);
-  return r.json();
-}
-
-export async function getCharts(taskId) {
-  const r = await fetch(`${TASK_SCOPE(taskId)}/charts`);
-  if (!r.ok) throw new Error(`charts: ${r.status}`);
-  return r.json();
-}
-
-export async function getStateGraph(taskId) {
-  const r = await fetch(`${TASK_SCOPE(taskId)}/state-graph`);
-  if (!r.ok) throw new Error(`state-graph: ${r.status}`);
   return r.json();
 }
 

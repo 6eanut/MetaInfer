@@ -5,7 +5,7 @@
 import { html } from "htm/preact";
 import { useEffect, useState } from "preact/hooks";
 import { marked } from "marked";
-import { getRetrospective } from "app/api";
+import { getRetrospective } from "app/calc-runtime-api";
 
 export function RetrospectiveModal({ taskId, iteration, onClose }) {
   const [data, setData] = useState(null);

@@ -286,40 +286,22 @@ def create_app() -> FastAPI:
         raise HTTPException(400, f"unknown action: {action}")
 
     # ------------------------------------------------------------------ #
-    # Task detail data (all file-derived)
+    # Task detail data — shell-owned endpoints only.
     # ------------------------------------------------------------------ #
-    @app.get("/api/tasks/{task_id}/iterations")
-    def task_iterations(task_id: str) -> List[Dict[str, Any]]:
-        entry = _task_or_404(task_id)
-        return _sr.read_iterations(_state_dir_for(entry))
-
-    @app.get("/api/tasks/{task_id}/iterations/{n}")
-    def task_iteration_detail(task_id: str, n: int) -> Dict[str, Any]:
-        entry = _task_or_404(task_id)
-        rec = _sr.read_iteration(_state_dir_for(entry), n)
-        if rec is None:
-            raise HTTPException(404, f"no iteration {n} for task {task_id}")
-        return rec
-
-    @app.get("/api/tasks/{task_id}/iterations/{n}/retrospective")
-    def task_retrospective(task_id: str, n: int) -> Dict[str, Any]:
-        entry = _task_or_404(task_id)
-        return _sr.read_retrospective(_state_dir_for(entry), n)
+    # The shell hosts the endpoints it needs for its OWN chrome:
+    #   - run.json           → header phase pill / iter counter / controls
+    #   - timeline.jsonl     → activity feed
+    #   - agents.json        → sub-agent panel
+    #   - token_budget.json  → budget bar
+    #   - orchestrator.log   → log tail
+    # Everything else (iterations, charts, state-graph, retrospective,
+    # task-specific visualizations) is served by each plugin's own
+    # router under ``/api/tasks/{task_id}/task/*`` (mounted below).
 
     @app.get("/api/tasks/{task_id}/timeline")
     def task_timeline(task_id: str, since: float = 0.0) -> Dict[str, Any]:
         entry = _task_or_404(task_id)
         return {"events": _sr.read_timeline(_state_dir_for(entry), since=since)}
-
-    @app.get("/api/tasks/{task_id}/charts")
-    def task_charts(task_id: str) -> Dict[str, Any]:
-        entry = _task_or_404(task_id)
-        return _sr.read_charts(_state_dir_for(entry))
-
-    @app.get("/api/tasks/{task_id}/state-graph")
-    def task_state_graph(task_id: str) -> Dict[str, Any]:
-        entry = _task_or_404(task_id)
-        return _sr.read_state_graph(_state_dir_for(entry))
 
     @app.get("/api/tasks/{task_id}/agents")
     def task_agents(task_id: str) -> Dict[str, Any]:
@@ -495,9 +477,21 @@ def create_app() -> FastAPI:
         repo_root=_repo_root(),
         get_launcher=_launcher.get_default_launcher,
     )
+    # Mount each plugin's task-specific router under a single shared
+    # prefix. The shell stays out of the business of knowing which
+    # task types want which endpoints — every plugin's HTTP surface
+    # lives under ``/api/tasks/{task_id}/task/*`` and the plugin is
+    # free to define whatever sub-paths it needs there.
     for _plugin in _all_web_plugins():
-        if _plugin.register_routes is not None:
-            _plugin.register_routes(app, _web_deps, _plugin)
+        if _plugin.build_router is None:
+            continue
+        _router = _plugin.build_router(_plugin)
+        if _router is None:
+            continue
+        app.include_router(
+            _router,
+            prefix=f"/api/tasks/{{task_id}}/task",
+        )
 
     # ------------------------------------------------------------------ #
     # SSE stream

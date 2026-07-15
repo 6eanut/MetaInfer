@@ -1,10 +1,11 @@
 // Task detail shell. Owns the chrome shared across every task type:
 //   - Header strip: task id / type / phase pill / final status / control btns
 //   - Budget bar
-//   - Reset / Retrospective modals
-//   - Shared data fetching (iterations / timeline / charts / state-graph / agents)
+//   - Reset modal
+//   - Shared data fetching (run / timeline / agents)
 //
-// The BODY (tab layout, panel composition) is rendered by the active task
+// The BODY (tab layout, panel composition, iteration tables, charts,
+// state graphs, retrospective modals) is rendered by the active task
 // type's plugin via dynamic import. The backend hands us a
 // `detail_view_module` importmap key (e.g. "app/calc-detail", "app/gf-detail");
 // we resolve it at render time so this file doesn't need to know which plugins
@@ -17,8 +18,7 @@
 import { html } from "htm/preact";
 import { useCallback, useEffect, useState } from "preact/hooks";
 import {
-  getRun, getIterations, getTimeline, getCharts,
-  getStateGraph, getAgents, controlTask,
+  getRun, getTimeline, getAgents, controlTask,
 } from "app/api";
 import { ConfirmActionModal } from "app/confirm-action-modal";
 import { BudgetBar } from "app/budget-bar";
@@ -55,49 +55,30 @@ function usePluginBody(detailViewModule) {
   return Body;
 }
 
-export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro, label, detailViewModule = null }) {
-  const [iterations, setIterations] = useState([]);
+export function TaskDetailView({ taskId, run, status, onChange, label, detailViewModule = null }) {
+  // Shell-fetches only what the shell chrome needs. Everything that's
+  // task-specific (iterations, charts, state-graph, retrospective) is
+  // fetched by the plugin body itself via its own runtime-api.
   const [timeline, setTimeline] = useState({ events: [], since: 0 });
-  const [charts, setCharts] = useState(null);
-  const [graph, setGraph] = useState(null);
   const [agents, setAgents] = useState({ ts: 0, agents: [] });
-  const [selectedIter, setSelectedIter] = useState(null);
   const [loadState, setLoadState] = useState("loading"); // loading | ok | error
   const [lastErr, setLastErr] = useState(null);
   const [showReset, setShowReset] = useState(false);
-  // Lazy-load the retrospective modal only when the user actually opens
-  // it (some task types never do — e.g. ones without iterations). The
-  // module is shared shell code, not eagerly imported.
-  const [RetroModal, setRetroModal] = useState(null);
-  useEffect(() => {
-    if (selectedIter == null) return;
-    if (RetroModal) return;
-    let cancelled = false;
-    import("app/retrospective-modal")
-      .then((m) => { if (!cancelled) setRetroModal(() => m.RetrospectiveModal); })
-      .catch((e) => console.error("retrospective-modal failed to load:", e));
-    return () => { cancelled = true; };
-  }, [selectedIter, RetroModal]);
 
   const refreshAll = useCallback(async () => {
     if (!taskId) return;
     setLastErr(null);
     try {
-      const [it, tl, ch, g, ag] = await Promise.all([
-        withTimeout(getIterations(taskId)).catch((e) => { console.warn("iterations:", e); return []; }),
+      const [tl, ag] = await Promise.all([
         withTimeout(getTimeline(taskId, timeline.since || 0))
           .catch((e) => { console.warn("timeline:", e); return { events: [] }; }),
-        withTimeout(getCharts(taskId)).catch((e) => { console.warn("charts:", e); return null; }),
-        withTimeout(getStateGraph(taskId)).catch((e) => { console.warn("state-graph:", e); return null; }),
-        withTimeout(getAgents(taskId)).catch((e) => { console.warn("agents:", e); return { ts: 0, agents: [] }; }),
+        withTimeout(getAgents(taskId))
+          .catch((e) => { console.warn("agents:", e); return { ts: 0, agents: [] }; }),
       ]);
-      setIterations(it || []);
       setTimeline((prev) => ({
         events: prev.events.concat((tl && tl.events) || []),
         since: Date.now() / 1000,
       }));
-      setCharts(ch);
-      setGraph(g);
       setAgents(ag || { ts: 0, agents: [] });
       setLoadState("ok");
     } catch (e) {
@@ -108,12 +89,8 @@ export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro, lab
   }, [taskId]);
 
   useEffect(() => {
-    setIterations([]);
     setTimeline({ events: [], since: 0 });
-    setCharts(null);
-    setGraph(null);
     setAgents({ ts: 0, agents: [] });
-    setSelectedIter(null);
     setLoadState("loading");
     setLastErr(null);
     refreshAll();
@@ -148,8 +125,11 @@ export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro, lab
 
   const Body = usePluginBody(detailViewModule);
   const sharedData = {
-    iterations, timeline, charts, graph, agents,
-    loadState, lastErr, selectedIter,
+    run, timeline, agents, loadState, lastErr,
+    // Helper the plugin body can call to refresh shell-owned panels
+    // (timeline / agents) on demand — useful after the plugin triggers
+    // a side-effect that should reflect in the chrome.
+    refreshShell: refreshAll,
   };
 
   return html`
@@ -199,20 +179,12 @@ export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro, lab
             taskId=${taskId}
             run=${run}
             status=${status}
-            data=${sharedData}
-            onOpenRetro=${(n) => setSelectedIter(n)} />`
+            data=${sharedData} />`
         : html`<div class="task-banner">
             ${detailViewModule
               ? html`<span class="muted">详情视图 ${detailViewModule} 加载失败 — 检查插件是否注册</span>`
               : html`<span class="muted">该任务类型未注册详情视图插件</span>`}
           </div>`}
-
-      ${selectedIter != null && RetroModal ? html`
-        <${RetroModal}
-          taskId=${taskId}
-          iteration=${selectedIter}
-          onClose=${() => setSelectedIter(null)} />
-      ` : null}
 
       ${showReset ? html`
         <${ConfirmActionModal}

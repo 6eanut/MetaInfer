@@ -151,8 +151,8 @@ export function Charts({ payload }) {
   return html`
     <div class="charts-panel">
       ${empty
-        ? html`<p class="muted">No perf data yet. Tiles appear as iterations
-            complete the E (perf-test) phase.</p>`
+        ? html`<p class="muted">No chart data yet. Tiles appear as iterations
+            complete and report metrics.</p>`
         : null}
       <div class="charts-grid" ref=${gridRef}></div>
     </div>

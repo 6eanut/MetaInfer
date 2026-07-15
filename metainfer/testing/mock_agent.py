@@ -1,9 +1,9 @@
 """In-process mocks for the orchestrator's agent + state interfaces.
 
-These mocks let step code (step0_rough / step3_calculate / pipeline)
-fan out via ``launch_async`` without ever spawning a subprocess —
-``launch_async`` resolves the canned response inline and invokes the
-``on_done`` callback in a daemon thread.
+These mocks let task pipeline code fan out via ``launch_async``
+without ever spawning a subprocess — ``launch_async`` resolves the
+canned response inline and invokes the ``on_done`` callback in a
+daemon thread.
 """
 
 from __future__ import annotations

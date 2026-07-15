@@ -9,7 +9,7 @@ from metainfer.web._helpers import workspace_dir_for
 from metainfer.web.registry import WebPlugin, register
 
 from ._qa import CONFIG as _QA_CONFIG
-from .routes import register_routes
+from .routes import build_router
 
 PLUGIN_TYPE = "calc-theoretical-value"
 # Frontend assets live in the task package's static/ dir (sibling of this
@@ -52,7 +52,7 @@ plugin = WebPlugin(
         "theoretical FLOPs and global-memory traffic of one forward "
         "pass, with per-node breakdown and an interactive visualization."
     ),
-    register_routes=register_routes,
+    build_router=build_router,
     detail_view_module="app/calc-detail",
     detail_view_export="default",
     qa_config=_QA_CONFIG,

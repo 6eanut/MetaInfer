@@ -25,7 +25,7 @@ from metainfer.orchestrator.token_budget import (
 
 
 def _rec(agent: str, cost: float, *, source: str = "orchestrator",
-         phase: str = "A_plan") -> UsageRecord:
+         phase: str = "phase_a") -> UsageRecord:
     return UsageRecord(
         agent=agent, source=source, phase=phase, ended_at=time.time(),
         input_tokens=100, output_tokens=50,
@@ -74,8 +74,8 @@ def test_check_launch_allowed_under_limit():
 def test_persistence_round_trip():
     with tempfile.TemporaryDirectory() as td:
         b = TokenBudget(td, max_cost_usd=5.0)
-        b.record(_rec("a", 1.0, phase="A_plan"))
-        b.record(_rec("b", 2.0, phase="B_implement"))
+        b.record(_rec("a", 1.0, phase="phase_a"))
+        b.record(_rec("b", 2.0, phase="phase_b"))
         # File exists and is valid JSON
         assert (Path(td) / "token_budget.json").exists()
         # Reload — totals must match
@@ -83,7 +83,7 @@ def test_persistence_round_trip():
         snap = b2.snapshot()
         assert snap.total_cost_usd == 3.0
         assert snap.agent_count == 2
-        assert snap.per_phase == {"A_plan": 1.0, "B_implement": 2.0}
+        assert snap.per_phase == {"phase_a": 1.0, "phase_b": 2.0}
         assert snap.per_source == {"orchestrator": 3.0}
         # Limit was loaded from disk too
         assert snap.limit_cost_usd == 5.0
@@ -138,13 +138,13 @@ def test_hard_threshold_callback():
 def test_per_source_phase_buckets():
     with tempfile.TemporaryDirectory() as td:
         b = TokenBudget(td, max_cost_usd=100.0)
-        b.record(_rec("a", 1.0, source="orchestrator", phase="A_plan"))
-        b.record(_rec("b", 2.0, source="orchestrator", phase="B_implement"))
+        b.record(_rec("a", 1.0, source="orchestrator", phase="phase_a"))
+        b.record(_rec("b", 2.0, source="orchestrator", phase="phase_b"))
         b.record(_rec("c", 3.0, source="web_qa", phase=None))
         snap = b.snapshot()
         assert snap.per_source == {"orchestrator": 3.0, "web_qa": 3.0}
         # None phase gets bucketed under "(unknown)"
-        assert snap.per_phase == {"A_plan": 1.0, "B_implement": 2.0,
+        assert snap.per_phase == {"phase_a": 1.0, "phase_b": 2.0,
                                   "(unknown)": 3.0}
 
 
@@ -161,7 +161,7 @@ def test_usage_from_result_event():
         },
     }
     rec = usage_from_result_event(ev, agent="x", source="orchestrator",
-                                  phase="B_implement")
+                                  phase="phase_b")
     assert rec.agent == "x"
     assert rec.input_tokens == 1000
     assert rec.output_tokens == 500

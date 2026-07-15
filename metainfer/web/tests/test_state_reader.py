@@ -86,13 +86,18 @@ def test_read_timeline_skips_garbage_lines(tmp_path):
     assert len(out) == 1 and out[0]["type"] == "ok"
 
 
-def test_read_iterations_sorts_by_number(tmp_path):
-    iter_dir = tmp_path / "iterations"
-    iter_dir.mkdir()
-    (iter_dir / "002.json").write_text(json.dumps({"n": 2}), encoding="utf-8")
-    (iter_dir / "001.json").write_text(json.dumps({"n": 1}), encoding="utf-8")
-    out = sr.read_iterations(tmp_path)
-    assert [r["n"] for r in out] == [1, 2]
+def test_read_iterations_removed_from_shell(tmp_path):
+    """Iteration records are now task-private (their schema is
+    calc-shaped). The shell no longer exposes a read_iterations helper
+    — each task package's ``_state_readers`` owns its own copy. This
+    test pins that contract: importing the symbol MUST fail so no new
+    shell code accidentally grows a dependency on a task's iteration
+    schema."""
+    assert not hasattr(sr, "read_iterations")
+    assert not hasattr(sr, "read_iteration")
+    assert not hasattr(sr, "read_charts")
+    assert not hasattr(sr, "read_retrospective")
+    assert not hasattr(sr, "read_state_graph")
 
 
 def test_append_timeline_event_writes_jsonl(tmp_path):

@@ -588,3 +588,16 @@
   outline: none;
   border-color: #58a6ff;
 }
+
+/* ---- calc_value phase pills (declared here, not in shell styles.css,
+   so the shell stays task-agnostic). Phases: S0_rough / S1_analyze /
+   S2_graph / S3_calculate / S4_visualize. All share the "in-progress"
+   accent color since calc_value doesn't have a per-phase semantic. ---- */
+.pill.S0_rough,
+.pill.S1_analyze,
+.pill.S2_graph,
+.pill.S3_calculate,
+.pill.S4_visualize {
+  background: rgba(88,166,255,0.15);
+  color: var(--accent-2, #58a6ff);
+}

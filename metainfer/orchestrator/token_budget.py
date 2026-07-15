@@ -69,7 +69,7 @@ class UsageRecord:
 
     agent: str
     source: str           # "orchestrator" | "web_qa" | future sources
-    phase: Optional[str]  # A_plan / B_implement / ... when known
+    phase: Optional[str]  # task-defined phase string (opaque to the shell)
     ended_at: float       # unix ts
     input_tokens: int = 0
     output_tokens: int = 0

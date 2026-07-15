@@ -1,32 +1,62 @@
 // gen-infer-framework task detail body.
 //
 // Rendered by the task-detail shell when detail_view_module === "app/gf-detail".
-// Receives shared data (iterations, timeline, charts, graph, agents) as props
-// from the shell — the shell owns data fetching so multiple plugins don't
-// duplicate the work. This component just composes the panels.
+// Fetches its own iterations/charts/state-graph from /api/tasks/<id>/task/*
+// (gf's web_server_handler router) and composes the panels using gf-shipped
+// widgets (gf-state-graph / gf-iterations-table / gf-charts plus the
+// shell-shared agents-panel / timeline).
 //
-// Layout: 5-panel grid (state-graph / iterations / live agents / charts /
-// timeline) + a "no iterations yet" empty state when the orchestrator hasn't
-// started the first iteration.
+// Shell passes {run, timeline, agents, loadState, lastErr} via `data`.
 
 import { html } from "htm/preact";
-import { StateGraph } from "app/state-graph";
-import { IterationsTable } from "app/iterations-table";
-import { Charts } from "app/charts";
+import { useCallback, useEffect, useState } from "preact/hooks";
+import { StateGraph } from "app/gf-state-graph";
+import { IterationsTable } from "app/gf-iterations-table";
+import { Charts } from "app/gf-charts";
+import { RetrospectiveModal } from "app/gf-retrospective-modal";
 import { AgentsPanel } from "app/agents-panel";
 import { Timeline } from "app/timeline";
+import {
+  getIterations, getCharts, getStateGraph,
+} from "app/gf-runtime-api";
+
+const withTimeout = (p, ms = 8000) =>
+  Promise.race([
+    p,
+    new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms)),
+  ]);
+
+function useRuntimeData(taskId) {
+  const [data, setData] = useState({
+    iterations: [], charts: null, graph: null,
+  });
+  const refresh = useCallback(async () => {
+    if (!taskId) return;
+    const [it, ch, g] = await Promise.all([
+      withTimeout(getIterations(taskId)).catch((e) => { console.warn("iterations:", e); return []; }),
+      withTimeout(getCharts(taskId)).catch((e) => { console.warn("charts:", e); return null; }),
+      withTimeout(getStateGraph(taskId)).catch((e) => { console.warn("state-graph:", e); return null; }),
+    ]);
+    setData({ iterations: it || [], charts: ch, graph: g });
+  }, [taskId]);
+  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    if (!taskId) return;
+    const id = setInterval(refresh, 5000);
+    return () => clearInterval(id);
+  }, [taskId, refresh]);
+  return { ...data, refresh };
+}
 
 export default function GenInferDetailView({
   taskId,
   run,
   status,
   data,
-  onOpenRetro,
 }) {
-  const { iterations, timeline, charts, graph, agents, loadState, lastErr } = data;
-  const retroIter = data.selectedIter != null
-    ? (typeof data.selectedIter === "number" ? data.selectedIter : null)
-    : null;
+  const [selectedIter, setSelectedIter] = useState(null);
+  const { timeline, agents, loadState, lastErr } = data;
+  const rt = useRuntimeData(taskId);
 
   if (loadState === "error" && lastErr) {
     return html`
@@ -41,15 +71,15 @@ export default function GenInferDetailView({
     <div class="task-grid">
       <section class="panel">
         <h2>State machine</h2>
-        <${StateGraph} graph=${graph} />
+        <${StateGraph} graph=${rt.graph} />
       </section>
 
       <section class="panel">
         <h2>Iterations <span class="muted">(click for retrospective)</span></h2>
         <${IterationsTable}
-          iterations=${iterations}
-          selectedN=${retroIter}
-          onSelect=${(n) => onOpenRetro && onOpenRetro(n)} />
+          iterations=${rt.iterations}
+          selectedN=${selectedIter}
+          onSelect=${(n) => setSelectedIter(n)} />
       </section>
 
       <section class="panel">
@@ -59,7 +89,7 @@ export default function GenInferDetailView({
 
       <section class="panel">
         <h2>Performance &amp; duration</h2>
-        <${Charts} payload=${charts} />
+        <${Charts} payload=${rt.charts} />
       </section>
 
       <section class="panel timeline-panel">
@@ -67,5 +97,12 @@ export default function GenInferDetailView({
         <${Timeline} events=${timeline.events} />
       </section>
     </div>
+
+    ${selectedIter != null ? html`
+      <${RetrospectiveModal}
+        taskId=${taskId}
+        iteration=${selectedIter}
+        onClose=${() => setSelectedIter(null)} />
+    ` : null}
   `;
 }

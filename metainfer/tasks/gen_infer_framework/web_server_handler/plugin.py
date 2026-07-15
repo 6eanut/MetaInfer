@@ -12,7 +12,7 @@ from pathlib import Path
 from metainfer.web.registry import WebPlugin, register
 
 from ._qa import CONFIG as _QA_CONFIG
-from .routes import register_routes
+from .routes import build_router
 
 PLUGIN_TYPE = "gen-infer-framework"
 # Frontend assets live in the task package's static/ dir (sibling of this
@@ -35,12 +35,13 @@ plugin = WebPlugin(
         "Build a minimal, model-specific inference framework with an "
         "OpenAI-compatible HTTP API from scratch."
     ),
-    register_routes=register_routes,
+    build_router=build_router,
     detail_view_module="app/gf-detail",
     detail_view_export="default",
     qa_config=_QA_CONFIG,
     frontend_dir=_FRONTEND_DIR,
     importmap_entries=_IMPORTMAP_ENTRIES,
+    extra_stylesheets=["gf.css"],
 )
 
 register(plugin)

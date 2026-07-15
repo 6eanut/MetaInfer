@@ -4,11 +4,14 @@ All state lives under ``<cwd>/.metainfer/state/<task_id>/``:
 
 * ``requirements.json``    — frozen requirements captured by the entry skill
 * ``run.json``             — mutable run status (current phase, iteration, ...)
-* ``iterations/<n>.json``  — one record per iteration
+* ``iterations/<n>.json``  — one record per iteration (schema is TASK-DEFINED;
+  the shell no longer ships an :class:`IterationRecord` dataclass)
 * ``timeline.jsonl``       — append-only event log (phase transitions, agent events)
 
 The store is intentionally file-based so the WebUI can run in a separate
-process and observe state without IPC.
+process and observe state without IPC. Iteration records are treated as
+opaque JSON dicts here — each task package defines its own iteration
+schema in whatever shape fits (dataclass, TypedDict, plain dict...).
 """
 
 from __future__ import annotations
@@ -19,23 +22,19 @@ import threading
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 # --------------------------------------------------------------------------- #
 # Shared phase / outcome types
 # --------------------------------------------------------------------------- #
 #
-# NOTE: ``Phase`` here is intentionally a plain ``str`` alias, NOT a Literal
-# of any specific orchestrator's phase names. Each task package's
-# ``orchestrator/phases.py`` defines its OWN Phase Literal for internal
-# type safety, but the shared state layer just stores the value opaquely.
-# This keeps state.py decoupled from any specific task type's phase
-# vocabulary.
+# ``Phase`` and ``Outcome`` are plain ``str`` aliases here — the shell
+# stores them opaquely. Each task package's ``orchestrator/phases.py``
+# defines its OWN Phase Literal for internal type safety.
 #
-# ``Outcome`` is also a plain str alias here — per-task outcomes (e.g.
-# ok / logic_fail / infra_fail / perf_regression / aborted) are NOT
-# universal. Per-task packages re-export a tighter Literal for internal
-# use.
+# The shell no longer ships an ``IterationRecord`` dataclass. Each task
+# that runs an iteration loop defines its own record type and
+# (de)serializes through :class:`StateStore`'s dict-based API.
 Phase = str
 Outcome = Union[str, None]
 
@@ -43,35 +42,6 @@ Outcome = Union[str, None]
 # --------------------------------------------------------------------------- #
 # Dataclasses
 # --------------------------------------------------------------------------- #
-
-
-@dataclass
-class IterationRecord:
-    iteration: int
-    goal: str = ""                 # what this iteration is trying to achieve
-    start_phase: Phase = "A_plan"  # A or D, depending on outcome of prev iter
-    started_at: float = 0.0
-    ended_at: float = 0.0
-    duration_s: float = 0.0
-    status: Literal["running", "success", "failed"] = "running"
-    failure_reason: Optional[str] = None
-    # outcome of the iteration's terminating C step (None until C has run)
-    outcome: Optional[Outcome] = None
-    phases: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    # perf metrics from C step (tokens/s, ms/req, memory MB, etc.)
-    perf: Dict[str, float] = field(default_factory=dict)
-    artifacts: List[str] = field(default_factory=list)
-    # True iff the orchestrator process died mid-flight and this record was
-    # finalized retroactively on the next resume. Distinguishes a "real"
-    # failed C step from an externally-interrupted attempt. The WebUI can
-    # use this to render differently (e.g., "interrupted" vs "failed").
-    interrupted: bool = False
-    # Absolute path to this iteration's retrospective.md (written by
-    # the task package's retrospective agent at the end of an iteration).
-    # The WebUI reads this file on demand when the user clicks the
-    # iteration row. None if no retrospective was ever produced. Stored
-    # as a path (not the full text) so the JSON state file stays small.
-    retrospective_path: Optional[str] = None
 
 
 @dataclass
@@ -195,25 +165,29 @@ class StateStore:
     # Iteration records
     # ------------------------------------------------------------------ #
 
-    def write_iteration(self, rec: IterationRecord) -> None:
+    def write_iteration(self, n: int, data: Dict[str, Any]) -> None:
+        """Persist one iteration record as JSON. ``data`` is the task's
+        own schema — the shell treats it as an opaque dict. Callers
+        that keep an in-memory dataclass typically pass
+        ``asdict(rec)`` here."""
         with self._lock:
-            path = self.iter_path(rec.iteration)
+            path = self.iter_path(n)
             tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(asdict(rec), indent=2), encoding="utf-8")
+            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
             os.replace(tmp, path)
 
-    def load_iteration(self, n: int) -> Optional[IterationRecord]:
+    def load_iteration(self, n: int) -> Optional[Dict[str, Any]]:
+        """Return iteration ``n``'s record as a plain dict, or None."""
         path = self.iter_path(n)
         if not path.exists():
             return None
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return IterationRecord(**data)
+        return json.loads(path.read_text(encoding="utf-8"))
 
-    def load_all_iterations(self) -> List[IterationRecord]:
+    def load_all_iterations(self) -> List[Dict[str, Any]]:
+        """All iteration records (as dicts) sorted by filename (= number)."""
         recs = []
         for p in sorted((self.task_dir / "iterations").glob("*.json")):
-            data = json.loads(p.read_text(encoding="utf-8"))
-            recs.append(IterationRecord(**data))
+            recs.append(json.loads(p.read_text(encoding="utf-8")))
         return recs
 
     def delete_iteration(self, n: int) -> bool:

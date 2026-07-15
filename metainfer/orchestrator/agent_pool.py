@@ -114,8 +114,8 @@ class AgentPool:
     (c) parallelize across workers.
 
     Construction is cheap; the heavy work happens in :meth:`run`. A pool
-    can be reused across batches (e.g. one pool for step2 round-0
-    validation, another batch for round-1). Each batch starts fresh
+    can be reused across batches (e.g. one pool for batch N's parallel
+    work, another batch for batch N+1). Each batch starts fresh
     sessions — context carryover between unrelated batches is rarely what
     callers want.
     """

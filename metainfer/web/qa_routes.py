@@ -1,10 +1,11 @@
 """Generic per-task-type QA routes.
 
-This helper mounts the ``POST /qa/start`` + ``GET /qa/<sid>`` +
+This helper adds the ``POST /qa/start`` + ``GET /qa/{sid}`` +
 ``GET /qa`` triplet for a task type, backed by the task-type-agnostic
-:mod:`metainfer.web.qa` engine. Each task plugin that wants offline-QA
-support calls :func:`register_qa_routes` from its ``register_routes``
-hook — no boilerplate copy-pasted per package.
+:mod:`metainfer.web.qa` engine. The triplet is mounted onto whatever
+APIRouter the plugin is building (relative paths only) — the shell
+mounts that router under ``/api/tasks/{task_id}/task`` so the routes
+end up at ``/api/tasks/{task_id}/task{prefix}``.
 
 Two modes are supported by the same routes:
 
@@ -22,9 +23,9 @@ The plugin's :class:`~metainfer.web.registry.WebPlugin` already holds a
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, HTTPException
 
 from . import qa as _qa
 from ._helpers import (
@@ -34,29 +35,35 @@ from ._helpers import (
 )
 from .registry import WebPlugin
 
+# An APIRouter or a FastAPI app — both expose the same .get/.post API
+# for route registration.
+_RouterLike = Union[APIRouter, Any]
+
 
 def register_qa_routes(
-    app: FastAPI,
+    router: _RouterLike,
     plugin: WebPlugin,
     *,
     prefix: str = "/qa",
 ) -> None:
-    """Mount the three QA routes onto ``app`` for ``plugin.type``.
+    """Mount the three QA routes onto ``router`` for ``plugin.type``.
 
-    ``prefix`` is the URL path suffix appended after
-    ``/api/tasks/{task_id}``; defaults to ``"/qa"``. Plugins with an
-    existing stable URL (e.g. a task that historically mounted QA at
-    ``/<plugin>/qa``) can override it.
+    Routes are RELATIVE — the caller is responsible for mounting the
+    router at the right absolute prefix (the shell does this at
+    ``/api/tasks/{task_id}/task``).
 
-    Routes mounted:
-      - ``POST /api/tasks/{task_id}{prefix}/start``
-      - ``GET  /api/tasks/{task_id}{prefix}/{session_id}``
-      - ``GET  /api/tasks/{task_id}{prefix}``
+    ``prefix`` is the URL path suffix appended after the mount point;
+    defaults to ``"/qa"``. Plugins can override (e.g. ``"/calc/qa"``).
+
+    Routes mounted (relative to ``router``'s own prefix):
+      - ``POST {prefix}/start``
+      - ``GET  {prefix}/{session_id}``
+      - ``GET  {prefix}``
     """
     plugin_type = plugin.type
     qa_config = plugin.qa_config
 
-    @app.post(f"/api/tasks/{{task_id}}{prefix}/start")
+    @router.post(f"{prefix}/start")
     def _qa_start(task_id: str, body: dict) -> Dict[str, Any]:
         entry = task_or_404(task_id)
         require_task_type(entry, plugin_type)
@@ -95,7 +102,7 @@ def register_qa_routes(
             raise HTTPException(400, str(exc))
         return {"session_id": sid, "task_id": task_id}
 
-    @app.get(f"/api/tasks/{{task_id}}{prefix}/{{session_id}}")
+    @router.get(f"{prefix}/{{session_id}}")
     def _qa_get(task_id: str, session_id: str) -> Dict[str, Any]:
         entry = task_or_404(task_id)
         require_task_type(entry, plugin_type)
@@ -105,7 +112,7 @@ def register_qa_routes(
             raise HTTPException(404, f"no such qa session: {session_id}")
         return sess
 
-    @app.get(f"/api/tasks/{{task_id}}{prefix}")
+    @router.get(f"{prefix}")
     def _qa_list(
         task_id: str,
         step: Optional[str] = None,

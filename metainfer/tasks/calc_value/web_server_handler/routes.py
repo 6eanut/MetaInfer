@@ -1,19 +1,38 @@
-"""FastAPI route handlers for the calc-theoretical-value task type.
+"""FastAPI router for the calc-theoretical-value task type.
 
-All 11 ``/api/tasks/{task_id}/calc/...`` routes live here. They delegate
-to :mod:`._readers` for disk reads (against the task's ``workspace_dir``
-— where step0..step4 outputs physically live) and to
-:mod:`metainfer.web.qa` for the offline-analyst feature (sessions stored
-under the task's ``state_dir``). Type guard is enforced at the route
-layer via :func:`metainfer.web._helpers.require_task_type` for safety —
-the ``/calc/`` prefix is suggestive but not authoritative.
+This module builds a single :class:`fastapi.APIRouter` carrying every
+HTTP route calc_value exposes. The shell mounts it under
+``/api/tasks/{task_id}/task`` so every route below lands at:
+
+    /api/tasks/{task_id}/task/calc/graph
+    /api/tasks/{task_id}/task/calc/compute
+    /api/tasks/{task_id}/task/calc/viz
+    /api/tasks/{task_id}/task/calc/summary
+    /api/tasks/{task_id}/task/calc/iterations
+    /api/tasks/{task_id}/task/calc/rough
+    /api/tasks/{task_id}/task/calc/cells
+    /api/tasks/{task_id}/task/calc/cell/{compound}/{angle}/{round_idx}
+    /api/tasks/{task_id}/task/calc/qa[/start|/<sid>]
+    /api/tasks/{task_id}/task/iterations[/{n}[/retrospective]]
+    /api/tasks/{task_id}/task/charts
+    /api/tasks/{task_id}/task/state-graph
+
+The first block (``/calc/...``) reads calc-specific artifacts from the
+task's ``workspace_dir`` via :mod:`._readers`. The second block
+(``/iterations``, ``/charts``, ``/state-graph``, ``/retrospective``)
+reads the orchestrator's iteration records / phases from ``state_dir``
+— these used to live in the shell but are task-shaped, so they now
+live with the task package.
+
+Type guard is enforced at the route layer via
+:func:`metainfer.web._helpers.require_task_type` for safety.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from metainfer.web._helpers import (
@@ -23,22 +42,22 @@ from metainfer.web._helpers import (
     workspace_dir_for,
 )
 from metainfer.web.qa_routes import register_qa_routes
-from . import _readers
+
+from . import _readers, _state_readers
 
 PLUGIN_TYPE = "calc-theoretical-value"
 
 
-def register_routes(app: FastAPI, deps, plugin) -> None:
-    """Mount the calc routes onto ``app``.
+def build_router(plugin) -> APIRouter:
+    """Build the calc_value router. ``plugin`` is the WebPlugin itself,
+    passed in by :func:`metainfer.web.app.create_app` so we can hand it
+    to the generic QA helper without a circular import."""
+    router = APIRouter()
 
-    ``deps`` is a :class:`metainfer.web.registry.WebDeps` (unused —
-    calc routes are fully self-contained against the state_dir +
-    workspace_dir). ``plugin`` is the calc WebPlugin itself; passed
-    explicitly by :func:`metainfer.web.app.create_app` so we can hand
-    it to the generic QA helper without a circular import.
-    """
-
-    @app.get("/api/tasks/{task_id}/calc/graph")
+    # ----------------------------------------------------------------- #
+    # calc-specific workspace reads
+    # ----------------------------------------------------------------- #
+    @router.get("/calc/graph")
     def calc_graph(task_id: str) -> Dict[str, Any]:
         entry = task_or_404(task_id)
         require_task_type(entry, PLUGIN_TYPE)
@@ -48,7 +67,7 @@ def register_routes(app: FastAPI, deps, plugin) -> None:
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc))
 
-    @app.get("/api/tasks/{task_id}/calc/compute")
+    @router.get("/calc/compute")
     def calc_compute(task_id: str, batch_size: int = 1, seq_len: int = 1) -> Dict[str, Any]:
         entry = task_or_404(task_id)
         require_task_type(entry, PLUGIN_TYPE)
@@ -60,7 +79,7 @@ def register_routes(app: FastAPI, deps, plugin) -> None:
         except ValueError as exc:
             raise HTTPException(400, str(exc))
 
-    @app.get("/api/tasks/{task_id}/calc/viz")
+    @router.get("/calc/viz")
     def calc_viz(task_id: str) -> HTMLResponse:
         entry = task_or_404(task_id)
         require_task_type(entry, PLUGIN_TYPE)
@@ -70,19 +89,19 @@ def register_routes(app: FastAPI, deps, plugin) -> None:
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc))
 
-    @app.get("/api/tasks/{task_id}/calc/summary")
+    @router.get("/calc/summary")
     def calc_summary(task_id: str) -> Dict[str, Any]:
         entry = task_or_404(task_id)
         require_task_type(entry, PLUGIN_TYPE)
         return _readers.read_summary(workspace_dir_for(entry))
 
-    @app.get("/api/tasks/{task_id}/calc/iterations")
+    @router.get("/calc/iterations")
     def calc_iterations(task_id: str) -> Dict[str, Any]:
         entry = task_or_404(task_id)
         require_task_type(entry, PLUGIN_TYPE)
         return _readers.read_iterations(workspace_dir_for(entry))
 
-    @app.get("/api/tasks/{task_id}/calc/rough")
+    @router.get("/calc/rough")
     def calc_rough(task_id: str, request: Request) -> Dict[str, Any]:
         entry = task_or_404(task_id)
         require_task_type(entry, PLUGIN_TYPE)
@@ -107,7 +126,7 @@ def register_routes(app: FastAPI, deps, plugin) -> None:
         except ValueError as exc:
             raise HTTPException(400, str(exc))
 
-    @app.get("/api/tasks/{task_id}/calc/cells")
+    @router.get("/calc/cells")
     def calc_cells(task_id: str, request: Request) -> Dict[str, Any]:
         entry = task_or_404(task_id)
         require_task_type(entry, PLUGIN_TYPE)
@@ -132,7 +151,7 @@ def register_routes(app: FastAPI, deps, plugin) -> None:
         except ValueError as exc:
             raise HTTPException(400, str(exc))
 
-    @app.get("/api/tasks/{task_id}/calc/cell/{compound}/{angle}/{round_idx}")
+    @router.get("/calc/cell/{compound}/{angle}/{round_idx}")
     def calc_cell_detail(
         task_id: str, compound: str, angle: str, round_idx: int,
     ) -> Dict[str, Any]:
@@ -147,10 +166,46 @@ def register_routes(app: FastAPI, deps, plugin) -> None:
             raise HTTPException(400, str(exc))
 
     # ----------------------------------------------------------------- #
+    # Orchestrator iteration records / charts / state-graph / retro
+    # (used to be shell endpoints; now task-owned because the record
+    # schema is task-specific)
+    # ----------------------------------------------------------------- #
+    @router.get("/iterations")
+    def calc_orch_iterations(task_id: str) -> list:
+        entry = task_or_404(task_id)
+        require_task_type(entry, PLUGIN_TYPE)
+        return _state_readers.read_iterations(state_dir_for(entry))
+
+    @router.get("/iterations/{n}")
+    def calc_orch_iteration_detail(task_id: str, n: int) -> Dict[str, Any]:
+        entry = task_or_404(task_id)
+        require_task_type(entry, PLUGIN_TYPE)
+        rec = _state_readers.read_iteration(state_dir_for(entry), n)
+        if rec is None:
+            raise HTTPException(404, f"no iteration {n} for task {task_id}")
+        return rec
+
+    @router.get("/iterations/{n}/retrospective")
+    def calc_orch_retrospective(task_id: str, n: int) -> Dict[str, Any]:
+        entry = task_or_404(task_id)
+        require_task_type(entry, PLUGIN_TYPE)
+        return _state_readers.read_retrospective(state_dir_for(entry), n)
+
+    @router.get("/charts")
+    def calc_orch_charts(task_id: str) -> Dict[str, Any]:
+        entry = task_or_404(task_id)
+        require_task_type(entry, PLUGIN_TYPE)
+        return _state_readers.read_charts(state_dir_for(entry))
+
+    @router.get("/state-graph")
+    def calc_orch_state_graph(task_id: str) -> Dict[str, Any]:
+        entry = task_or_404(task_id)
+        require_task_type(entry, PLUGIN_TYPE)
+        return _state_readers.read_state_graph(state_dir_for(entry))
+
+    # ----------------------------------------------------------------- #
     # Offline QA over agent conversation history
     # ----------------------------------------------------------------- #
-    # Generic helper — backs ``/calc/qa/start`` + ``/calc/qa/<sid>`` +
-    # ``/calc/qa`` using the task-agnostic engine in metainfer/web/qa.py
-    # plus the plugin's qa_config pathsolver. See
-    # metainfer/web/qa_routes.py.
-    register_qa_routes(app, plugin, prefix="/calc/qa")
+    register_qa_routes(router, plugin, prefix="/calc/qa")
+
+    return router

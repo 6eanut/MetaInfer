@@ -24,34 +24,23 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 # Written as the final step of closing an iteration. Presence means the
 # orchestrator shut the iteration down cleanly (not killed mid-flight).
 COMPLETED_SENTINEL = ".metainfer-completed"
 
-# Diagnostic files from the previous iteration's logs dir that get copied
-# forward into the new iteration's logs dir under PREV_ITER_LOGS_SUBDIR.
-# Without this, the next agent has no visibility into WHY the previous C
-# step failed — the failure_reason text alone is rarely enough to debug a
-# server crash or a judge verdict.
-#
-# Globs are matched against the prev iter's logs dir (logs_dir_for(n-1)).
-DIAGNOSTIC_GLOBS = (
-    "oracle-report.json",
-    "server.stdout.log",
-    "server.stderr.log",
-    "*-test.log",
-    "test.log",
-    "judge.*",
-    "*.prompt.txt",
-)
-
 # Subdirectory inside the new iteration's logs dir where the previous
 # iteration's diagnostic files land. Keeps the current iter's own logs
 # (which start writing immediately) separate from inherited ones.
 PREV_ITER_LOGS_SUBDIR = "prev-iter"
+
+# Default diagnostic-glob set: empty. Each task plugin declares its own
+# via ``TaskPlugin.diagnostic_globs``. The historical default (oracle /
+# judge / test logs) was calc-shaped vocabulary — it now lives in
+# gen_infer_framework's TaskPlugin descriptor.
+_DEFAULT_DIAGNOSTIC_GLOBS: Tuple[str, ...] = ()
 
 # Files / dirs that the copy-forward rule skips when seeding iteration N
 # from iteration N-1's code tree. Without this filter, every new iteration
@@ -101,10 +90,23 @@ class IterationWorkspace:
         self,
         iterations_root: Path,
         logs_root: Optional[Path] = None,
+        *,
+        diagnostic_globs: Tuple[str, ...] = _DEFAULT_DIAGNOSTIC_GLOBS,
     ) -> None:
+        """Construct a workspace.
+
+        ``diagnostic_globs`` is the set of filename patterns copied
+        forward from the previous iteration's logs dir into the new
+        iteration's ``prev-iter/`` subdir at open time. Pipelines
+        typically source this from their TaskPlugin descriptor
+        (``plugin.diagnostic_globs``). Empty means no copy-forward —
+        appropriate for tasks that don't have iteration-scoped
+        diagnostic files.
+        """
         self.root = iterations_root
         self.root.mkdir(parents=True, exist_ok=True)
         self.logs_root = logs_root
+        self.diagnostic_globs = tuple(diagnostic_globs)
         if self.logs_root is not None:
             self.logs_root.mkdir(parents=True, exist_ok=True)
 
@@ -197,14 +199,16 @@ class IterationWorkspace:
                 shutil.copy2(entry, target_entry)
 
     def _copy_prev_diagnostics(self, prev_n: int, target_n: int) -> None:
-        """Copy :data:`DIAGNOSTIC_GLOBS` from logs_dir_for(prev_n) into
+        """Copy :attr:`diagnostic_globs` from logs_dir_for(prev_n) into
         logs_dir_for(target_n)/PREV_ITER_LOGS_SUBDIR/. Best-effort."""
+        if not self.diagnostic_globs:
+            return
         prev_logs = self.logs_dir_for(prev_n)
         if not prev_logs.is_dir():
             return
         dst_logs = self.logs_dir_for(target_n) / PREV_ITER_LOGS_SUBDIR
         dst_logs.mkdir(parents=True, exist_ok=True)
-        for pattern in DIAGNOSTIC_GLOBS:
+        for pattern in self.diagnostic_globs:
             for src in prev_logs.glob(pattern):
                 if not src.is_file():
                     continue

@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import phases as P
+from .plugin import PLUGIN
 from metainfer.orchestrator.iteration import IterationWorkspace
 from .prompts import (
     c_repair_followup_prompt,
@@ -58,9 +59,21 @@ from .prompts import (
     review_prompt,
     write_test_harness_prompt,
 )
-from metainfer.orchestrator.state import IterationRecord, StateStore
+from metainfer.orchestrator.state import StateStore
 from metainfer.orchestrator.subagent_manager import AgentSpec, SubAgentManager
 from metainfer.orchestrator.token_budget import TokenBudget
+from .iteration_record import IterationRecord
+
+
+# StateStore treats iteration records as opaque dicts; gf wraps each
+# call to convert between dict and its own IterationRecord dataclass.
+def _load_iter(store: StateStore, n: int) -> Optional[IterationRecord]:
+    d = store.load_iteration(n)
+    return IterationRecord.from_dict(d) if d else None
+
+
+def _write_iter(store: StateStore, rec: IterationRecord) -> None:
+    store.write_iteration(rec.iteration, rec.to_dict())
 
 
 JSON_LINE_RE = re.compile(r"\{.*\}")
@@ -214,6 +227,7 @@ class Orchestrator:
         )
         self.workspace = IterationWorkspace(
             cfg.iterations_root, logs_root=cfg.logs_root,
+            diagnostic_globs=PLUGIN.diagnostic_globs,
         )
         self._stop = False
         # Set when run() no-ops because the task was already finished.
@@ -303,7 +317,7 @@ class Orchestrator:
         #    "interrupted" marker) so the user can see what happened.
         discarded = self.workspace.discard_latest_incomplete()
         if discarded is not None:
-            old_rec = self.store.load_iteration(discarded)
+            old_rec = _load_iter(self.store, discarded)
             # Capture the phase the iteration was in when the orchestrator
             # died, if we can tell from the partial phases dict.
             interrupted_in = None
@@ -334,7 +348,7 @@ class Orchestrator:
             # Look at the iteration just before the discarded one to recover
             # context (failure reason, outcome) so the retry has the same
             # starting point as the original attempt.
-            prev_rec = self.store.load_iteration(iter_num - 1) if iter_num > 1 else None
+            prev_rec = _load_iter(self.store, iter_num - 1) if iter_num > 1 else None
             if prev_rec is not None:
                 last_outcome = prev_rec.outcome
                 if start_phase == "B_implement" and prev_rec.outcome != P.OK:
@@ -343,7 +357,7 @@ class Orchestrator:
             # All existing iterations complete → start a fresh next one
             # whose phase is determined by the last iteration's outcome.
             last_complete = self.workspace.latest_complete_number()
-            prev_rec = self.store.load_iteration(last_complete) if last_complete else None
+            prev_rec = _load_iter(self.store, last_complete) if last_complete else None
             iter_num = last_complete + 1
             start_phase = self._phase_after(prev_rec)
             carried_failure = (
@@ -432,7 +446,7 @@ class Orchestrator:
                     started_at=time.time(),
                     start_phase=phase,
                 )
-                self.store.write_iteration(iter_rec)
+                _write_iter(self.store, iter_rec)
                 # Reset per-iteration session state — the new iteration's
                 # code tree is a fresh starting point, so resuming from
                 # the prior iter's B/C sessions would only confuse the
@@ -909,7 +923,7 @@ class Orchestrator:
         retro path survives the close write — loading a fresh copy from
         the store here would be a lost update (close would overwrite it).
         """
-        prev_rec = self.store.load_iteration(n - 1) if n > 1 else None
+        prev_rec = _load_iter(self.store, n - 1) if n > 1 else None
         prev_perf = dict(prev_rec.perf) if prev_rec and prev_rec.perf else None
         # Goal: prefer the most recent plan-level goal we can find. We
         # don't currently store a one-line goal separately on the record,
@@ -954,7 +968,7 @@ class Orchestrator:
         # record now so the path is durable even if the orchestrator dies
         # between here and the close write.
         rec.retrospective_path = str(retro_path)
-        self.store.write_iteration(rec)
+        _write_iter(self.store, rec)
         self.store.append_timeline(
             "retrospective_written",
             {"iteration": n, "path": str(retro_path),
@@ -1547,7 +1561,7 @@ class Orchestrator:
 
         # record into the iteration record's phases dict (best-effort)
         try:
-            rec = self.store.load_iteration(iteration)
+            rec = _load_iter(self.store, iteration)
             if rec is not None:
                 rec.phases.setdefault(role, {}).update({
                     "duration_s": result.duration_s,
@@ -1559,7 +1573,7 @@ class Orchestrator:
                     "log_file": str(spec.log_file(result.attempts)),
                     "session_id": result.session_id,
                 })
-                self.store.write_iteration(rec)
+                _write_iter(self.store, rec)
         except Exception:  # noqa: BLE001
             pass
 
@@ -1580,10 +1594,10 @@ class Orchestrator:
     def _set_phase(self, n: int, iter_dir: Path, phase: P.Phase) -> None:
         self.store.update_run(current_iteration=n, current_phase=phase)
         self.store.append_timeline("phase_start", {"iteration": n, "phase": phase})
-        rec = self.store.load_iteration(n)
+        rec = _load_iter(self.store, n)
         if rec is not None:
             rec.phases.setdefault(phase, {"started_at": time.time()})
-            self.store.write_iteration(rec)
+            _write_iter(self.store, rec)
 
     def _close_iteration(
         self,
@@ -1615,7 +1629,7 @@ class Orchestrator:
                     {"iteration": rec.iteration,
                      "error": f"close-path raised: {exc!r}"},
                 )
-        self.store.write_iteration(rec)
+        _write_iter(self.store, rec)
         # Mark the folder complete *after* the record write so the sentinel
         # is a durable signal that the close path ran end-to-end. An
         # iteration that lacks this sentinel on resume was killed mid-flight.

@@ -2,23 +2,29 @@
 //
 // Rendered by the task-detail shell when detail_view_module === "app/calc-detail".
 // Owns the tab UI (rough / audit / viz / runtime). The first three tabs are
-// calc-specific components; "runtime" reuses the shared panel grid by
-// delegating to GenInferDetailView-style layout (state-graph / iterations /
-// agents / charts / timeline).
+// calc-specific components; "runtime" fetches its own iterations/charts/graph
+// data from /api/tasks/<id>/task/* and renders the panel grid using
+// calc-shipped widgets (calc-state-graph / calc-iterations-table / calc-charts
+// plus the shell-shared agents-panel / timeline).
 //
-// Receives shared data as props from the shell — same contract as
-// gf-detail.js.
+// Shell passes {run, timeline, agents, loadState, lastErr} via the `data`
+// prop — agents and timeline come from shell-owned endpoints; everything
+// else is fetched here.
 
 import { html } from "htm/preact";
-import { useState } from "preact/hooks";
-import { StateGraph } from "app/state-graph";
-import { IterationsTable } from "app/iterations-table";
-import { Charts } from "app/charts";
+import { useCallback, useEffect, useState } from "preact/hooks";
+import { StateGraph } from "app/calc-state-graph";
+import { IterationsTable } from "app/calc-iterations-table";
+import { Charts } from "app/calc-charts";
+import { RetrospectiveModal } from "app/calc-retrospective-modal";
 import { AgentsPanel } from "app/agents-panel";
 import { Timeline } from "app/timeline";
 import { CalcRoughPanel } from "app/calc-rough-panel";
 import { CalcAuditPanel } from "app/calc-audit-panel";
 import { CalcVizTab } from "app/calc-viz-tab";
+import {
+  getIterations, getCharts, getStateGraph,
+} from "app/calc-runtime-api";
 
 const TABS = [
   { id: "rough",   label: "粗略评估" },
@@ -27,19 +33,47 @@ const TABS = [
   { id: "runtime", label: "运行状态" },
 ];
 
+const withTimeout = (p, ms = 8000) =>
+  Promise.race([
+    p,
+    new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms)),
+  ]);
+
+function useRuntimeData(taskId) {
+  // Fetches iterations / charts / graph — calc-specific endpoints
+  // mounted by calc_value's web_server_handler router.
+  const [data, setData] = useState({
+    iterations: [], charts: null, graph: null,
+  });
+  const refresh = useCallback(async () => {
+    if (!taskId) return;
+    const [it, ch, g] = await Promise.all([
+      withTimeout(getIterations(taskId)).catch((e) => { console.warn("iterations:", e); return []; }),
+      withTimeout(getCharts(taskId)).catch((e) => { console.warn("charts:", e); return null; }),
+      withTimeout(getStateGraph(taskId)).catch((e) => { console.warn("state-graph:", e); return null; }),
+    ]);
+    setData({ iterations: it || [], charts: ch, graph: g });
+  }, [taskId]);
+  useEffect(() => { refresh(); }, [refresh]);
+  useEffect(() => {
+    if (!taskId) return;
+    const id = setInterval(refresh, 5000);
+    return () => clearInterval(id);
+  }, [taskId, refresh]);
+  return { ...data, refresh };
+}
+
 export default function CalcDetailView({
   taskId,
   run,
   status,
   data,
-  onOpenRetro,
 }) {
   const [activeTab, setActiveTab] = useState("rough");
+  const [selectedIter, setSelectedIter] = useState(null);
   const phase = run?.current_phase || "idle";
-  const { iterations, timeline, charts, graph, agents } = data;
-  const retroIter = data.selectedIter != null
-    ? (typeof data.selectedIter === "number" ? data.selectedIter : null)
-    : null;
+  const { timeline, agents } = data;
+  const rt = useRuntimeData(taskId);
 
   const renderTabs = () => html`
     <nav class="task-tabs">
@@ -58,14 +92,14 @@ export default function CalcDetailView({
     <div class="task-grid">
       <section class="panel">
         <h2>State machine</h2>
-        <${StateGraph} graph=${graph} />
+        <${StateGraph} graph=${rt.graph} />
       </section>
       <section class="panel">
         <h2>Iterations <span class="muted">(click for retrospective)</span></h2>
         <${IterationsTable}
-          iterations=${iterations}
-          selectedN=${retroIter}
-          onSelect=${(n) => onOpenRetro && onOpenRetro(n)} />
+          iterations=${rt.iterations}
+          selectedN=${selectedIter}
+          onSelect=${(n) => setSelectedIter(n)} />
       </section>
       <section class="panel">
         <h2>Live sub-agents</h2>
@@ -73,7 +107,7 @@ export default function CalcDetailView({
       </section>
       <section class="panel">
         <h2>Performance &amp; duration</h2>
-        <${Charts} payload=${charts} />
+        <${Charts} payload=${rt.charts} />
       </section>
       <section class="panel timeline-panel">
         <h2>Event timeline</h2>
@@ -98,5 +132,11 @@ export default function CalcDetailView({
   return html`
     ${renderTabs()}
     ${renderBody()}
+    ${selectedIter != null ? html`
+      <${RetrospectiveModal}
+        taskId=${taskId}
+        iteration=${selectedIter}
+        onClose=${() => setSelectedIter(null)} />
+    ` : null}
   `;
 }

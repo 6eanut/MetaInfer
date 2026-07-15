@@ -124,7 +124,7 @@ def _seed_calc_task(client, isolated_env, *, with_rough=False, with_final=False,
 
 def test_calc_rough_pending_when_no_s0(client, isolated_env):
     _register_calc_task(isolated_env["home"] / "tasks" / "ct-1" / "x", "ct-1")
-    resp = client.get("/api/tasks/ct-1/calc/rough")
+    resp = client.get("/api/tasks/ct-1/task/calc/rough")
     assert resp.status_code == 200
     data = resp.json()
     assert data.get("pending") is True
@@ -132,7 +132,7 @@ def test_calc_rough_pending_when_no_s0(client, isolated_env):
 
 def test_calc_rough_returns_canonical_values(client, isolated_env):
     _seed_calc_task(client, isolated_env, with_rough=True)
-    resp = client.get("/api/tasks/ct-1/calc/rough")
+    resp = client.get("/api/tasks/ct-1/task/calc/rough")
     assert resp.status_code == 200
     data = resp.json()
     r0 = data["results"][0]
@@ -147,7 +147,7 @@ def test_calc_rough_ondemand_recompute(client, isolated_env):
     # Note: this script returns FIXED numbers regardless of shape, so the
     # override response should still equal the canonical values. The test
     # verifies the endpoint runs without error and returns a combo field.
-    resp = client.get("/api/tasks/ct-1/calc/rough?batch_size=4&seq_len=2048")
+    resp = client.get("/api/tasks/ct-1/task/calc/rough?batch_size=4&seq_len=2048")
     assert resp.status_code == 200
     data = resp.json()
     assert data["combo"] == {"batch_size": 4, "seq_len": 2048}
@@ -157,7 +157,7 @@ def test_calc_rough_ondemand_recompute(client, isolated_env):
 
 def test_calc_rough_400_on_invalid_shape(client, isolated_env):
     _seed_calc_task(client, isolated_env, with_rough=True)
-    resp = client.get("/api/tasks/ct-1/calc/rough?batch_size=0&seq_len=512")
+    resp = client.get("/api/tasks/ct-1/task/calc/rough?batch_size=0&seq_len=512")
     assert resp.status_code == 400
 
 
@@ -167,7 +167,7 @@ def test_calc_rough_409_for_wrong_task_type(client, isolated_env):
         id="gf-1", type="gen-infer-framework",
         label="x", state_dir=str(state_dir), created_at=0.0,
     ))
-    resp = client.get("/api/tasks/gf-1/calc/rough")
+    resp = client.get("/api/tasks/gf-1/task/calc/rough")
     assert resp.status_code == 409
 
 
@@ -178,7 +178,7 @@ def test_calc_rough_409_for_wrong_task_type(client, isolated_env):
 def test_calc_compute_aggregates_with_repeat_count(client, isolated_env):
     """``totals.prefill.tflops`` should be per-instance * repeat_count."""
     _seed_calc_task(client, isolated_env, with_final=True)
-    resp = client.get("/api/tasks/ct-1/calc/compute?batch_size=1&seq_len=512")
+    resp = client.get("/api/tasks/ct-1/task/calc/compute?batch_size=1&seq_len=512")
     assert resp.status_code == 200
     data = resp.json()
     assert data["totals"]["prefill"]["tflops"] == pytest.approx(50.0 * 512 * 4)
@@ -189,13 +189,13 @@ def test_calc_compute_aggregates_with_repeat_count(client, isolated_env):
 
 def test_calc_compute_400_on_invalid_shape(client, isolated_env):
     _seed_calc_task(client, isolated_env, with_final=True)
-    resp = client.get("/api/tasks/ct-1/calc/compute?batch_size=-1")
+    resp = client.get("/api/tasks/ct-1/task/calc/compute?batch_size=-1")
     assert resp.status_code == 400
 
 
 def test_calc_compute_404_when_no_final(client, isolated_env):
     _register_calc_task(isolated_env["home"] / "tasks" / "ct-1" / "x", "ct-1")
-    resp = client.get("/api/tasks/ct-1/calc/compute")
+    resp = client.get("/api/tasks/ct-1/task/calc/compute")
     assert resp.status_code == 404
 
 
@@ -205,14 +205,14 @@ def test_calc_compute_404_when_no_final(client, isolated_env):
 
 def test_calc_cells_pending_when_no_state(client, isolated_env):
     _register_calc_task(isolated_env["home"] / "tasks" / "ct-1" / "x", "ct-1")
-    resp = client.get("/api/tasks/ct-1/calc/cells")
+    resp = client.get("/api/tasks/ct-1/task/calc/cells")
     assert resp.status_code == 200
     assert resp.json().get("pending") is True
 
 
 def test_calc_cells_returns_state(client, isolated_env):
     _seed_calc_task(client, isolated_env, with_cells_state=True)
-    resp = client.get("/api/tasks/ct-1/calc/cells")
+    resp = client.get("/api/tasks/ct-1/task/calc/cells")
     assert resp.status_code == 200
     data = resp.json()
     node = data["nodes"]["layer__attn"]
@@ -240,7 +240,7 @@ def test_calc_cells_ondemand_recompute(client, isolated_env):
     calc_path_b = workspace_dir / "step3" / "cells" / "layer__attn" / "b" / "round_00" / "writer" / "calc.py"
     calc_path_b.parent.mkdir(parents=True, exist_ok=True)
     calc_path_b.write_text(calc_path.read_text(encoding="utf-8"), encoding="utf-8")
-    resp = client.get("/api/tasks/ct-1/calc/cells?batch_size=1&seq_len=1024")
+    resp = client.get("/api/tasks/ct-1/task/calc/cells?batch_size=1&seq_len=1024")
     assert resp.status_code == 200
     data = resp.json()
     a = data["nodes"]["layer__attn"]["cells"]["a"]
@@ -250,7 +250,7 @@ def test_calc_cells_ondemand_recompute(client, isolated_env):
 
 def test_calc_cell_detail_returns_result(client, isolated_env):
     _seed_calc_task(client, isolated_env, with_cell=True)
-    resp = client.get("/api/tasks/ct-1/calc/cell/layer__attn/a/0")
+    resp = client.get("/api/tasks/ct-1/task/calc/cell/layer__attn/a/0")
     assert resp.status_code == 200
     data = resp.json()
     assert data["compound"] == "layer__attn"
@@ -261,5 +261,5 @@ def test_calc_cell_detail_returns_result(client, isolated_env):
 
 def test_calc_cell_detail_400_on_bad_angle(client, isolated_env):
     _seed_calc_task(client, isolated_env, with_cell=True)
-    resp = client.get("/api/tasks/ct-1/calc/cell/layer__attn/c/0")
+    resp = client.get("/api/tasks/ct-1/task/calc/cell/layer__attn/c/0")
     assert resp.status_code == 400

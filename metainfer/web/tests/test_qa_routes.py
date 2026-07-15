@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import pytest
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
 from metainfer.web import tasks as _tasks
@@ -51,7 +51,13 @@ def fake_plugin(tmp_path, isolated_env) -> WebPlugin:
         created_at=0.0,
     ))
     app = FastAPI()
-    register_qa_routes(app, plugin, prefix="/qa")
+    # Mirror how the shell mounts plugin routers: build a relative
+    # APIRouter and include it under /api/tasks/{task_id}. This
+    # exercises the post-refactor contract (register_qa_routes now
+    # mounts RELATIVE paths onto whatever router/app it receives).
+    router = APIRouter()
+    register_qa_routes(router, plugin, prefix="/qa")
+    app.include_router(router, prefix="/api/tasks/{task_id}")
     plugin._test_app = app  # type: ignore[attr-defined]
     yield plugin
     # Tear down so other tests don't see this plugin / task.

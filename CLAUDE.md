@@ -11,7 +11,7 @@
 ```
 $METAINFER_ROOT/                    (默认 <cwd>)
 └── nodes/
-    └── <node_id>/                  (默认 hostname；$METAINFER_NODE_ID 可覆盖)
+    └── <node_id>/                  (默认 hostname；$METAINFER_NODE_ID 可覆盖。该层级存在是为了后续单平台管控多节点，多节点共享NFS存储。)
         ├── workspaces/             ← 迭代生成产物（结构由 task 包定义）
         │   └── <task_id>/
         └── .metainfer/             ← 元数据 + 日志

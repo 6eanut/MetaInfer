@@ -30,9 +30,13 @@
 </p>
 
 <p align="center">
-  <a href="https://star-history.com/#MetaInfer/MetaInfer&Date">
-    <img src="https://api.star-history.com/svg?repos=MetaInfer/MetaInfer&type=Date" alt="Star History" width="600">
-  </a>
+  <a href="https://www.star-history.com/?type=date&repos=MetaInfer%2FMetaInfer">
+  <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=MetaInfer/MetaInfer&type=date&theme=dark&legend=top-left&sealed_token=7N_57a34GhT7taYXyy9U_E1V_9P1i7A_0PK4Am3dOHxXcNvtk9CuxadGB6B1ZCyS0Zsa2rq_z1U0OmRgz9YDhWs5IaomukOlrF5zq5eapw47cM1rYdOKnQ" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=MetaInfer/MetaInfer&type=date&legend=top-left&sealed_token=7N_57a34GhT7taYXyy9U_E1V_9P1i7A_0PK4Am3dOHxXcNvtk9CuxadGB6B1ZCyS0Zsa2rq_z1U0OmRgz9YDhWs5IaomukOlrF5zq5eapw47cM1rYdOKnQ" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=MetaInfer/MetaInfer&type=date&legend=top-left&sealed_token=7N_57a34GhT7taYXyy9U_E1V_9P1i7A_0PK4Am3dOHxXcNvtk9CuxadGB6B1ZCyS0Zsa2rq_z1U0OmRgz9YDhWs5IaomukOlrF5zq5eapw47cM1rYdOKnQ" />
+ </picture>
+</a>
 </p>
 
 ---
@@ -96,4 +100,22 @@ python -m metainfer.server.app
 
 MIT
 
+## 学术研究
+
+MetaInfer的最初想法和实验数据已经公开在https://arxiv.org/abs/2607.12875，相关代码位于`arxiv-paper`分支。
+
+引用信息：
+```
+@misc{miao2026metainferknowledgellminference,
+      title={MetaInfer: A Knowledge Only LLM Inference Engine Generator SKILL Toolbox}, 
+      author={Zhenwen Miao and Honglin Wang and Mingheng Mi},
+      year={2026},
+      eprint={2607.12875},
+      archivePrefix={arXiv},
+      primaryClass={cs.MA},
+      url={https://arxiv.org/abs/2607.12875}, 
+}
+```
+
+## 如何贡献
 架构细节、设计理念和新任务类型添加方法见 [CONTRIBUTING.md](CONTRIBUTING.md)。

@@ -301,22 +301,25 @@ def append_timeline_event(
 
 
 def reset_state_dir(
-    state_dir: Path, task_id: str, task_type: str,
+    state_dir: Path, workspace_dir: Path, task_id: str, task_type: str,
 ) -> Dict[str, Any]:
-    """Wipe everything in ``state_dir`` except ``requirements.json``.
+    """Wipe everything in ``state_dir`` except ``requirements.json``,
+    and wipe the entire ``workspace_dir``.
 
-    Removes run.json, timeline.jsonl, orchestrator.log, orchestrator.pid,
-    agents.json, and all subdirectories (iterations/, code/, logs/,
-    step0..4/, etc.). Then writes a fresh ``run.json`` matching the
-    RunStatus defaults so the WebUI shows a clean idle state immediately,
-    and stamps a single ``task_reset`` timeline event so the reset itself
-    is auditable.
+    For state_dir: removes run.json, timeline.jsonl, orchestrator.log,
+    orchestrator.pid, agents.json, and all subdirectories (iterations/,
+    logs/, etc.). For workspace_dir: removes the whole tree (iteration
+    code, step outputs) and recreates an empty dir. Then writes a fresh
+    ``run.json`` matching the RunStatus defaults so the WebUI shows a
+    clean idle state immediately, and stamps a single ``task_reset``
+    timeline event so the reset itself is auditable.
 
     Caller MUST ensure the orchestrator is not running — this function
     does not check.
     """
     import shutil
     state_dir = Path(state_dir)
+    workspace_dir = Path(workspace_dir)
     keep = {"requirements.json"}
     removed: List[str] = []
     if state_dir.exists():
@@ -332,6 +335,9 @@ def reset_state_dir(
                 removed.append(p.name + ("/" if is_dir else ""))
             except OSError:
                 pass
+    if workspace_dir.exists():
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
     now = time.time()
     fresh_run = {
         "task_id": task_id,
@@ -352,5 +358,6 @@ def reset_state_dir(
     )
     append_timeline_event(state_dir, "task_reset", {
         "task_id": task_id, "reset_at": now, "removed_count": len(removed),
+        "workspace_reset": True,
     })
-    return {"removed": removed, "run": fresh_run}
+    return {"removed": removed, "workspace_reset": True, "run": fresh_run}

@@ -1,10 +1,12 @@
 """FastAPI route handlers for the calc-theoretical-value task type.
 
 All 11 ``/api/tasks/{task_id}/calc/...`` routes live here. They delegate
-to :mod:`._readers` for disk reads and to :mod:`metainfer.web.qa` for
-the offline-analyst feature. Type guard is enforced at the route layer
-via :func:`metainfer.web._helpers.require_task_type` for safety — the
-``/calc/`` prefix is suggestive but not authoritative.
+to :mod:`._readers` for disk reads (against the task's ``workspace_dir``
+— where step0..step4 outputs physically live) and to
+:mod:`metainfer.web.qa` for the offline-analyst feature (sessions stored
+under the task's ``state_dir``). Type guard is enforced at the route
+layer via :func:`metainfer.web._helpers.require_task_type` for safety —
+the ``/calc/`` prefix is suggestive but not authoritative.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from metainfer.web._helpers import (
     require_task_type,
     state_dir_for,
     task_or_404,
+    workspace_dir_for,
 )
 from . import _readers
 
@@ -29,16 +32,17 @@ def register_routes(app: FastAPI, deps) -> None:
 
     ``deps`` is a :class:`metainfer.web.registry.WebDeps`; we don't
     currently use it (calc routes are fully self-contained against the
-    state_dir), but it's accepted for symmetry with other plugins.
+    state_dir + workspace_dir), but it's accepted for symmetry with
+    other plugins.
     """
 
     @app.get("/api/tasks/{task_id}/calc/graph")
     def calc_graph(task_id: str) -> Dict[str, Any]:
         entry = task_or_404(task_id)
         require_task_type(entry, PLUGIN_TYPE)
-        sd = state_dir_for(entry)
+        wd = workspace_dir_for(entry)
         try:
-            return _readers.read_graph(sd)
+            return _readers.read_graph(wd)
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc))
 
@@ -46,9 +50,9 @@ def register_routes(app: FastAPI, deps) -> None:
     def calc_compute(task_id: str, batch_size: int = 1, seq_len: int = 1) -> Dict[str, Any]:
         entry = task_or_404(task_id)
         require_task_type(entry, PLUGIN_TYPE)
-        sd = state_dir_for(entry)
+        wd = workspace_dir_for(entry)
         try:
-            return _readers.compute(sd, batch_size, seq_len)
+            return _readers.compute(wd, batch_size, seq_len)
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc))
         except ValueError as exc:
@@ -58,9 +62,9 @@ def register_routes(app: FastAPI, deps) -> None:
     def calc_viz(task_id: str) -> HTMLResponse:
         entry = task_or_404(task_id)
         require_task_type(entry, PLUGIN_TYPE)
-        sd = state_dir_for(entry)
+        wd = workspace_dir_for(entry)
         try:
-            return HTMLResponse(_readers.read_viz(sd))
+            return HTMLResponse(_readers.read_viz(wd))
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc))
 
@@ -68,19 +72,19 @@ def register_routes(app: FastAPI, deps) -> None:
     def calc_summary(task_id: str) -> Dict[str, Any]:
         entry = task_or_404(task_id)
         require_task_type(entry, PLUGIN_TYPE)
-        return _readers.read_summary(state_dir_for(entry))
+        return _readers.read_summary(workspace_dir_for(entry))
 
     @app.get("/api/tasks/{task_id}/calc/iterations")
     def calc_iterations(task_id: str) -> Dict[str, Any]:
         entry = task_or_404(task_id)
         require_task_type(entry, PLUGIN_TYPE)
-        return _readers.read_iterations(state_dir_for(entry))
+        return _readers.read_iterations(workspace_dir_for(entry))
 
     @app.get("/api/tasks/{task_id}/calc/rough")
     def calc_rough(task_id: str, request: Request) -> Dict[str, Any]:
         entry = task_or_404(task_id)
         require_task_type(entry, PLUGIN_TYPE)
-        sd = state_dir_for(entry)
+        wd = workspace_dir_for(entry)
         qp = request.query_params
         bs_str = qp.get("batch_size")
         sl_str = qp.get("seq_len")
@@ -97,7 +101,7 @@ def register_routes(app: FastAPI, deps) -> None:
             except ValueError:
                 raise HTTPException(400, "batch_size / seq_len must be integers")
         try:
-            return _readers.read_rough(sd, bs, sl)
+            return _readers.read_rough(wd, bs, sl)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
 
@@ -105,7 +109,7 @@ def register_routes(app: FastAPI, deps) -> None:
     def calc_cells(task_id: str, request: Request) -> Dict[str, Any]:
         entry = task_or_404(task_id)
         require_task_type(entry, PLUGIN_TYPE)
-        sd = state_dir_for(entry)
+        wd = workspace_dir_for(entry)
         qp = request.query_params
         bs_str = qp.get("batch_size")
         sl_str = qp.get("seq_len")
@@ -122,7 +126,7 @@ def register_routes(app: FastAPI, deps) -> None:
             except ValueError:
                 raise HTTPException(400, "batch_size / seq_len must be integers")
         try:
-            return _readers.read_cells(sd, bs, sl)
+            return _readers.read_cells(wd, bs, sl)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
 
@@ -132,9 +136,9 @@ def register_routes(app: FastAPI, deps) -> None:
     ) -> Dict[str, Any]:
         entry = task_or_404(task_id)
         require_task_type(entry, PLUGIN_TYPE)
-        sd = state_dir_for(entry)
+        wd = workspace_dir_for(entry)
         try:
-            return _readers.read_cell_detail(sd, compound, angle, round_idx)
+            return _readers.read_cell_detail(wd, compound, angle, round_idx)
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc))
         except ValueError as exc:
@@ -147,7 +151,9 @@ def register_routes(app: FastAPI, deps) -> None:
     # follow-up question. A fresh ccb subprocess (the "analyst") is
     # spawned with read access to the agent's events.jsonl transcript;
     # the analyst answers based on what the original agent actually
-    # did. See metainfer/web/qa.py for lifecycle / storage.
+    # did. QA sessions are stored under state_dir (metadata), so we
+    # use state_dir_for here rather than workspace_dir_for. See
+    # metainfer/web/qa.py for lifecycle / storage.
 
     @app.post("/api/tasks/{task_id}/calc/qa/start")
     def calc_qa_start(task_id: str, body: dict) -> Dict[str, Any]:

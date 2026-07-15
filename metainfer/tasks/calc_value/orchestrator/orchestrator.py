@@ -50,18 +50,24 @@ from .pipeline import run_pipeline
 # State directory layout
 # --------------------------------------------------------------------------- #
 
-def _task_subdirs(state_dir: Path) -> Dict[str, Path]:
-    """Create and return the canonical paths under ``state_dir``."""
+def _task_subdirs(state_dir: Path, workspace_dir: Path) -> Dict[str, Path]:
+    """Create and return the canonical paths for this task.
+
+    ``state_dir`` holds metadata (run.json, timeline.jsonl, agents.json,
+    requirements.json, orchestrator.pid/log). ``workspace_dir`` holds
+    the step0..step4 outputs the agents generate."""
     state_dir.mkdir(parents=True, exist_ok=True)
-    step0 = state_dir / "step0"
-    step1 = state_dir / "step1"
-    step2 = state_dir / "step2"
-    step3 = state_dir / "step3"
-    step4 = state_dir / "step4"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    step0 = workspace_dir / "step0"
+    step1 = workspace_dir / "step1"
+    step2 = workspace_dir / "step2"
+    step3 = workspace_dir / "step3"
+    step4 = workspace_dir / "step4"
     for p in (step0, step1, step2, step3, step4):
         p.mkdir(parents=True, exist_ok=True)
     return {
         "state_dir": state_dir,
+        "workspace_dir": workspace_dir,
         "requirements": state_dir / "requirements.json",
         "pid_file": state_dir / "orchestrator.pid",
         "log_file": state_dir / "orchestrator.log",
@@ -114,6 +120,7 @@ def run_with_requirements(
     requirements_path: Path,
     *,
     state_dir: Optional[Path] = None,
+    workspace_dir: Optional[Path] = None,
     claude_bin: str = "ccb",
     model: Optional[str] = None,
     permission_mode: str = "bypassPermissions",
@@ -130,9 +137,13 @@ def run_with_requirements(
     # Friendly process name (kernel comm, 15-char limit).
     set_process_name("metainfer-cv-orch")
 
-    if state_dir is None:
-        state_dir = Path.cwd() / ".metainfer" / "tasks" / task_id
-    paths = _task_subdirs(state_dir)
+    if state_dir is None or workspace_dir is None:
+        from metainfer.web import paths as _web_paths
+        if state_dir is None:
+            state_dir = _web_paths.task_dir(task_id)
+        if workspace_dir is None:
+            workspace_dir = _web_paths.workspace_dir(task_id)
+    paths = _task_subdirs(state_dir, workspace_dir)
 
     # Copy requirements into state_dir if invoked from elsewhere.
     target_req = paths["requirements"]
@@ -164,13 +175,14 @@ def run_with_requirements(
         return 2
 
     # Extra add-dirs: every agent can read the model files, the framework
-    # source, and the repo root (so agents can read the calc_value package
-    # itself if needed for context). calc_value has no knowledge base of
-    # its own — it works off the user's model + framework source directly.
+    # source, the workspace (so agents can write step outputs), and the
+    # repo root (so agents can read the calc_value package itself if
+    # needed for context). calc_value has no knowledge base of its own —
+    # it works off the user's model + framework source directly.
     repo_root = _orch_paths.repo_root()
     model_dir = Path(req["model_dir"]).resolve()
     framework_dir = Path(req["framework_source_dir"]).resolve()
-    extra_add_dirs = [repo_root, model_dir, framework_dir]
+    extra_add_dirs = [repo_root, workspace_dir, model_dir, framework_dir]
 
     store = StateStore(state_dir)
     rs, is_resume = store.init_or_resume(task_id, "calc-theoretical-value")
@@ -195,6 +207,7 @@ def run_with_requirements(
 
     print(f"[calc-value] task_id        = {task_id}")
     print(f"[calc-value] state dir      = {state_dir}")
+    print(f"[calc-value] workspace dir  = {workspace_dir}")
     print(f"[calc-value] model dir      = {model_dir}")
     print(f"[calc-value] framework dir  = {framework_dir}")
     print(f"[calc-value] resume         = {is_resume}")

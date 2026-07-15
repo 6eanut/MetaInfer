@@ -5,19 +5,20 @@ the readers from the FastAPI handlers makes them unit-testable without
 spinning up an ASGI client.
 
 The functions read artifacts produced by the calc_value orchestrator's
-4-step pipeline::
+4-step pipeline. All step0..step4 outputs live under the task's
+``workspace_dir`` (NOT the metadata-only ``state_dir``)::
 
-    step0/agent_rough/per_node/<compound>.py
-    step0/rough_results.json
-    step1/round_NN/agent_X/memory.json
-    step1/memory.round_NN.json
-    step2/graph.json
-    step2/rounds/<NN>_<build|validate|fix>/...
-    step3/final/<compound>.py
-    step3/final/<compound>.meta.json
-    step3/cells/_state.json
-    step3/cells/<compound>/<angle>/round_NN/writer/calc.py
-    step4/viz.html
+    <workspace>/step0/agent_rough/per_node/<compound>.py
+    <workspace>/step0/rough_results.json
+    <workspace>/step1/round_NN/agent_X/memory.json
+    <workspace>/step1/memory.round_NN.json
+    <workspace>/step2/graph.json
+    <workspace>/step2/rounds/<NN>_<build|validate|fix>/...
+    <workspace>/step3/final/<compound>.py
+    <workspace>/step3/final/<compound>.meta.json
+    <workspace>/step3/cells/_state.json
+    <workspace>/step3/cells/<compound>/<angle>/round_NN/writer/calc.py
+    <workspace>/step4/viz.html
 """
 
 from __future__ import annotations
@@ -40,34 +41,34 @@ def _det():
 # Step-level readers
 # --------------------------------------------------------------------------- #
 
-def read_graph(state_dir: Path) -> Dict[str, Any]:
+def read_graph(workspace_dir: Path) -> Dict[str, Any]:
     """Return step2/graph.json verbatim. Raises FileNotFoundError if
     not built yet."""
-    graph_path = state_dir / "step2" / "graph.json"
+    graph_path = workspace_dir / "step2" / "graph.json"
     if not graph_path.exists():
         raise FileNotFoundError("graph.json not built yet")
     return json.loads(graph_path.read_text(encoding="utf-8"))
 
 
-def read_viz(state_dir: Path) -> str:
+def read_viz(workspace_dir: Path) -> str:
     """Return step4/viz.html as a string. Raises FileNotFoundError."""
-    viz_path = state_dir / "step4" / "viz.html"
+    viz_path = workspace_dir / "step4" / "viz.html"
     if not viz_path.exists():
         raise FileNotFoundError("viz.html not built yet")
     return viz_path.read_text(encoding="utf-8")
 
 
-def read_summary(state_dir: Path) -> Dict[str, Any]:
+def read_summary(workspace_dir: Path) -> Dict[str, Any]:
     """Step-by-step pipeline progress for the calc-value task."""
     out: Dict[str, Any] = {"steps": {}}
     # Step 1
-    s1 = state_dir / "step1" / "memory.json"
+    s1 = workspace_dir / "step1" / "memory.json"
     out["steps"]["s1_analyze"] = {
         "done": s1.exists(),
         "memory_path": str(s1) if s1.exists() else None,
     }
     # Step 2
-    s2 = state_dir / "step2" / "graph.json"
+    s2 = workspace_dir / "step2" / "graph.json"
     graph_node_count = 0          # template nodes (per-section)
     aggregated_node_count = 0     # × repeat_count
     section_count = 0
@@ -102,7 +103,7 @@ def read_summary(state_dir: Path) -> Dict[str, Any]:
         "sections": sections_summary,
     }
     # Step 3
-    final_dir = state_dir / "step3" / "final"
+    final_dir = workspace_dir / "step3" / "final"
     calc_scripts = list(final_dir.glob("*.py")) if final_dir.exists() else []
     out["steps"]["s3_calculate"] = {
         "done": len(calc_scripts) > 0,
@@ -110,7 +111,7 @@ def read_summary(state_dir: Path) -> Dict[str, Any]:
         "node_count": len(calc_scripts),
     }
     # Step 4
-    s4 = state_dir / "step4" / "viz.html"
+    s4 = workspace_dir / "step4" / "viz.html"
     out["steps"]["s4_visualize"] = {
         "done": s4.exists(),
         "viz_path": str(s4) if s4.exists() else None,
@@ -118,7 +119,7 @@ def read_summary(state_dir: Path) -> Dict[str, Any]:
     return out
 
 
-def read_iterations(state_dir: Path) -> Dict[str, Any]:
+def read_iterations(workspace_dir: Path) -> Dict[str, Any]:
     """Per-round, per-agent analysis results for every step.
 
     Surfaces each agent's individual output (including disagreements)
@@ -128,7 +129,7 @@ def read_iterations(state_dir: Path) -> Dict[str, Any]:
     out: Dict[str, Any] = {"s1_analyze": [], "s2_graph": [], "s3_calculate": []}
 
     # ---- Step 1: round_NN/agent_X/memory.json ----
-    s1 = state_dir / "step1"
+    s1 = workspace_dir / "step1"
     if s1.exists():
         rounds = sorted(d for d in s1.iterdir() if d.is_dir()
                         and d.name.startswith("round_"))
@@ -186,7 +187,7 @@ def read_iterations(state_dir: Path) -> Dict[str, Any]:
             })
 
     # ---- Step 2: rounds/<NN>_(validate|fix|build)/ ----
-    s2 = state_dir / "step2"
+    s2 = workspace_dir / "step2"
     if s2.exists():
         rroot = s2 / "rounds"
         if rroot.exists():
@@ -270,7 +271,7 @@ def read_iterations(state_dir: Path) -> Dict[str, Any]:
                 out["s2_graph"].append(entry_rec)
 
     # ---- Step 3: rounds/<node>/round_NN/writer_X/ ----
-    s3 = state_dir / "step3" / "rounds"
+    s3 = workspace_dir / "step3" / "rounds"
     if s3.exists():
         nodes = []
         for ndir in sorted(s3.iterdir()):
@@ -283,7 +284,7 @@ def read_iterations(state_dir: Path) -> Dict[str, Any]:
             # Compound id is ``<section_id>__<node_id>`` (sanitized).
             # Resolve the bare node_id + section context from the
             # sibling final/<compound>.meta.json if present.
-            meta_p = state_dir / "step3" / "final" / f"{ndir.name}.meta.json"
+            meta_p = workspace_dir / "step3" / "final" / f"{ndir.name}.meta.json"
             if meta_p.exists():
                 try:
                     m = json.loads(meta_p.read_text(encoding="utf-8"))
@@ -347,7 +348,7 @@ def read_iterations(state_dir: Path) -> Dict[str, Any]:
 # Compute (deterministic, on-the-fly)
 # --------------------------------------------------------------------------- #
 
-def compute(state_dir: Path, batch_size: int, seq_len: int) -> Dict[str, Any]:
+def compute(workspace_dir: Path, batch_size: int, seq_len: int) -> Dict[str, Any]:
     """Run every per-compound calc.py at the given shape and return
     per-instance numbers keyed by compound_id, split into prefill and
     decode phases. Totals are aggregated as
@@ -357,7 +358,7 @@ def compute(state_dir: Path, batch_size: int, seq_len: int) -> Dict[str, Any]:
     """
     if batch_size <= 0 or seq_len <= 0:
         raise ValueError("batch_size and seq_len must be positive")
-    final_dir = state_dir / "step3" / "final"
+    final_dir = workspace_dir / "step3" / "final"
     if not final_dir.exists():
         raise FileNotFoundError("calc scripts not built yet")
     _d = _det()
@@ -461,7 +462,7 @@ def compute(state_dir: Path, batch_size: int, seq_len: int) -> Dict[str, Any]:
 # Step 0 rough + step 3 streaming cells (with optional shape recompute)
 # --------------------------------------------------------------------------- #
 
-def read_rough(state_dir: Path, batch_size: Optional[int], seq_len: Optional[int]) -> Dict[str, Any]:
+def read_rough(workspace_dir: Path, batch_size: Optional[int], seq_len: Optional[int]) -> Dict[str, Any]:
     """Return the S0 rough-pass estimate.
 
     Reads ``step0/rough_results.json``. Returns an empty placeholder
@@ -473,7 +474,7 @@ def read_rough(state_dir: Path, batch_size: Optional[int], seq_len: Optional[int
     ``tflops_picked`` / ``gb_picked``) fields. The on-disk file is
     never modified.
     """
-    rough = state_dir / "step0" / "rough_results.json"
+    rough = workspace_dir / "step0" / "rough_results.json"
     if not rough.exists():
         return {"ok": False, "pending": True, "results": [], "graph": {"sections": []}}
     try:
@@ -492,7 +493,7 @@ def read_rough(state_dir: Path, batch_size: Optional[int], seq_len: Optional[int
 
     # On-demand recompute at the requested shape.
     _d = _det()
-    per_node_dir = state_dir / "step0" / "agent_rough" / "per_node"
+    per_node_dir = workspace_dir / "step0" / "agent_rough" / "per_node"
     for row in data.get("results") or []:
         if not isinstance(row, dict) or not row.get("ok"):
             continue
@@ -521,14 +522,14 @@ def read_rough(state_dir: Path, batch_size: Optional[int], seq_len: Optional[int
     return data
 
 
-def read_cells(state_dir: Path, batch_size: Optional[int], seq_len: Optional[int]) -> Dict[str, Any]:
+def read_cells(workspace_dir: Path, batch_size: Optional[int], seq_len: Optional[int]) -> Dict[str, Any]:
     """Return the S3 streaming cell-state grid.
 
     Reads ``step3/cells/_state.json``. Returns an empty shell if S3
     hasn't started. Optional shape override recomputes each cell on
     the fly; the on-disk file is never modified.
     """
-    state = state_dir / "step3" / "cells" / "_state.json"
+    state = workspace_dir / "step3" / "cells" / "_state.json"
     if not state.exists():
         return {"round": 0, "nodes": {}, "pending": True}
     try:
@@ -545,7 +546,7 @@ def read_cells(state_dir: Path, batch_size: Optional[int], seq_len: Optional[int
         raise ValueError("batch_size / seq_len must be >= 1")
 
     _d = _det()
-    cells_root = state_dir / "step3" / "cells"
+    cells_root = workspace_dir / "step3" / "cells"
     nodes = data.get("nodes") or {}
     for compound, node in nodes.items():
         cells = node.get("cells") or {}
@@ -584,7 +585,7 @@ def read_cells(state_dir: Path, batch_size: Optional[int], seq_len: Optional[int
 
 
 def read_cell_detail(
-    state_dir: Path, compound: str, angle: str, round_idx: int,
+    workspace_dir: Path, compound: str, angle: str, round_idx: int,
 ) -> Dict[str, Any]:
     """Return one cell's full detail: calc.py source, response.txt
     (agent thinking), result.json (single canonical-shape record), and
@@ -593,7 +594,7 @@ def read_cell_detail(
     """
     if angle not in ("a", "b"):
         raise ValueError("angle must be one of a / b")
-    cell_dir = state_dir / "step3" / "cells" / compound / angle / f"round_{round_idx:02d}"
+    cell_dir = workspace_dir / "step3" / "cells" / compound / angle / f"round_{round_idx:02d}"
     if not cell_dir.exists():
         raise FileNotFoundError(
             f"cell not found: {compound}/{angle}/round_{round_idx:02d}"
@@ -627,7 +628,7 @@ def read_cell_detail(
     siblings: Dict[str, Any] = {}
     for a in ("a", "b"):
         sib_result_path = (
-            state_dir / "step3" / "cells" / compound / a
+            workspace_dir / "step3" / "cells" / compound / a
             / f"round_{round_idx:02d}" / "result.json"
         )
         if sib_result_path.exists():

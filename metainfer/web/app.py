@@ -35,6 +35,7 @@ from . import tasks as _tasks
 from ._helpers import (
     state_dir_for as _state_dir_for,
     task_or_404 as _task_or_404,
+    workspace_dir_for as _workspace_dir_for,
 )
 from .registry import WebDeps as _WebDeps
 from .registry import all_plugins as _all_web_plugins
@@ -157,6 +158,10 @@ def create_app() -> FastAPI:
         task_id = _tasks.gen_task_id(task_type, label)
         sd = _paths.task_dir(task_id)
         sd.mkdir(parents=True, exist_ok=True)
+        # Workspace dir holds generated artifacts (gf iteration code,
+        # calc_value step outputs); state_dir holds metadata + logs.
+        wd = _paths.workspace_dir(task_id)
+        wd.mkdir(parents=True, exist_ok=True)
         # Build the requirements.json the orchestrator will read.
         meta = _forms.TASK_TYPE_META.get(task_type, {})
         requirements = {
@@ -169,19 +174,21 @@ def create_app() -> FastAPI:
         # Register first (so list view picks it up even if spawn fails).
         entry = _tasks.TaskEntry(
             id=task_id, type=task_type, label=label or meta.get("label", task_id),
-            state_dir=str(sd), created_at=time.time(), launcher="local",
+            state_dir=str(sd), workspace_dir=str(wd),
+            created_at=time.time(), launcher="local",
         )
         _tasks.add_task(entry)
         # Spawn the orchestrator.
         launcher = _launcher.get_default_launcher()
         try:
-            pid = launcher.start(task_id, requirements, sd, extra_args=extra_args)
+            pid = launcher.start(task_id, requirements, sd, wd, extra_args=extra_args)
         except Exception as e:  # noqa: BLE001
             # Spawn failed — keep the registration so the user can see
             # the error in the UI, but mark as not running.
             _tasks.update_task(task_id, pid=None, finished_at=time.time())
             raise HTTPException(500, detail={"error": f"spawn failed: {e!r}"})
-        return {"task_id": task_id, "pid": pid, "state_dir": str(sd)}
+        return {"task_id": task_id, "pid": pid,
+                "state_dir": str(sd), "workspace_dir": str(wd)}
 
     @app.delete("/api/tasks/{task_id}")
     def delete_task(task_id: str, purge: bool = False) -> Dict[str, Any]:
@@ -190,13 +197,17 @@ def create_app() -> FastAPI:
         launcher = _launcher.get_default_launcher()
         if launcher.status(task_id).running:
             launcher.kill(task_id, force=True)
-        # Optionally remove state_dir from disk.
+        # Optionally remove state_dir + workspace_dir from disk.
         removed_files = False
         if purge:
             import shutil
             sd = Path(entry.state_dir)
             if sd.exists():
                 shutil.rmtree(sd, ignore_errors=True)
+                removed_files = True
+            wd = _workspace_dir_for(entry)
+            if wd.exists():
+                shutil.rmtree(wd, ignore_errors=True)
                 removed_files = True
         _tasks.remove_task(task_id)
         return {"removed_from_registry": True, "purged_files": removed_files}
@@ -244,7 +255,8 @@ def create_app() -> FastAPI:
                 # handler calls manager.shutdown() before os._exit(),
                 # which can take a moment if sub-agents are mid-call.
                 await asyncio.sleep(0.5)
-            pid = launcher.start(task_id, req, sd)
+            wd = _workspace_dir_for(entry)
+            pid = launcher.start(task_id, req, sd, wd)
             return {
                 "ok": True, "action": "restart", "pid": pid,
                 "prior_status": prior_status,
@@ -261,7 +273,8 @@ def create_app() -> FastAPI:
             prior_run = _sr.read_run(sd) or {}
             tid = prior_run.get("task_id") or task_id
             ttype = prior_run.get("task_type") or entry.type
-            summary = _sr.reset_state_dir(sd, tid, ttype)
+            wd = _workspace_dir_for(entry)
+            summary = _sr.reset_state_dir(sd, wd, tid, ttype)
             # Note: we deliberately don't touch the registry here — the
             # stale pid/finished_at values are inert because launcher.status
             # reads the (now-wiped) pid file and reports "not running".

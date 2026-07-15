@@ -41,7 +41,9 @@ def main(argv: list[str] | None = None) -> int:
     run_p = sub.add_parser("run", help="Run the calc-value orchestrator")
     run_p.add_argument("requirements", type=Path, help="Path to requirements.json")
     run_p.add_argument("--state-dir", type=Path, default=None,
-                       help="Where to put task artifacts.")
+                       help="Metadata dir (run.json, timeline.jsonl, agents.json, etc.).")
+    run_p.add_argument("--workspace-dir", type=Path, default=None,
+                       help="Generated-artifacts dir (step0..step4 outputs).")
     run_p.add_argument("--claude-bin", default=None)
     run_p.add_argument("--permission-mode", default=None,
                        choices=_VALID_PERMISSION_MODES)
@@ -56,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_with_requirements(
             requirements_path=args.requirements,
             state_dir=args.state_dir,
+            workspace_dir=args.workspace_dir,
             claude_bin=_resolve(args.claude_bin, "METAINFER_CLAUDE_BIN", DEFAULT_CLAUDE_BIN),
             permission_mode=_resolve(args.permission_mode, "METAINFER_PERMISSION_MODE",
                                      DEFAULT_PERMISSION_MODE, _VALID_PERMISSION_MODES),

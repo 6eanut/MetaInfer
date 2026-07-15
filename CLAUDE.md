@@ -5,6 +5,44 @@
 - web server是项目入口，各个功能是独立的编排器进程，每个编排器各自编排自己的agent，agent执行后将数据存储到文件系统，web server读取落盘的文件并在前端展示。web server和编排器解耦，分别可以各自独立重启，任意一方重启后都可以继续恢复原来的工作。
   - 该设计为日后一个控制平台管理多机器、多节点任务打下基础，多结点之间通过共享文件系统来传递状态信息。 
 
+## 运行时目录结构
+
+每个 task 在磁盘上占**两个并列子树**：workspace（用户关心的迭代生成产物）和 state_dir（元数据 + 日志 + prompt 等中间产物），都挂在当前节点 `nodes/<hostname>/` 下。最外层是 `METAINFER_ROOT`（默认 `<cwd>`，多节点共享文件系统时指向共享挂载点）。
+
+```
+$METAINFER_ROOT/                                (默认 <cwd>；多节点用共享挂载点)
+└── nodes/
+    └── <hostname>/                             (或 $METAINFER_NODE_ID)
+        ├── workspaces/                         ← 迭代生成产物（用户视角的"成果"）
+        │   └── <task_id>/
+        │       ├── (gen-infer-framework)
+        │       │   ├── 001/                    ← 迭代 N 的框架代码
+        │       │   └── 002/
+        │       └── (calc-theoretical-value)
+        │           ├── step0/ … step4/
+        │
+        └── .metainfer/                         ← 元数据 + 日志 + prompt 中间产物
+            ├── registry.json                   ← 全局任务清单（带 workspace_dir 字段）
+            ├── runtime.json
+            └── tasks/
+                └── <task_id>/
+                    ├── requirements.json
+                    ├── run.json
+                    ├── timeline.jsonl
+                    ├── orchestrator.{pid,log}
+                    ├── agents.json
+                    ├── token_budget.json
+                    ├── iterations/*.json       (gf only)
+                    └── logs/<NNN>/             (gf only — prompt / oracle / server 日志)
+```
+
+关键不变性：
+- workspace_dir 由 orchestrator 写、用户读；.metainfer 由 orchestrator + WebUI 协同写。
+- WebUI 重置任务时**同时**清两个目录（`reset_state_dir(state_dir, workspace_dir, ...)`）。
+- Orchestrator CLI 必须显式接受 `--state-dir` **和** `--workspace-dir`；launcher 同时传两个。
+- 多节点场景：每个节点只写自己的 `nodes/<hostname>/`，中央控制器扫 `nodes/*/` 看全局。
+- **不支持向后兼容**：老的单层 `state_dir/code/` 布局作废；in-flight 任务 reset 重建。
+
 ## 关于项目测试
 
 - 每一个修改都要编写对应的测试用例。模块编写独立的测试用例，重要函数编写内联的unit test或者doc test。涉及到Agent操作的地方，使用Mock的Agent进行测试。

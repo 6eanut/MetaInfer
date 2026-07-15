@@ -57,18 +57,23 @@ _NOTEBOOKS_DIR = Path(__file__).resolve().parent.parent / "notebooks"
 #       └── 002/
 
 
-def _task_subdirs(state_dir: Path) -> Dict[str, Path]:
-    """Return the canonical sub-paths under ``state_dir``. All directories
-    are created on first call."""
+def _task_subdirs(state_dir: Path, workspace_dir: Path) -> Dict[str, Path]:
+    """Return the canonical sub-paths for this task.
+
+    ``state_dir`` holds metadata + logs (run.json, timeline.jsonl,
+    agents.json, requirements.json, orchestrator.pid/log, iterations/*.json,
+    logs/<NNN>/). ``workspace_dir`` holds generated iteration code
+    (001/, 002/, ...). Both are created on first call."""
     state_dir.mkdir(parents=True, exist_ok=True)
-    code = state_dir / "code"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
     logs = state_dir / "logs"
     iterations_state = state_dir / "iterations"
-    for p in (code, logs, iterations_state):
+    for p in (logs, iterations_state):
         p.mkdir(parents=True, exist_ok=True)
     return {
         "state_dir": state_dir,
-        "code_root": code,
+        "workspace_dir": workspace_dir,
+        "code_root": workspace_dir,  # iteration code goes directly under workspace/
         "logs_root": logs,
         "iterations_state": iterations_state,
         "requirements": state_dir / "requirements.json",
@@ -84,6 +89,7 @@ def run_with_requirements(
     requirements_path: Path,
     *,
     state_dir: Optional[Path] = None,
+    workspace_dir: Optional[Path] = None,
     claude_bin: str = "ccb",
     model: Optional[str] = None,
     permission_mode: str = "bypassPermissions",
@@ -98,8 +104,10 @@ def run_with_requirements(
     ``requirements_path`` is the same file), runs the ABCDEF loop to
     completion, and exits.
 
-    All artifacts go under ``state_dir`` (or a default location derived
-    from CWD if not provided — kept for ad-hoc CLI debugging).
+    Artifacts split between ``state_dir`` (metadata + logs) and
+    ``workspace_dir`` (generated iteration code). Defaults are derived
+    under ``<cwd>/nodes/<host>/`` so ad-hoc CLI usage works without
+    the WebUI; the WebUI always passes both explicitly.
     """
     if not requirements_path.exists():
         raise FileNotFoundError(f"requirements file not found: {requirements_path}")
@@ -114,12 +122,16 @@ def run_with_requirements(
     # truncates to 15 chars anyway; this is already 14).
     set_process_name("metainfer-orch")
 
-    # Resolve state_dir. Default: <cwd>/.metainfer/tasks/<task_id>/ — keeps
-    # ad-hoc CLI usage working without the WebUI. The WebUI always passes
-    # an explicit state_dir under ~/.metainfer/tasks/<id>/.
-    if state_dir is None:
-        state_dir = Path.cwd() / ".metainfer" / "tasks" / task_id
-    paths = _task_subdirs(state_dir)
+    # Resolve state_dir + workspace_dir. Defaults derive from the WebUI's
+    # path module so an ad-hoc CLI invocation lands in the same place
+    # the WebUI would have put it.
+    if state_dir is None or workspace_dir is None:
+        from metainfer.web import paths as _web_paths
+        if state_dir is None:
+            state_dir = _web_paths.task_dir(task_id)
+        if workspace_dir is None:
+            workspace_dir = _web_paths.workspace_dir(task_id)
+    paths = _task_subdirs(state_dir, workspace_dir)
 
     # Copy requirements into state_dir if invoked from elsewhere so the
     # task is fully self-contained (WebUI re-reads it from there).
@@ -193,9 +205,11 @@ def run_with_requirements(
         #     (metainfer/tasks/gen_infer_framework/notebooks/), which every
         #     prompt tells agents to consult
         #   - repo_root: so prompts can reference paths under the install
+        #   - workspace_dir: where iteration code (001/, 002/, ...) lives —
+        #     agents write here, the sandbox needs to allow it explicitly
         #   - logs_root: where reviewer writes review.md and where the
         #     prev-iter diagnostic snapshot lives
-        extra_add_dirs=[notebooks_dir, repo_root, logs_root],
+        extra_add_dirs=[notebooks_dir, repo_root, workspace_dir, logs_root],
         snapshot_file=paths["agents_file"],
         budget=budget,
     )
@@ -211,6 +225,7 @@ def run_with_requirements(
 
     print(f"[metainfer] task_id        = {task_id}")
     print(f"[metainfer] state dir      = {state_dir}")
+    print(f"[metainfer] workspace dir  = {workspace_dir}")
     print(f"[metainfer] code dir       = {iterations_root}")
     print(f"[metainfer] logs dir       = {logs_root}")
     print(f"[metainfer] notebooks      = {notebooks_dir}")

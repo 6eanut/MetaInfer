@@ -65,7 +65,8 @@ class Launcher(Protocol):
     via subprocess; RemoteLauncher (future) will implement it via HTTP."""
 
     def start(self, task_id: str, requirements: Dict[str, Any],
-              state_dir: Path, extra_args: Optional[list] = None) -> int: ...
+              state_dir: Path, workspace_dir: Path,
+              extra_args: Optional[list] = None) -> int: ...
     def status(self, task_id: str) -> ProcStatus: ...
     def kill(self, task_id: str, force: bool = False) -> bool: ...
 
@@ -83,7 +84,8 @@ def _python_executable() -> str:
 
 
 def _orchestrator_cmd(
-    requirements_path: Path, state_dir: Path, extra_args: Optional[list] = None,
+    requirements_path: Path, state_dir: Path, workspace_dir: Path,
+    extra_args: Optional[list] = None,
     task_type: Optional[str] = None,
 ) -> list:
     """Build the orchestrator command line.
@@ -94,6 +96,10 @@ def _orchestrator_cmd(
     fallback. An unknown task_type is a bug (typo in requirements.json
     or a missing registry entry), and we'd rather fail at dispatch than
     silently run the wrong pipeline.
+
+    The orchestrator receives BOTH ``--state-dir`` (metadata + logs) and
+    ``--workspace-dir`` (generated artifacts) — they're parallel trees
+    under the per-node root; see :mod:`metainfer.web.paths`.
 
     Note: ``args[0]`` is set to ``metainfer-orchestrator`` rather than
     the python binary path. This makes the process trivially findable
@@ -112,6 +118,7 @@ def _orchestrator_cmd(
         "-m", entry.cli_module,
         "run", str(requirements_path),
         "--state-dir", str(state_dir),
+        "--workspace-dir", str(workspace_dir),
     ]
     if extra_args:
         cmd += list(extra_args)
@@ -165,9 +172,11 @@ class LocalLauncher:
         task_id: str,
         requirements: Dict[str, Any],
         state_dir: Path,
+        workspace_dir: Path,
         extra_args: Optional[list] = None,
     ) -> int:
         state_dir.mkdir(parents=True, exist_ok=True)
+        workspace_dir.mkdir(parents=True, exist_ok=True)
         req_path = state_dir / "requirements.json"
         import json
         req_path.write_text(json.dumps(requirements, indent=2), encoding="utf-8")
@@ -176,7 +185,7 @@ class LocalLauncher:
         log_fp = open(log_path, "ab", buffering=0)
 
         try:
-            cmd = _orchestrator_cmd(req_path, state_dir, extra_args,
+            cmd = _orchestrator_cmd(req_path, state_dir, workspace_dir, extra_args,
                                     task_type=requirements.get("task_type"))
         except (KeyError, ValueError) as exc:
             # Unknown / missing task_type — surface a clear error rather

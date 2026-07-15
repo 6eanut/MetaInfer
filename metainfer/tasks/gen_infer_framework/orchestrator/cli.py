@@ -81,9 +81,21 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help=(
-            "Where to put all task artifacts (state, code, logs). Default: "
-            "<cwd>/.metainfer/tasks/<task_id>/. The WebUI passes an "
-            "explicit --state-dir under ~/.metainfer/tasks/<id>/."
+            "Metadata dir (run.json, timeline.jsonl, logs/, iterations/*.json, "
+            "orchestrator.pid/log, agents.json). Default: derived under "
+            "<cwd>/nodes/<host>/.metainfer/tasks/<task_id>/. The WebUI always "
+            "passes an explicit --state-dir."
+        ),
+    )
+    run_p.add_argument(
+        "--workspace-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Generated-artifacts dir (iteration code: 001/, 002/, ...). "
+            "Parallel to --state-dir but lives under <cwd>/nodes/<host>/"
+            "workspaces/<task_id>/. The WebUI always passes an explicit "
+            "--workspace-dir."
         ),
     )
     run_p.add_argument(
@@ -125,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_with_requirements(
             requirements_path=args.requirements,
             state_dir=args.state_dir,
+            workspace_dir=args.workspace_dir,
             claude_bin=_resolve_claude_bin(args.claude_bin),
             permission_mode=_resolve_permission_mode(args.permission_mode),
             model=args.model,

@@ -15,11 +15,17 @@ from metainfer.web import tasks as _tasks
 from metainfer.web.tasks import TaskEntry
 
 
-def _register_calc_task(state_dir: Path, task_id: str = "ct-1") -> TaskEntry:
+def _register_calc_task(
+    state_dir: Path, task_id: str = "ct-1", *, workspace_dir: Path | None = None,
+) -> TaskEntry:
     state_dir.mkdir(parents=True, exist_ok=True)
+    if workspace_dir is None:
+        workspace_dir = state_dir
+    workspace_dir.mkdir(parents=True, exist_ok=True)
     entry = TaskEntry(
         id=task_id, type="calc-theoretical-value",
-        label="test calc task", state_dir=str(state_dir), created_at=0.0,
+        label="test calc task", state_dir=str(state_dir),
+        workspace_dir=str(workspace_dir), created_at=0.0,
     )
     _tasks.add_task(entry)
     return entry
@@ -27,11 +33,17 @@ def _register_calc_task(state_dir: Path, task_id: str = "ct-1") -> TaskEntry:
 
 def _seed_calc_task(client, isolated_env, *, with_rough=False, with_final=False,
                     with_cells_state=False, with_cell=False):
-    """Register a calc task + materialize the requested artifacts."""
+    """Register a calc task + materialize the requested artifacts.
+
+    Step0..step4 outputs go under the task's ``workspace_dir``; only
+    metadata lives under ``state_dir``.
+    """
     state_dir = isolated_env["home"] / "tasks" / "ct-1"
-    entry = _register_calc_task(state_dir, "ct-1")
+    from metainfer.web import paths as _paths
+    workspace_dir = _paths.workspace_dir("ct-1")
+    entry = _register_calc_task(state_dir, "ct-1", workspace_dir=workspace_dir)
     if with_rough:
-        per_node = state_dir / "step0" / "agent_rough" / "per_node"
+        per_node = workspace_dir / "step0" / "agent_rough" / "per_node"
         per_node.mkdir(parents=True)
         (per_node / "layer__attn.py").write_text(
             "def calc(batch_size, seq_len):\n"
@@ -39,7 +51,7 @@ def _seed_calc_task(client, isolated_env, *, with_rough=False, with_final=False,
             " 'decode': {'tflops': 1.0, 'access_gb': 20.0}}\n",
             encoding="utf-8",
         )
-        (state_dir / "step0" / "rough_results.json").write_text(json.dumps({
+        (workspace_dir / "step0" / "rough_results.json").write_text(json.dumps({
             "ok": True, "elapsed_s": 5.0,
             "graph": {"sections": [{"id": "layer", "kind": "layer_template",
                                      "graph": {"nodes": [
@@ -54,7 +66,7 @@ def _seed_calc_task(client, isolated_env, *, with_rough=False, with_final=False,
             "summary": {"total_nodes": 1, "ok_count": 1, "fail_count": 0},
         }))
     if with_final:
-        final_dir = state_dir / "step3" / "final"
+        final_dir = workspace_dir / "step3" / "final"
         final_dir.mkdir(parents=True)
         (final_dir / "layer__attn.py").write_text(
             "def calc(batch_size, seq_len):\n"
@@ -69,7 +81,7 @@ def _seed_calc_task(client, isolated_env, *, with_rough=False, with_final=False,
             "source_agent": "unanimous",
         }))
     if with_cells_state:
-        cells_root = state_dir / "step3" / "cells"
+        cells_root = workspace_dir / "step3" / "cells"
         cells_root.mkdir(parents=True)
         (cells_root / "_state.json").write_text(json.dumps({
             "round": 0,
@@ -93,7 +105,7 @@ def _seed_calc_task(client, isolated_env, *, with_rough=False, with_final=False,
             },
         }))
     if with_cell:
-        cell_dir = (state_dir / "step3" / "cells" / "layer__attn" / "a" / "round_00")
+        cell_dir = (workspace_dir / "step3" / "cells" / "layer__attn" / "a" / "round_00")
         writer = cell_dir / "writer"
         writer.mkdir(parents=True)
         (writer / "calc.py").write_text("# fake", encoding="utf-8")
@@ -215,8 +227,9 @@ def test_calc_cells_ondemand_recompute(client, isolated_env):
     calc.py. We materialize a calc.py at the expected cell path that
     returns shape-dependent numbers."""
     _seed_calc_task(client, isolated_env, with_cells_state=True)
-    state_dir = isolated_env["home"] / "tasks" / "ct-1"
-    calc_path = state_dir / "step3" / "cells" / "layer__attn" / "a" / "round_00" / "writer" / "calc.py"
+    from metainfer.web import paths as _paths
+    workspace_dir = _paths.workspace_dir("ct-1")
+    calc_path = workspace_dir / "step3" / "cells" / "layer__attn" / "a" / "round_00" / "writer" / "calc.py"
     calc_path.parent.mkdir(parents=True, exist_ok=True)
     calc_path.write_text(
         "def calc(batch_size, seq_len):\n"
@@ -224,7 +237,7 @@ def test_calc_cells_ondemand_recompute(client, isolated_env):
         " 'decode': {'tflops': 0.5, 'access_gb': 2.0}}\n",
         encoding="utf-8",
     )
-    calc_path_b = state_dir / "step3" / "cells" / "layer__attn" / "b" / "round_00" / "writer" / "calc.py"
+    calc_path_b = workspace_dir / "step3" / "cells" / "layer__attn" / "b" / "round_00" / "writer" / "calc.py"
     calc_path_b.parent.mkdir(parents=True, exist_ok=True)
     calc_path_b.write_text(calc_path.read_text(encoding="utf-8"), encoding="utf-8")
     resp = client.get("/api/tasks/ct-1/calc/cells?batch_size=1&seq_len=1024")

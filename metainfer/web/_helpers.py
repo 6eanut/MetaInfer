@@ -28,6 +28,22 @@ def state_dir_for(entry) -> Path:
     return Path(entry.state_dir)
 
 
+def workspace_dir_for(entry) -> Path:
+    """Canonical workspace dir path for a task entry (generated artifacts).
+
+    Reads from the entry's stored ``workspace_dir``. For legacy entries
+    (older than the node/workspace layout) the field may be empty; in
+    that case we fall back to the canonical path the entry *would* have
+    under the current layout, so reads against old tasks don't crash."""
+    wd = getattr(entry, "workspace_dir", "") or ""
+    if wd:
+        return Path(wd)
+    # Defensive fallback: derive from task_id. Won't actually exist on
+    # disk for legacy tasks, but gives callers a Path to test with .exists().
+    from . import paths as _paths
+    return _paths.workspace_dir(entry.id)
+
+
 def find_events_file(log_dir: Path) -> Optional[Path]:
     """Locate the events.jsonl produced by SubAgentManager for an agent
     whose log_dir is ``log_dir``. Returns the highest-attempt file if

@@ -1,63 +1,122 @@
 """Filesystem paths for the WebUI server.
 
-All persistent state lives under one root. Default location is
-``<cwd>/.metainfer/`` — i.e. a ``.metainfer`` subdirectory of whatever
-directory the WebUI was launched from. This keeps each MetaInfer
-deployment self-contained next to its metainfer/ source tree instead
-of polluting ``~``.
+Two-level directory split, with a per-node layer at the top so multiple
+machines can share a filesystem without write conflicts::
 
-Layout::
+    $METAINFER_ROOT/                          (defaults to <cwd>)
+    └── nodes/
+        └── <node_id>/                        ($METAINFER_NODE_ID or hostname)
+            ├── workspaces/                   iteration-generated artifacts
+            │   └── <task_id>/                one dir per task (gf: 001/, 002/...;
+            │                                  calc_value: step0..4/)
+            └── .metainfer/                   metadata + logs + prompts
+                ├── registry.json             global task list
+                ├── registry.lock             flock for atomic registry updates
+                ├── runtime.json              live WebUI/orchestrator PID state
+                ├── runtime.lock              flock for runtime.json
+                └── tasks/
+                    └── <task_id>/            per-task bookkeeping:
+                        ├── requirements.json
+                        ├── run.json
+                        ├── timeline.jsonl
+                        ├── orchestrator.{pid,log}
+                        ├── agents.json
+                        ├── token_budget.json
+                        ├── iterations/*.json  (gf only — per-iter records)
+                        └── logs/<NNN>/        (gf only — prompts/oracle/server)
 
-    <cwd>/.metainfer/
-    ├── registry.json       # global task list (one entry per task)
-    ├── registry.lock       # flock for atomic registry updates
-    ├── runtime.json        # live WebUI/orchestrator PID state
-    ├── runtime.lock        # flock for runtime.json
-    └── tasks/
-        └── <task_id>/      # one dir per task (see orchestrator.py for layout)
+Why the split: artifacts the user cares about (the generated framework code)
+live in a visible, navigable ``workspaces/`` tree; orchestrator bookkeeping
+and transient logs stay hidden in ``.metainfer/``. The outermost ``nodes/``
+layer lets a future central controller scan ``nodes/*/`` to see global state
+across a shared filesystem.
 
-Override with the ``METAINFER_HOME`` env var for tests / custom installs
-(e.g. pointing multiple WebUI instances at separate roots).
+Overrides via env vars:
+  - ``METAINFER_ROOT`` — top-level root (use a shared mount point in multi-node)
+  - ``METAINFER_NODE_ID`` — current machine's id (defaults to hostname)
 """
 
 from __future__ import annotations
 
 import os
+import socket
 from pathlib import Path
-
-
-def home_dir() -> Path:
-    """Root directory for all MetaInfer persistent state. Honors
-    ``METAINFER_HOME`` env var; defaults to ``<cwd>/.metainfer`` (a
-    ``.metainfer`` subdirectory of the current working directory at
-    process start). The cwd is captured at import time so later
-    ``os.chdir`` calls don't shift the root out from under us.
-    """
-    override = os.environ.get("METAINFER_HOME")
-    if override:
-        p = Path(override).expanduser()
-    else:
-        p = _CWD_AT_START / ".metainfer"
-    p.mkdir(parents=True, exist_ok=True)
-    return p
 
 
 # Capture the cwd once at module import. The WebUI process doesn't
 # normally chdir during its lifetime, but pinning the value means any
 # incidental os.chdir (e.g. in a third-party plugin) can't silently
-# relocate the state root to a different directory.
+# relocate the root out from under us.
 _CWD_AT_START = Path.cwd().resolve()
 
 
+def root_dir() -> Path:
+    """Top-level root directory. Honors ``METAINFER_ROOT`` env var;
+    defaults to ``<cwd>`` (captured at import time). Multi-node setups
+    point this at a shared filesystem mount so every node writes under
+    the same tree (each under its own ``nodes/<id>/`` subdirectory)."""
+    override = os.environ.get("METAINFER_ROOT")
+    p = Path(override).expanduser().resolve() if override else _CWD_AT_START
+    return p
+
+
+def node_id() -> str:
+    """Identifier for the current machine. Honors ``METAINFER_NODE_ID``
+    env var; defaults to ``socket.gethostname()``. Used as the per-node
+    subdirectory name under ``<root>/nodes/`` so two machines sharing a
+    filesystem never collide."""
+    return os.environ.get("METAINFER_NODE_ID") or socket.gethostname()
+
+
+def node_dir() -> Path:
+    """This node's directory: ``<root>/nodes/<node_id>/``. Created on
+    first access. Every path the WebUI and orchestrator writes on this
+    machine lives somewhere under here."""
+    p = root_dir() / "nodes" / node_id()
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def home_dir() -> Path:
+    """Metadata root for this node: ``<node_dir>/.metainfer/``. Holds
+    registry.json + runtime.json + tasks/<id>/ (per-task bookkeeping).
+    Created on first access.
+
+    Note: ``METAINFER_HOME`` env var is no longer honored — the layout
+    now derives from ``METAINFER_ROOT`` + ``METAINFER_NODE_ID``. Tests
+    that used to set ``METAINFER_HOME`` should set ``METAINFER_ROOT``
+    instead.
+    """
+    p = node_dir() / ".metainfer"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def workspaces_root() -> Path:
+    """Artifacts root for this node: ``<node_dir>/workspaces/``. Each
+    task's generated artifacts (iteration code, step outputs) live in
+    a per-task subdirectory here."""
+    p = node_dir() / "workspaces"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def workspace_dir(task_id: str) -> Path:
+    """Path to one task's workspace directory (generated artifacts).
+    Does NOT auto-create — the launcher creates it at spawn time so a
+    stray read here doesn't litter the filesystem."""
+    return workspaces_root() / task_id
+
+
 def tasks_root() -> Path:
-    """Where each task's directory lives (one subdir per task)."""
+    """Where each task's metadata directory lives (one subdir per task)."""
     p = home_dir() / "tasks"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def task_dir(task_id: str) -> Path:
-    """Path to one task's state directory."""
+    """Path to one task's metadata directory."""
     return tasks_root() / task_id
 
 

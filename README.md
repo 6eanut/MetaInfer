@@ -188,30 +188,47 @@ top level. Form schemas for full task types live at
 └── legacy/                         # archived pre-refactor skill bundle
 ```
 
-### Per-task state directory
+### Per-task on-disk layout
 
-Every task gets its own self-contained directory under
-`~/.metainfer/tasks/<id>/`:
+Each task gets **two parallel directories**: a workspace for generated
+artifacts and a state directory for metadata/logs. Both live under
+the current node's subtree, so a multi-node deployment sharing a
+filesystem never collides.
 
 ```
-~/.metainfer/tasks/<id>/
-├── requirements.json     # frozen inputs from the form
-├── orchestrator.pid      # lifecycle markers (pid, started_at, finished_at)
-├── orchestrator.log      # stdout+stderr of the subprocess
-├── run.json              # RunStatus: phase, iteration, final_status
-├── timeline.jsonl        # append-only event stream
-├── agents.json           # latest SubAgentManager snapshot
-├── iterations/           # one record per iteration
-│   ├── 001.json          # status, goal, perf, retrospective path, …
-│   └── …
-├── code/                 # iteration N's working tree (visible source)
-└── logs/                 # per-iteration sub-agent output
+$METAINFER_ROOT/                          (defaults to <cwd>)
+└── nodes/
+    └── <hostname>/                       (or $METAINFER_NODE_ID)
+        ├── workspaces/
+        │   └── <id>/                     ← iteration-generated artifacts
+        │       ├── (gen-infer-framework)
+        │       │   ├── 001/ 002/ …       iteration source trees
+        │       │   └── (calc-theoretical-value)
+        │       │       └── step0/ … step4/
+        └── .metainfer/
+            ├── registry.json             global task list
+            ├── runtime.json              WebUI + orchestrator PIDs
+            └── tasks/<id>/               ← metadata + logs per task
+                ├── requirements.json     # frozen inputs from the form
+                ├── orchestrator.pid      # lifecycle markers
+                ├── orchestrator.log      # stdout+stderr of the subprocess
+                ├── run.json              # RunStatus: phase, iteration, final_status
+                ├── timeline.jsonl        # append-only event stream
+                ├── agents.json           # latest SubAgentManager snapshot
+                ├── iterations/*.json     # (gf only) one record per iteration
+                └── logs/<NNN>/           # (gf only) per-iter prompts/oracle/server
 ```
 
 All WebUI panels derive from these files. There's no in-memory state
 shared between the WebUI and the orchestrator — they communicate
 solely through the filesystem. This is what lets a WebUI restart pick
-up exactly where the old one left off.
+up exactly where the old one left off, and what lets a central
+controller scan `nodes/*/` to see global state across a shared
+filesystem.
+
+Override the root with `METAINFER_ROOT` (shared mount point for
+multi-node) and the node id with `METAINFER_NODE_ID` (defaults to
+`socket.gethostname()`).
 
 ## Extending
 

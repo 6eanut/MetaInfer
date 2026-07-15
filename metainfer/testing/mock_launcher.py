@@ -41,27 +41,42 @@ class FakeLauncher:
         self._running[task_id] = False
         return True
 
-    def start(self, task_id: str, req: Dict[str, Any], state_dir: Path) -> int:
+    def start(
+        self,
+        task_id: str,
+        req: Dict[str, Any],
+        state_dir: Path,
+        workspace_dir: Path,
+        extra_args: List[str] | None = None,
+    ) -> int:
         self.started.append(task_id)
         self._running[task_id] = True
+        workspace_dir.mkdir(parents=True, exist_ok=True)
         return 99999
 
 
 @pytest.fixture
 def isolated_env(monkeypatch):
-    """``METAINFER_HOME`` → tmp; launcher → ``FakeLauncher``.
+    """``METAINFER_ROOT`` → tmp; launcher → ``FakeLauncher``.
 
-    Yields a dict with ``home`` (Path) and ``launcher`` (FakeLauncher).
+    Yields a dict with ``root`` (Path — ``METAINFER_ROOT``), ``home``
+    (Path — ``<root>/nodes/<host>/.metainfer``, the per-node metadata
+    root) and ``launcher`` (FakeLauncher). The root points at a clean
+    tempdir so each test gets an isolated
+    ``nodes/<hostname>/{.metainfer,workspaces}`` tree.
     """
     with tempfile.TemporaryDirectory() as td:
-        home = Path(td) / "home"
-        home.mkdir()
-        monkeypatch.setenv("METAINFER_HOME", str(home))
+        root = Path(td) / "root"
+        root.mkdir()
+        monkeypatch.setenv("METAINFER_ROOT", str(root))
         fake = FakeLauncher()
         monkeypatch.setattr(_launcher, "_DEFAULT", fake)
-        # Force the tasks registry to re-resolve its path under the new home.
+        # Force the tasks registry to re-resolve its path under the new root.
         _tasks._REGISTRY_PATH = None  # type: ignore[attr-defined]
+        from metainfer.web import paths as _paths
+        home = _paths.home_dir()
         yield {
+            "root": root,
             "home": home,
             "launcher": fake,
         }

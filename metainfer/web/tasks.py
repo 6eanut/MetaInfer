@@ -1,10 +1,12 @@
 """Task registry: durable list of all tasks the WebUI knows about.
 
-Stored as ``<cwd>/.metainfer/registry.json`` (or ``$METAINFER_HOME/registry.json``). Each entry pins a task to its
-``state_dir``, the task type, the launcher used to spawn it, and the
-last-known PID + status. The registry is the source of truth for the
-task list view; everything else (current phase, iterations, agents,
-perf, etc.) is read on demand from the task's ``state_dir``.
+Stored at ``<node_dir>/.metainfer/registry.json`` (see :mod:`metainfer.web.paths`
+for the node-rooted layout). Each entry pins a task to its ``state_dir``
+(metadata + logs), its ``workspace_dir`` (generated artifacts), the task
+type, the launcher used to spawn it, and the last-known PID + status. The
+registry is the source of truth for the task list view; everything else
+(current phase, iterations, agents, perf, etc.) is read on demand from
+the task's ``state_dir``.
 
 Atomic updates via :func:`fcntl.flock` on a sibling lock file so multiple
 WebUI processes (or the orchestrator subprocess writing its PID) can
@@ -30,9 +32,16 @@ class TaskEntry:
     id: str                                 # user-visible task id, unique
     type: str                               # task type id (e.g. "gen-infer-framework")
     label: str                              # short display name
-    state_dir: str                          # absolute path to task dir
+    state_dir: str                          # absolute path to task metadata dir
     created_at: float
+    # Absolute path to task's generated-artifacts dir (parallel to
+    # state_dir but under <node>/workspaces/). Empty for legacy entries
+    # created before the split — callers should fall back to deriving
+    # from id via paths.workspace_dir(id) if they need a Path.
+    workspace_dir: str = ""
     # Launcher that owns this task: "local" or "remote:<node_id>" (future).
+    # "remote:<node_id>" semantics will eventually resolve to a path under
+    # <root>/nodes/<node_id>/ on the shared filesystem.
     launcher: str = "local"
     # Last-known orchestrator PID + lifecycle markers. The orchestrator
     # subprocess writes its own PID file under state_dir; the registry

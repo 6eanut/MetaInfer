@@ -148,6 +148,34 @@ def json_loads_safe(s: str) -> Dict[str, Any]:
         return {}
 
 
+def _update_run_stopped(run_path: Path, now: float) -> None:
+    """Update run.json to reflect that the task was stopped externally.
+
+    Reads the current run.json (if any), sets ``finished=True``,
+    ``final_status="stopped"``, and bumps ``last_update``. Preserves all
+    other fields so the UI still shows the last phase / iteration.
+    """
+    import json
+    try:
+        if run_path.exists():
+            data = json.loads(run_path.read_text(encoding="utf-8"))
+        else:
+            data = {}
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    data["finished"] = True
+    data["final_status"] = "stopped"
+    data["last_update"] = now
+    try:
+        tmp = run_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.replace(run_path)
+    except OSError:
+        pass
+
+
 class LocalLauncher:
     """Spawns orchestrator subprocesses on THIS machine. The default
     launcher; what 99% of users will use.
@@ -286,11 +314,14 @@ class LocalLauncher:
         ok = _proc.kill_pid_validated(pid, sig=sig, expected_started_at=started_at)
         if not ok:
             # Orchestrator is already dead (crashed / SIGKILLed / OOM-killed)
-            # but its pid file + run.json still show "running". The user
-            # clicking Kill wants this task to STOP, so clean up the zombie
-            # state: stamp finished_at on the pid file and mark the task
-            # as not running in the registry. Without this the UI keeps
-            # showing the task as alive but the kill button does nothing.
+            # but its pid file + run.json still show "running". Clean up the
+            # zombie state so the UI flips from Kill→Restart.
+            self._reap_dead_pid_file(task_id, pid, started_at)
+        elif force:
+            # SIGKILL was delivered — the orchestrator cannot run its own
+            # cleanup handlers (SIGKILL is uncatchable), so we must update
+            # run.json and the pid file ourselves. Without this the UI
+            # stays frozen at the last phase forever.
             self._reap_dead_pid_file(task_id, pid, started_at)
         return ok
 
@@ -304,11 +335,14 @@ class LocalLauncher:
           not-running.
         - Clear the live pid in the task registry so the list view's
           status pill flips.
+        - Update ``run.json`` with ``finished=True, final_status="stopped"``
+          so the task detail view stops showing a stale phase.
         - Append a timeline marker so the audit trail explains why the
           task transitioned to stopped without a clean shutdown.
         """
         import json
-        import time
+
+        now = time.time()
         try:
             sd = _paths.task_dir(task_id)
             pf = sd / "orchestrator.pid"
@@ -316,7 +350,7 @@ class LocalLauncher:
                 d = _read_pid_file(task_id)
                 d.setdefault("pid", pid)
                 d.setdefault("started_at", started_at)
-                d["finished_at"] = time.time()
+                d["finished_at"] = now
                 d["exit_hint"] = "reaped-by-kill-on-dead-pid"
                 pf.write_text(
                     json.dumps(d, indent=2), encoding="utf-8",
@@ -326,14 +360,21 @@ class LocalLauncher:
         try:
             _tasks.update_task(
                 task_id, pid=None, started_at=started_at,
-                finished_at=time.time(),
+                finished_at=now,
             )
         except Exception:  # noqa: BLE001
             pass
         try:
             from . import state_reader as _sr
+            sd = _paths.task_dir(task_id)
+            # Update run.json so the frontend sees the task as finished.
+            # Only touch finished / final_status / last_update — preserve
+            # everything else (current_iteration, current_phase, etc.) so
+            # the user can still see where the task was when it stopped.
+            run_path = sd / "run.json"
+            _update_run_stopped(run_path, now)
             _sr.append_timeline_event(
-                _paths.task_dir(task_id), "kill_reaped_dead_pid",
+                sd, "kill_reaped_dead_pid",
                 {"task_id": task_id, "dead_pid": pid,
                  "started_at": started_at},
             )

@@ -1,10 +1,15 @@
-"""Bootstrap + entry point for the opt-kernel orchestrator."""
+"""Bootstrap + entry point for the find-low-hanging-kernel orchestrator.
+
+Reads requirements.json, wires up StateStore + SubAgentManager + IterationWorkspace,
+constructs the :class:`Pipeline` and runs it. Most of the heavy lifting lives in
+``pipeline.py``; this module is the glue.
+"""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from metainfer.orchestrator._bootstrap import (
     clear_pid_file,
@@ -14,25 +19,32 @@ from metainfer.orchestrator._bootstrap import (
     write_pid_file,
 )
 from metainfer.orchestrator.paths import repo_root as _repo_root
-from metainfer.orchestrator.requirements import req_field_int
 from metainfer.orchestrator.state import StateStore
-from .pipeline import Orchestrator, OrchestratorConfig
 
-
-_NOTEBOOKS_DIR = Path(__file__).resolve().parent.parent / "notebooks"
+from .pipeline import OrchestratorConfig, Pipeline
 
 
 def _task_subdirs(state_dir: Path, workspace_dir: Path) -> Dict[str, Path]:
     state_dir.mkdir(parents=True, exist_ok=True)
     workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    memory = workspace_dir / "memory"
+    validation = workspace_dir / "validation"
+    inputs_snapshot = workspace_dir / "inputs_snapshot"
+    for p in (memory, validation, inputs_snapshot):
+        p.mkdir(parents=True, exist_ok=True)
+
     logs = state_dir / "logs"
     iterations_state = state_dir / "iterations"
     for p in (logs, iterations_state):
         p.mkdir(parents=True, exist_ok=True)
+
     return {
         "state_dir": state_dir,
         "workspace_dir": workspace_dir,
-        "code_root": workspace_dir,
+        "memory_dir": memory,
+        "validation_dir": validation,
+        "inputs_snapshot_dir": inputs_snapshot,
         "logs_root": logs,
         "iterations_state": iterations_state,
         "requirements": state_dir / "requirements.json",
@@ -44,6 +56,18 @@ def _task_subdirs(state_dir: Path, workspace_dir: Path) -> Dict[str, Path]:
     }
 
 
+def _parse_max_validator_rounds(req: Dict[str, Any], default: int = 5) -> int:
+    raw = req.get("max_validator_rounds")
+    if raw is None:
+        raw = (req.get("form") or {}).get("max_validator_rounds")
+    if raw in (None, ""):
+        return default
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return default
+
+
 def run_with_requirements(
     requirements_path: Path,
     *,
@@ -52,8 +76,7 @@ def run_with_requirements(
     claude_bin: str = "ccb",
     model: Optional[str] = None,
     permission_mode: str = "bypassPermissions",
-    max_iterations: Optional[int] = None,
-    extra_claude_args: Optional[list] = None,
+    extra_claude_args: Optional[List[str]] = None,
     effort: str = "max",
 ) -> int:
     if not requirements_path.exists():
@@ -72,28 +95,40 @@ def run_with_requirements(
 
     target_req = paths["requirements"]
     if requirements_path.resolve() != target_req.resolve():
-        target_req.write_text(requirements_path.read_text(encoding="utf-8"), encoding="utf-8")
+        target_req.write_text(
+            requirements_path.read_text(encoding="utf-8"), encoding="utf-8"
+        )
 
     write_pid_file(paths["pid_file"], task_id)
 
     repo_root = _repo_root()
-    notebooks_dir = _NOTEBOOKS_DIR
     logs_root = paths["logs_root"]
-    iterations_root = paths["code_root"]
 
     store = StateStore(state_dir)
+
+    # Resolve user-provided paths once; passed to every agent via add-dir.
+    form = req.get("form") or {}
+    user_paths: List[Path] = []
+    for key in ("trace_file", "model_dir", "framework_source_dir", "startup_log"):
+        v = form.get(key)
+        if v:
+            user_paths.append(Path(v))
+
     cfg = OrchestratorConfig(
-        workdir=state_dir,
+        workspace_dir=workspace_dir,
+        memory_dir=paths["memory_dir"],
+        validation_dir=paths["validation_dir"],
+        inputs_snapshot_dir=paths["inputs_snapshot_dir"],
         repo_root=repo_root,
-        notebooks_dir=notebooks_dir,
-        iterations_root=iterations_root,
         state_dir=state_dir,
         logs_root=logs_root,
-        max_iterations=max_iterations or _extract_max_iter(req, default=20),
+        max_validator_rounds=_parse_max_validator_rounds(req, default=5),
         claude_bin=claude_bin,
         model=model,
         permission_mode=permission_mode,
         extra_claude_args=list(extra_claude_args or []),
+        effort=effort,
+        user_paths=user_paths,
     )
 
     manager = make_subagent_manager(
@@ -101,29 +136,23 @@ def run_with_requirements(
         model=model,
         permission_mode=permission_mode,
         effort=effort,
-        extra_add_dirs=[notebooks_dir, repo_root, logs_root],
+        extra_add_dirs=[repo_root, logs_root, workspace_dir, *user_paths],
         snapshot_file=paths["agents_file"],
     )
-    orch = Orchestrator(req=req, store=store, cfg=cfg, manager=manager)
+    pipeline = Pipeline(req=req, store=store, cfg=cfg, manager=manager)
 
     print(f"[metainfer] task_id        = {task_id}")
     print(f"[metainfer] state dir      = {state_dir}")
     print(f"[metainfer] workspace dir  = {workspace_dir}")
-    print(f"[metainfer] code dir       = {iterations_root}")
+    print(f"[metainfer] memory dir     = {paths['memory_dir']}")
     print(f"[metainfer] logs dir       = {logs_root}")
-    print(f"[metainfer] notebooks      = {notebooks_dir}")
+    print(f"[metainfer] user paths     = {user_paths}")
 
     restore_signals = install_subagent_shutdown_handlers(manager, pid_file=paths["pid_file"])
 
     try:
-        orch.run()
+        pipeline.run()
     finally:
         restore_signals()
         clear_pid_file(paths["pid_file"])
     return 0
-
-
-def _extract_max_iter(req: Dict[str, Any], default: int = 20) -> int:
-    """Read ``max_iterations`` via the shared helper. See
-    :mod:`metainfer.orchestrator.requirements`."""
-    return req_field_int(req, "max_iterations", default=default)

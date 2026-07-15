@@ -713,13 +713,8 @@ class Orchestrator:
         return None
 
     def _resolve_max_iterations(self) -> int:
-        v = self.req.get("max_iterations")
-        if v is None:
-            v = self.req.get("answers", {}).get("max_iterations")
-        try:
-            return int(v) if v is not None else self.cfg.max_iterations
-        except (TypeError, ValueError):
-            return self.cfg.max_iterations
+        from metainfer.orchestrator.requirements import req_field_int
+        return req_field_int(self.req, "max_iterations", self.cfg.max_iterations)
 
 
 # --------------------------------------------------------------------------- #

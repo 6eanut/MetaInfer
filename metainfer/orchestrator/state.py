@@ -262,8 +262,10 @@ class StateStore:
                 "type": event_type,
                 "payload": payload or {},
             }
-            with open(self.timeline_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry) + "\n")
+            from metainfer.server.filelock import lock_file
+            with lock_file(self.timeline_path):
+                with open(self.timeline_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry) + "\n")
 
     def load_timeline(self, since: float = 0.0) -> List[Dict[str, Any]]:
         if not self.timeline_path.exists():

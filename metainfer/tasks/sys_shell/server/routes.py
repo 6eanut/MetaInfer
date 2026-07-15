@@ -183,12 +183,15 @@ def build_router(plugin):
             pf = sd / "orchestrator.pid"
             try:
                 import json as _json
-                pf.write_text(_json.dumps({
+                data = _json.dumps({
                     "pid": None,
                     "task_id": task_id,
                     "finished_at": time.time(),
                     "exit_hint": "spawn-failed",
-                }, indent=2), encoding="utf-8")
+                }, indent=2)
+                tmp = pf.with_suffix(".tmp")
+                tmp.write_text(data, encoding="utf-8")
+                tmp.replace(pf)
             except OSError:
                 pass
             raise HTTPException(500, detail={"error": f"spawn failed: {e!r}"})
@@ -347,7 +350,9 @@ def build_router(plugin):
             isinstance(hard, (int, float)) and used >= hard)
         tmp = budget_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        tmp.replace(budget_path)
+        from metainfer.server.filelock import lock_file
+        with lock_file(budget_path):
+            tmp.replace(budget_path)
         os.utime(budget_path)
         return task_token_budget(task_id)
 

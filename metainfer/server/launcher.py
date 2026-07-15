@@ -168,10 +168,12 @@ def _update_run_stopped(run_path: Path, now: float) -> None:
     data["finished"] = True
     data["final_status"] = "stopped"
     data["last_update"] = now
+    from metainfer.server.filelock import lock_file
     try:
         tmp = run_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        tmp.replace(run_path)
+        with lock_file(run_path):
+            tmp.replace(run_path)
     except OSError:
         pass
 
@@ -355,9 +357,9 @@ class LocalLauncher:
                 d.setdefault("started_at", started_at)
                 d["finished_at"] = now
                 d["exit_hint"] = "reaped-by-kill-on-dead-pid"
-                pf.write_text(
-                    json.dumps(d, indent=2), encoding="utf-8",
-                )
+                tmp = pf.with_suffix(".tmp")
+                tmp.write_text(json.dumps(d, indent=2), encoding="utf-8")
+                tmp.replace(pf)
         except Exception:  # noqa: BLE001 — best-effort cleanup
             pass
         # Process state cleanup is done — orchestrator.pid was stamped

@@ -111,8 +111,11 @@ def append_timeline_event(
         "type": event_type,
         "payload": payload or {},
     }
-    with open(state_dir / "timeline.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
+    from metainfer.server.filelock import lock_file
+    timeline_path = state_dir / "timeline.jsonl"
+    with lock_file(timeline_path):
+        with open(timeline_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
 
 
 def reset_state_dir(
@@ -170,9 +173,10 @@ def reset_state_dir(
         "notes": [],
     }
     state_dir.mkdir(parents=True, exist_ok=True)
-    (state_dir / "run.json").write_text(
-        json.dumps(fresh_run, indent=2), encoding="utf-8",
-    )
+    run_path = state_dir / "run.json"
+    tmp = run_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(fresh_run, indent=2), encoding="utf-8")
+    tmp.replace(run_path)
     append_timeline_event(state_dir, "task_reset", {
         "task_id": task_id, "reset_at": now, "removed_count": len(removed),
         "workspace_reset": True,

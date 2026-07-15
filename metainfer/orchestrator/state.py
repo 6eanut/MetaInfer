@@ -26,17 +26,16 @@ from typing import Any, Dict, List, Literal, Optional, Union
 # --------------------------------------------------------------------------- #
 #
 # NOTE: ``Phase`` here is intentionally a plain ``str`` alias, NOT a Literal
-# of any specific orchestrator's phase names. Each orchestrator package
-# (gen_infer_framework/phases.py, calc_value/phases.py, ...) defines its OWN
-# Phase Literal for internal type safety, but the shared state layer just
-# stores the value opaquely. This keeps state.py decoupled from any
-# specific task type's phase vocabulary.
+# of any specific orchestrator's phase names. Each task package's
+# ``orchestrator/phases.py`` defines its OWN Phase Literal for internal
+# type safety, but the shared state layer just stores the value opaquely.
+# This keeps state.py decoupled from any specific task type's phase
+# vocabulary.
 #
-# ``Outcome`` is also a plain str alias here — the gen-infer-framework
-# orchestrator's outcomes (ok / logic_fail / infra_fail / perf_regression /
-# aborted) are NOT universal (calc_value has no concept of perf_regression
-# in its linear pipeline). Per-orchestrator packages re-export a tighter
-# Literal for internal use.
+# ``Outcome`` is also a plain str alias here — per-task outcomes (e.g.
+# ok / logic_fail / infra_fail / perf_regression / aborted) are NOT
+# universal. Per-task packages re-export a tighter Literal for internal
+# use.
 Phase = str
 Outcome = Union[str, None]
 
@@ -67,11 +66,11 @@ class IterationRecord:
     # failed C step from an externally-interrupted attempt. The WebUI can
     # use this to render differently (e.g., "interrupted" vs "failed").
     interrupted: bool = False
-    # Absolute path to this iteration's retrospective.md (written at the
-    # end of E_perf_test). The WebUI reads this file on demand when the
-    # user clicks the iteration row. None if E never ran or the retro
-    # agent failed to produce the file. Stored as a path (not the full
-    # text) so the JSON state file stays small.
+    # Absolute path to this iteration's retrospective.md (written by
+    # the task package's retrospective agent at the end of an iteration).
+    # The WebUI reads this file on demand when the user clicks the
+    # iteration row. None if no retrospective was ever produced. Stored
+    # as a path (not the full text) so the JSON state file stays small.
     retrospective_path: Optional[str] = None
 
 

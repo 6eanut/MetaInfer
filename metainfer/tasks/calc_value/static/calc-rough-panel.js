@@ -4,7 +4,7 @@
 
 import { html } from "htm/preact";
 import { useEffect, useState } from "preact/hooks";
-import { getCalcRough } from "app/api";
+import { getCalcRough } from "app/calc-api";
 
 const DEFAULT_BATCH = 1;
 const DEFAULT_SEQ = 512;

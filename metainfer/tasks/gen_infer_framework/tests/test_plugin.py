@@ -24,7 +24,13 @@ def test_plugin_registered():
     assert p is not None
     assert p.detail_view_module == "app/gf-detail"
     assert p.frontend_dir is not None and p.frontend_dir.exists()
-    assert "app/gf-detail" in p.importmap_entries
+    # detail_view_module is auto-discovered by create_app (every *.js
+    # under frontend_dir becomes app/<stem>). Verify the file exists so
+    # the auto-discovery will pick it up.
+    stem = p.detail_view_module.split("/", 1)[-1]
+    assert (p.frontend_dir / f"{stem}.js").exists(), (
+        f"detail view file {stem}.js missing under frontend_dir"
+    )
     # qa_config must be set so the analyst feature can resolve targets.
     assert p.qa_config is not None
 
@@ -48,10 +54,6 @@ def test_notebooks_dir_lives_inside_task_package():
     for sub in ("00_contracts", "01_framework_design", "06_profiling",
                 "07_improvementPlan"):
         assert (nb / sub).is_dir(), f"missing knowledge-base subdir {sub}"
-    # And the legacy back-compat shim in orchestrator.paths still points
-    # at the same path.
-    from metainfer.orchestrator import paths as _orch_paths
-    assert _orch_paths.notebooks_dir().resolve() == nb.resolve()
 
 
 def test_qa_explicit_events_file(tmp_path: Path):

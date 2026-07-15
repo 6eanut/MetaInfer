@@ -2,8 +2,10 @@
 
 Each task type ships a ``form.yaml`` inside its self-contained task package
 at ``metainfer/tasks/<task_pkg>/form.yaml`` (see CLAUDE.md for the layout).
-Stub types without a full package (e.g. ``opt-kernel``) may still ship a
-YAML under ``<repo>/tasks/<type>.yaml``; both locations are supported.
+The task-type's friendly label + description live on its WebPlugin
+(``metainfer/tasks/<task_pkg>/web_server_handler/plugin.py``); this module
+reads them from the registry, so adding a new task type does NOT require
+editing any central metadata table.
 
 Schema shape (compatible with the legacy questions.yaml format):
 
@@ -13,9 +15,9 @@ Schema shape (compatible with the legacy questions.yaml format):
       required: true
       multi: false                 # omit for free-form text
       options:                     # omit for free-form text
-        - label: "Hygon K100AI"
+        - label: "..."
           description: "..."
-      default: "throughput"
+      default: "..."
       # NEW: explicit form widget hint. If omitted, the type is inferred
       # from multi / options.
       form: text|textarea|select|multiselect|file|number
@@ -24,8 +26,8 @@ This module normalizes the YAML into a stable JSON schema the frontend
 form renderer consumes:
 
     {
-      "type": "gen-infer-framework",
-      "label": "Build inference framework",
+      "type": "<task-type-id>",
+      "label": "<plugin label>",
       "description": "...",
       "fields": [
         {
@@ -51,43 +53,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
-
-from ..orchestrator import paths as _orch_paths
-
-
-# Top-level task-type metadata. Augments the per-field YAML with a
-# friendly label + description for the task-type picker.
-TASK_TYPE_META: Dict[str, Dict[str, str]] = {
-    "gen-infer-framework": {
-        "label": "Build inference framework",
-        "description": (
-            "Build a minimal, model-specific inference framework with an "
-            "OpenAI-compatible HTTP API from scratch."
-        ),
-    },
-    "opt-kernel": {
-        "label": "Optimize GPU kernel",
-        "description": (
-            "Optimize an existing GPU kernel (attention, GEMM, norm, RoPE) "
-            "for a specific shape and platform."
-        ),
-    },
-    "port-model": {
-        "label": "Port model into framework",
-        "description": (
-            "Port a model architecture into an existing inference framework "
-            "(vLLM / SGLang / TensorRT-LLM)."
-        ),
-    },
-    "calc-theoretical-value": {
-        "label": "Calc theoretical FLOPs / mem-traffic",
-        "description": (
-            "Analyze a model + inference framework and compute the "
-            "theoretical FLOPs and global-memory traffic of one forward "
-            "pass, with per-node breakdown and an interactive visualization."
-        ),
-    },
-}
 
 
 def _infer_field_type(entry: Dict[str, Any]) -> str:
@@ -135,31 +100,26 @@ def _normalize_field(entry: Dict[str, Any]) -> Dict[str, Any]:
 def _form_yaml_for_task_type(task_type: str) -> Optional[Path]:
     """Resolve the form.yaml path for a task type.
 
-    Priority:
-      1. If a WebPlugin is registered for this task type, look for
-         ``form.yaml`` at the plugin's task-package root (parent of
-         ``frontend_dir``). This is the canonical self-contained layout.
-      2. Fallback: legacy ``<repo>/tasks/<task_type>.yaml`` for stub
-         types that don't have a full task package yet (e.g. opt-kernel,
-         port-model).
+    Looks for ``form.yaml`` at the registered WebPlugin's task-package
+    root (parent of ``frontend_dir``). This is the only location we
+    support now — every task type must own a full plugin package.
 
-    Returns ``None`` if no YAML exists.
+    Returns ``None`` if no plugin is registered for this task type, or
+    the plugin's package doesn't ship a form.yaml.
     """
     from .registry import get as _get_plugin
     plugin = _get_plugin(task_type)
-    if plugin is not None and plugin.frontend_dir is not None:
-        cand = plugin.frontend_dir.parent / "form.yaml"
-        if cand.exists():
-            return cand
-    legacy = _orch_paths.question_file(task_type)
-    if legacy.exists():
-        return legacy
+    if plugin is None or plugin.frontend_dir is None:
+        return None
+    cand = plugin.frontend_dir.parent / "form.yaml"
+    if cand.exists():
+        return cand
     return None
 
 
 def load_form_schema(task_type: str) -> Optional[Dict[str, Any]]:
     """Return the normalized form schema for ``task_type``, or None if
-    no YAML exists for it."""
+    no form.yaml exists for it."""
     yaml_path = _form_yaml_for_task_type(task_type)
     if yaml_path is None:
         return None
@@ -168,29 +128,28 @@ def load_form_schema(task_type: str) -> Optional[Dict[str, Any]]:
     if not isinstance(raw, list):
         raise ValueError(f"{yaml_path}: expected a list of field entries")
     fields = [_normalize_field(e) for e in raw]
-    meta = TASK_TYPE_META.get(task_type, {})
+    # Label/description come from the WebPlugin (single source of truth
+    # per task type), NOT from a central dict here.
+    from .registry import get as _get_plugin
+    plugin = _get_plugin(task_type)
+    label = (plugin.label if plugin else "") or task_type
+    description = (plugin.description if plugin else "") or ""
     return {
         "type": task_type,
-        "label": meta.get("label", task_type),
-        "description": meta.get("description", ""),
+        "label": label,
+        "description": description,
         "fields": fields,
     }
 
 
 def list_task_types() -> List[Dict[str, str]]:
-    """Return a compact list of available task types for the task-type
-    picker in the New Task form.
+    """Return the compact list of available task types for the New Task
+    type picker.
 
-    Combines two sources:
-      - Every registered WebPlugin (full task packages under
-        ``metainfer/tasks/<pkg>/`` whose ``frontend_dir.parent/form.yaml``
-        exists).
-      - Every ``<repo>/tasks/<type>.yaml`` stub whose type isn't already
-        covered by a plugin (so legacy stubs like opt-kernel still appear).
+    One entry per registered WebPlugin whose task-package ships a
+    ``form.yaml``. The label + description come from the plugin itself.
     """
     out: List[Dict[str, str]] = []
-    seen: set = set()
-    # Full task packages first — these are the primary, peer-registered types.
     from .registry import all_plugins as _all_plugins
     for plugin in _all_plugins():
         if plugin.frontend_dir is None:
@@ -198,31 +157,11 @@ def list_task_types() -> List[Dict[str, str]]:
         cand = plugin.frontend_dir.parent / "form.yaml"
         if not cand.exists():
             continue
-        tt = plugin.type
-        if tt in seen:
-            continue
-        seen.add(tt)
-        meta = TASK_TYPE_META.get(tt, {})
         out.append({
-            "id": tt,
-            "label": meta.get("label", tt),
-            "description": meta.get("description", ""),
+            "id": plugin.type,
+            "label": plugin.label or plugin.type,
+            "description": plugin.description or "",
         })
-    # Legacy stub types: any YAML under <repo>/tasks/ whose type isn't
-    # already covered by a plugin.
-    legacy_dir = _orch_paths.tasks_dir()
-    if legacy_dir.exists():
-        for p in sorted(legacy_dir.glob("*.yaml")):
-            tt = p.stem
-            if tt in seen:
-                continue
-            seen.add(tt)
-            meta = TASK_TYPE_META.get(tt, {})
-            out.append({
-                "id": tt,
-                "label": meta.get("label", tt),
-                "description": meta.get("description", ""),
-            })
     return out
 
 

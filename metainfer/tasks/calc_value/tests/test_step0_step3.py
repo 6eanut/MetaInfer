@@ -26,7 +26,8 @@ from metainfer.tasks.calc_value.orchestrator import (
 from metainfer.tasks.calc_value.orchestrator import (
     step3_calculate as s3,
 )
-from metainfer.testing import FakeStore, MockAgentManager, write_calc_script
+from metainfer.testing import FakeStore, MockAgentManager
+from ._helpers import write_calc_script
 
 
 _CALC_TEMPLATE = """\

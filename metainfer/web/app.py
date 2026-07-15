@@ -38,6 +38,7 @@ from ._helpers import (
     workspace_dir_for as _workspace_dir_for,
 )
 from .registry import WebDeps as _WebDeps
+from .registry import WebPlugin as _WebPlugin
 from .registry import all_plugins as _all_web_plugins
 from .registry import get as _get_web_plugin
 from .. import tasks as _task_packages  # noqa: F401 — side-effect: register all task plugins (orchestrator + web)
@@ -158,22 +159,23 @@ def create_app() -> FastAPI:
         task_id = _tasks.gen_task_id(task_type, label)
         sd = _paths.task_dir(task_id)
         sd.mkdir(parents=True, exist_ok=True)
-        # Workspace dir holds generated artifacts (gf iteration code,
-        # calc_value step outputs); state_dir holds metadata + logs.
+        # Workspace dir holds task-package-generated artifacts (each task
+        # type owns its own workspace subtree); state_dir holds metadata + logs.
         wd = _paths.workspace_dir(task_id)
         wd.mkdir(parents=True, exist_ok=True)
         # Build the requirements.json the orchestrator will read.
-        meta = _forms.TASK_TYPE_META.get(task_type, {})
+        _plugin = _get_web_plugin(task_type)
+        _default_label = (_plugin.label if _plugin else "") or task_type
         requirements = {
             "task_id": task_id,
             "task_type": task_type,
             "raw_request": body.get("raw_request") or "",
-            "label": label or meta.get("label", task_type),
+            "label": label or _default_label,
             **answers,
         }
         # Register first (so list view picks it up even if spawn fails).
         entry = _tasks.TaskEntry(
-            id=task_id, type=task_type, label=label or meta.get("label", task_id),
+            id=task_id, type=task_type, label=label or _default_label,
             state_dir=str(sd), workspace_dir=str(wd),
             created_at=time.time(), launcher="local",
         )
@@ -495,7 +497,7 @@ def create_app() -> FastAPI:
     )
     for _plugin in _all_web_plugins():
         if _plugin.register_routes is not None:
-            _plugin.register_routes(app, _web_deps)
+            _plugin.register_routes(app, _web_deps, _plugin)
 
     # ------------------------------------------------------------------ #
     # SSE stream
@@ -552,29 +554,177 @@ def create_app() -> FastAPI:
                 pass
         return str(int(max(mtimes))) if mtimes else "0"
 
-    def _plugin_importmap_snippet(token: str) -> str:
-        """Build the comma-prefixed ``"key": "url"`` lines injected into
-        ``index.html``'s importmap. Iterates every plugin's
-        ``importmap_entries`` and applies the cache-bust token.
+    # ------------------------------------------------------------------ #
+    # Importmap + stylesheet merge — server-side single source of truth
+    # ------------------------------------------------------------------ #
+    #
+    # The shell provides default entries for shared widgets (charts /
+    # state-graph / iterations-table / etc.) directly inside
+    # ``index.html``'s ``<script type="importmap">`` block. Plugins that
+    # want to ship a divergent version of one of these widgets simply
+    # include the same key in their ``importmap_entries`` — the merge
+    # below lets plugin entries OVERRIDE shell entries with the same key.
+    #
+    # In addition, every ``*.js`` directly under a plugin's
+    # ``frontend_dir`` is auto-registered as ``app/<stem>`` →
+    # ``/static/plugins/<type>/<file>?v=<token>``. Plugin authors only
+    # need to populate ``importmap_entries`` for keys that DON'T follow
+    # the ``app/<filename-stem>`` convention, or to override shell
+    # entries (e.g. ship a divergent ``app/state-graph``).
+    #
+    # Plugin stylesheets (``extra_stylesheets``) are injected as
+    # ``<link>`` tags right after the shell stylesheet, so a plugin can
+    # ship task-type-specific CSS without editing the shell's
+    # ``styles.css``.
+    #
+    # We merge on the SERVER (rather than emitting duplicate keys and
+    # relying on browser last-wins semantics) because duplicate importmap
+    # keys are spec-undefined and Chrome rejects the entire importmap on
+    # duplicates in some versions — server merge is the safe path.
+
+    _SHELL_IMPORTMAP_CACHE: Dict[str, Any] = {}
+
+    def _shell_importmap() -> Dict[str, str]:
+        """Parse the shell importmap from index.html once, cache it."""
+        if _SHELL_IMPORTMAP_CACHE:
+            return _SHELL_IMPORTMAP_CACHE["entries"]
+        import re
+        html_text = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        m = re.search(
+            r'<script[^>]*type="importmap"[^>]*>(.*?)</script>',
+            html_text, re.DOTALL,
+        )
+        if not m:
+            _SHELL_IMPORTMAP_CACHE["entries"] = {}
+            return {}
+        try:
+            block = json.loads(m.group(1))
+            entries = dict(block.get("imports", {}))
+        except (ValueError, TypeError):
+            entries = {}
+        _SHELL_IMPORTMAP_CACHE["entries"] = entries
+        return entries
+
+    def _plugin_auto_importmap(plugin: "_WebPlugin") -> Dict[str, str]:
+        """Auto-discover importmap entries by globbing the plugin's
+        ``frontend_dir`` for ``*.js``. Each file becomes
+        ``app/<stem>`` → ``/static/plugins/<type>/<file>`` (CACHE_BUST
+        substituted later). Explicit ``importmap_entries`` on the plugin
+        override these."""
+        out: Dict[str, str] = {}
+        if not plugin.frontend_dir or not plugin.frontend_dir.is_dir():
+            return out
+        prefix = f"/static/plugins/{plugin.type}"
+        try:
+            files = sorted(plugin.frontend_dir.glob("*.js"))
+        except OSError:
+            return out
+        for p in files:
+            key = f"app/{p.stem}"
+            out[key] = f"{prefix}/{p.name}?v=CACHE_BUST"
+        return out
+
+    def _merged_importmap(token: str) -> Dict[str, str]:
+        """Merge shell + plugin importmap entries with a deliberate
+        precedence (lowest → highest):
+
+          1. Per-plugin auto-discovered entries (``app/<stem>`` for every
+             ``*.js`` under ``frontend_dir``).
+          2. Shell entries (the ``<script type="importmap">`` block in
+             ``index.html``).
+          3. Per-plugin explicit ``importmap_entries``.
+
+        This means a plugin that happens to ship a file named
+        ``utils.js`` does NOT silently hijack the shell's ``app/utils``.
+        To override a shell entry, a plugin must opt in by listing it
+        explicitly in ``importmap_entries`` — accidental filename
+        collisions stay safe. Within (3), later-registered plugins win
+        over earlier ones, mirroring the historical behavior.
         """
-        lines: List[str] = []
+        merged: Dict[str, str] = {}
         for plugin in _all_web_plugins():
-            for key, url in plugin.importmap_entries.items():
-                url_resolved = url.replace("CACHE_BUST", token)
-                lines.append(f'      {json.dumps(key)}: {json.dumps(url_resolved)}')
-        if not lines:
-            return ""
-        return ",\n" + ",\n".join(lines)
+            for k, v in _plugin_auto_importmap(plugin).items():
+                merged[k] = v.replace("CACHE_BUST", token)
+        for k, v in _shell_importmap().items():
+            merged[k] = v.replace("CACHE_BUST", token)
+        for plugin in _all_web_plugins():
+            for k, v in plugin.importmap_entries.items():
+                merged[k] = v.replace("CACHE_BUST", token)
+        return merged
+
+    def _plugin_stylesheet_links(token: str) -> str:
+        """Render ``<link>`` tags for every plugin stylesheet, in
+        registration order. Returns the concatenated HTML (may be empty).
+
+        Filename validation: each entry must be a bare filename (no path
+        separators, no ``..``) ending in ``.css``. This is a defense-
+        in-depth on top of the later ``relative_to`` check — it rejects
+        backslash forms and odd inputs early, so a buggy or malicious
+        plugin can't get any variety of escape into the rendered HTML.
+        """
+        import re as _re
+        # One filename, ``.css`` suffix, no separators of any kind, no
+        # leading dot. Allows ``foo.css`` / ``foo-bar.css`` / ``foo_1.css``.
+        _VALID = _re.compile(r"^[A-Za-z0-9][A-Za-z0-9_\-]*\.css$")
+        parts: List[str] = []
+        for plugin in _all_web_plugins():
+            if not plugin.extra_stylesheets or not plugin.frontend_dir:
+                continue
+            for fname in plugin.extra_stylesheets:
+                if not isinstance(fname, str) or not _VALID.match(fname):
+                    continue  # reject malformed entry; never inject raw
+                target = plugin.frontend_dir / fname
+                if not target.is_file():
+                    # Form is valid but the file doesn't exist (typo in
+                    # plugin config, or a stale entry). Skip rather than
+                    # emit a link that 404s.
+                    continue
+                try:
+                    rel = target.resolve().relative_to(
+                        plugin.frontend_dir.resolve()
+                    )
+                except (ValueError, OSError):
+                    continue  # symlink/resolution escape; skip
+                url = (
+                    f"/static/plugins/{plugin.type}/{rel.as_posix()}?v={token}"
+                )
+                parts.append(
+                    f'  <link rel="stylesheet" href="{url}" />'
+                )
+        return "\n".join(parts)
 
     @app.get("/")
     def index() -> HTMLResponse:
         html_text = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
         token = _cache_bust_token()
-        # Plugin importmap entries first so the same CACHE_BUST replace
-        # covers both the static shell entries and plugin URLs.
-        snippet = _plugin_importmap_snippet(token)
-        html_text = html_text.replace("<!-- PLUGINS_IMPORTMAP -->", snippet)
-        # Now substitute any remaining CACHE_BUST on static-shell lines.
+        merged = _merged_importmap(token)
+        # Re-serialize the importmap block with the merged entries. This
+        # avoids the duplicate-key problem (browsers' importmap spec
+        # rejects duplicate top-level keys) and gives plugins a clean
+        # override path.
+        import re
+        new_block = json.dumps({"imports": merged}, indent=2)
+        # Preserve the 6-space indent used inside <script> in index.html
+        # so the diff stays small. The regex matches the whole script
+        # block regardless of original indent.
+        indented = "\n".join("      " + line for line in new_block.splitlines())
+        html_text = re.sub(
+            r'(<script[^>]*type="importmap"[^>]*>)(.*?)(</script>)',
+            lambda m: m.group(1) + "\n" + indented + "\n  " + m.group(3),
+            html_text, count=1, flags=re.DOTALL,
+        )
+        # Inject plugin stylesheets right after the shell stylesheet.
+        # The shell index.html has exactly one <link rel="stylesheet" href="/static/styles.css?v=CACHE_BUST">.
+        plugin_links = _plugin_stylesheet_links(token)
+        if plugin_links:
+            html_text = html_text.replace(
+                '<link rel="stylesheet" href="/static/styles.css?v=CACHE_BUST" />',
+                '<link rel="stylesheet" href="/static/styles.css?v=CACHE_BUST" />\n'
+                + plugin_links,
+                1,
+            )
+        # Substitute CACHE_BUST anywhere else in the doc (e.g. <link>
+        # stylesheet, the bootstrap main.js script tag).
         html_text = html_text.replace("CACHE_BUST", token)
         return HTMLResponse(
             content=html_text,

@@ -12,7 +12,7 @@
 
 import { html } from "htm/preact";
 import { useEffect, useState } from "preact/hooks";
-import { getCalcCells } from "app/api";
+import { getCalcCells } from "app/calc-api";
 import { CalcCellModal } from "app/calc-cell-modal";
 
 const ANGLES = ["a", "b"];

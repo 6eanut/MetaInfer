@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from metainfer.tasks.calc_value.orchestrator import deterministic as det
-from metainfer.testing import write_calc_script
+from ._helpers import write_calc_script
 
 
 # --------------------------------------------------------------------------- #

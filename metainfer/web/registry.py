@@ -70,13 +70,18 @@ class WebPlugin:
     """One registered task-type plugin.
 
     Attributes:
-        type: The task type this plugin serves (e.g.
-            ``"calc-theoretical-value"``). Must match the value the
+        type: The task type this plugin serves. Must match the value the
             orchestrator writes into ``requirements.json::task_type``.
+        label: Human-readable display name shown in the New Task type
+            picker and as the task's default label. Required.
+        description: One-line description shown under the label in the
+            type picker. Required.
         register_routes: Optional callable that mounts routes onto the
-            FastAPI app. Receives ``(app, deps)``. Plugins with no
-            custom routes (only a detail-view hint, say) leave this
-            ``None``.
+            FastAPI app. Receives ``(app, deps, plugin)`` — the plugin
+            argument is the plugin itself, so the callback can use its
+            ``qa_config``, ``type``, etc. without re-importing the
+            plugin module (which would create a circular import).
+            Plugins with no custom routes leave this ``None``.
         detail_view_module: Optional importmap key (e.g.
             ``"app/calc-viz"``) the frontend should dynamically import
             to render this task's detail view. ``None`` → default view.
@@ -87,27 +92,54 @@ class WebPlugin:
             type. Plugins that don't want the analyst feature leave
             this ``None``.
         frontend_dir: Optional ``Path`` to this plugin's bundled
-            frontend assets (ES modules). When set, ``create_app``
-            mounts it at ``/static/plugins/<type>/`` so the modules are
-            web-addressable. The plugin's own ``importmap_entries``
-            should reference URLs under that mount point.
+            frontend assets (ES modules + stylesheets). When set,
+            ``create_app`` mounts it at ``/static/plugins/<type>/`` so
+            the files are web-addressable. The plugin's own
+            ``importmap_entries`` should reference URLs under that mount
+            point, and ``extra_stylesheets`` should reference CSS
+            filenames relative to that mount point.
         importmap_entries: Mapping of importmap keys to URL paths the
             browser should resolve. ``create_app`` injects these into
             the ``index.html`` importmap (after applying the cache-bust
             token) so plugins don't need to touch ``index.html``
-            directly. Example::
+            directly. Entries here OVERRIDE any shell entry with the
+            same key (so a plugin can ship its own version of a shared
+            widget like ``app/state-graph``). Example::
 
                 {
-                    "app/calc-viz": "/static/plugins/calc-theoretical-value/calc-viz.js?v=CACHE_BUST",
+                    "app/<widget>": "/static/plugins/<type>/<widget>.js?v=CACHE_BUST",
                 }
+
+            NOTE: ``create_app`` ALSO auto-discovers every ``*.js``
+            directly under ``frontend_dir`` and registers it under
+            ``app/<stem>`` (plugin entries win on conflict). You only
+            need to populate this dict for keys that DON'T follow that
+            ``app/<filename-stem>`` convention, or to override shell
+            entries.
+        extra_stylesheets: List of CSS filenames (relative to
+            ``frontend_dir``) that ``create_app`` should inject as
+            ``<link>`` tags in ``index.html``. Use this to ship
+            task-type-specific styles without editing the shell's
+            ``metainfer/static/styles.css``. Each entry becomes
+            ``/static/plugins/<type>/<filename>?v=<token>``.
+        extra_watch_paths: Optional callable that returns extra files
+            (under or outside ``state_dir``) the SSE watcher should
+            monitor for mtime changes. Signature:
+            ``f(entry: TaskEntry) -> List[Path]``. Returned paths may
+            not exist yet; the watcher skips missing files. Return an
+            empty list (or ``None``) if there's nothing extra to watch.
     """
     type: str
-    register_routes: Optional[Callable[[FastAPI, WebDeps], None]] = None
+    label: str = ""
+    description: str = ""
+    register_routes: Optional[Callable[[FastAPI, WebDeps, "WebPlugin"], None]] = None
     detail_view_module: Optional[str] = None
     detail_view_export: str = "default"
     qa_config: Optional[Any] = None
     frontend_dir: Optional[Path] = None
     importmap_entries: Dict[str, str] = field(default_factory=dict)
+    extra_stylesheets: List[str] = field(default_factory=list)
+    extra_watch_paths: Optional[Callable[[Any], List[Path]]] = None
 
 
 _REGISTRY: Dict[str, WebPlugin] = {}

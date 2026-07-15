@@ -325,3 +325,55 @@ def outcome_label(o: Outcome) -> str:
         PERF_REGRESSION: "perf regression",
         ABORTED: "aborted",
     }.get(o, str(o))
+
+
+# --------------------------------------------------------------------------- #
+# graph_payload — the ONLY function the WebUI's state-graph endpoint calls.
+#
+# Protocol (task-type-agnostic): every task plugin's phases_module MUST
+# expose ``graph_payload(current, last_outcome, last_label) -> dict`` with
+# the keys below. The WebUI doesn't know whether the graph is linear,
+# multi-edge, or something else — it just renders what we return.
+#
+# Return shape::
+#
+#     {
+#       "current":         str | None,           # active phase id
+#       "nodes":           [{"id","label","description"}],
+#       "edges":           [{"from","to","label"}],
+#       "active_edge":     {"from","to","label"} | None,
+#       "last_outcome":    str | None,           # advisory
+#       "terminal_nodes":  [{"id","label","description"}],
+#       "outcome_legend":  [{"id","label"}],
+#     }
+# --------------------------------------------------------------------------- #
+
+
+def graph_payload(current, last_outcome, last_label) -> Dict[str, any]:
+    """Build the state-graph render payload for the WebUI."""
+    nodes = nodes_for_graph()
+    edges = edges_for_graph()
+    active_edge = None
+    if last_label:
+        for e in edges:
+            if e["to"] == current and last_label in e["label"].split(" / "):
+                active_edge = {
+                    "from": e["from"], "to": e["to"], "label": last_label,
+                }
+                break
+    terminal_nodes = [
+        {"id": m.id, "label": m.label, "description": m.description}
+        for m in PHASES if m.is_terminal
+    ]
+    outcome_legend = [
+        {"id": o, "label": outcome_label(o)} for o in ALL_OUTCOMES
+    ]
+    return {
+        "current": current,
+        "nodes": nodes,
+        "edges": edges,
+        "active_edge": active_edge,
+        "last_outcome": last_outcome,
+        "terminal_nodes": terminal_nodes,
+        "outcome_legend": outcome_legend,
+    }

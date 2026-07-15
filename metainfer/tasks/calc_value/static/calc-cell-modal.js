@@ -14,7 +14,7 @@ import { useEffect, useState, useCallback } from "preact/hooks";
 import { marked } from "marked";
 import {
   getCalcCellDetail, startCalcCellQa, getCalcQa,
-} from "app/api";
+} from "app/calc-api";
 import { escapeHtml } from "app/utils";
 
 const POLL_INTERVAL_MS = 2000;

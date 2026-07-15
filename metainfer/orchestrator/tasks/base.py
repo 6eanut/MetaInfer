@@ -45,38 +45,33 @@ class TaskPlugin:
         The ``task_type`` string written to ``requirements.json``. This
         is the dispatch key the launcher and WebUI use. Must be unique
         across all registered plugins.
-    name:
-        Human-readable display name (e.g. "Inference Framework Optimizer").
-        Used in docs and possibly UI headers.
-    description:
-        One-line description of what this task does.
     cli_module:
         Dotted module path of the orchestrator CLI entry point. The
         launcher invokes ``python -m <cli_module> run requirements.json
         --state-dir ...``. The CLI module is responsible for parsing
         args and dispatching to its orchestrator's ``run_with_requirements``.
     phases_module:
-        Dotted module path of the module that defines :data:`PHASES`,
-        :data:`TRANSITIONS`, :func:`nodes_for_graph`,
-        :func:`edges_for_graph`, etc. The WebUI's state-graph endpoint
-        imports this lazily to render the per-task-type phase diagram.
-        Set to empty string if the task has no multi-node state graph
-        (e.g. a linear pipeline that doesn't need a graph view).
+        Dotted module path of the module that exposes
+        :func:`graph_payload` (and any phase constants the orchestrator
+        itself needs). The WebUI's state-graph endpoint imports this
+        lazily and calls ``graph_payload(current, last_outcome,
+        last_label)`` to render the per-task-type phase diagram. Set to
+        empty string if the task has no state graph at all.
 
     Notes
     -----
-    Oracles are deliberately NOT in this descriptor. Each pipeline
-    imports its own oracles directly (``from .oracles.correctness import
-    CorrectnessOracle``). The framework doesn't need to know which
-    oracles a task has — that's an internal implementation detail of
-    the task's pipeline. This keeps the descriptor minimal and avoids
-    the prior asymmetry where one oracle type was registered and another
-    was hardcoded.
+    * Human-readable ``label`` / ``description`` are deliberately NOT
+      here — they live on the WebPlugin (single source of truth, read
+      by the WebUI form picker). The orchestrator process doesn't need
+      them.
+    * Oracles are deliberately NOT here either. Each pipeline imports
+      its own oracles directly (``from .oracles.correctness import
+      CorrectnessOracle``). The framework doesn't need to know which
+      oracles a task has — that's an internal implementation detail of
+      the task's pipeline.
     """
 
     task_type: str
-    name: str
-    description: str
     cli_module: str
     phases_module: str = ""
 

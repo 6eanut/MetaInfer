@@ -67,7 +67,7 @@ class AgentSpec:
     # Per-spec model override. When set, takes precedence over the
     # manager's ``default_model``. Lets cost-conscious roles (e.g. node
     # validators that only emit pass/reject) use a cheaper model while
-    # reasoning-heavy roles (graph_builder, calc_writer) keep the strong
+    # reasoning-heavy roles keep the strong
     # default. None → fall back to manager default.
     model: Optional[str] = None
 
@@ -182,8 +182,8 @@ class SubAgentManager:
         # METAINFER_EFFORT env var or the CLI --effort flag.
         self.effort = effort
         # Directories every sub-agent is allowed to read from, in addition to
-        # the per-invocation workdir. Each task passes its own knowledge base
-        # (e.g. metainfer/tasks/gen_infer_framework/notebooks/) via this list;
+        # the per-invocation workdir. Each task package passes its own
+        # knowledge base (e.g. its bundled ``notebooks/`` dir) via this list;
         # without --add-dir the Claude Code sandbox blocks those reads and the
         # agent loops forever against the sandbox. Resolve to absolute, real
         # paths so the flag stays valid even when invoked via a symlink.

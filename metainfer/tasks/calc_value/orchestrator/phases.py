@@ -16,7 +16,7 @@ switch to the calc-value-specific visualization when needed.
 
 from __future__ import annotations
 
-from typing import List
+from typing import Dict, List
 
 # Phase strings — written to run.json. Stored as plain strings (not a
 # Literal) so that the rest of the orchestrator package, which shares
@@ -47,4 +47,46 @@ HUMAN_LABEL = {
     FINISHED: "finished",
     IDLE: "idle",
 }
+
+
+# --------------------------------------------------------------------------- #
+# graph_payload — the ONLY function the WebUI's state-graph endpoint calls.
+#
+# Same protocol shape as gen_infer_framework.orchestrator.phases.graph_payload
+# (see there for the full contract). calc_value's state machine is linear,
+# so we synthesize a linear node/edge list from STEP_ORDER.
+# --------------------------------------------------------------------------- #
+
+
+def graph_payload(current, last_outcome, last_label) -> Dict[str, object]:
+    """Build the state-graph render payload for the WebUI.
+
+    Linear pipeline: one chain of nodes ``S0 → S1 → ... → S4 → finished``
+    with a single ``step`` label on every edge.
+    """
+    nodes = [{"id": p, "label": HUMAN_LABEL.get(p, p)} for p in STEP_ORDER]
+    nodes.append({"id": FINISHED, "label": HUMAN_LABEL.get(FINISHED, "finished"),
+                  "description": "pipeline complete"})
+    edges = []
+    chain = STEP_ORDER + [FINISHED]
+    for a, b in zip(chain, chain[1:]):
+        edges.append({"from": a, "to": b, "label": "step"})
+    active_edge = None
+    for e in edges:
+        if e["to"] == current:
+            active_edge = e
+            break
+    terminal_nodes = [
+        {"id": FINISHED, "label": HUMAN_LABEL.get(FINISHED, "finished"),
+         "description": "pipeline complete"},
+    ]
+    return {
+        "current": current,
+        "nodes": nodes,
+        "edges": edges,
+        "active_edge": active_edge,
+        "last_outcome": last_outcome,
+        "terminal_nodes": terminal_nodes,
+        "outcome_legend": [],
+    }
 

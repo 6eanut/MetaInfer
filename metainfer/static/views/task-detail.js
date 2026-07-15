@@ -20,7 +20,6 @@ import {
   getRun, getIterations, getTimeline, getCharts,
   getStateGraph, getAgents, controlTask,
 } from "app/api";
-import { RetrospectiveModal } from "app/retrospective-modal";
 import { ConfirmActionModal } from "app/confirm-action-modal";
 import { BudgetBar } from "app/budget-bar";
 import { labelFor } from "app/utils";
@@ -66,6 +65,19 @@ export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro, lab
   const [loadState, setLoadState] = useState("loading"); // loading | ok | error
   const [lastErr, setLastErr] = useState(null);
   const [showReset, setShowReset] = useState(false);
+  // Lazy-load the retrospective modal only when the user actually opens
+  // it (some task types never do — e.g. ones without iterations). The
+  // module is shared shell code, not eagerly imported.
+  const [RetroModal, setRetroModal] = useState(null);
+  useEffect(() => {
+    if (selectedIter == null) return;
+    if (RetroModal) return;
+    let cancelled = false;
+    import("app/retrospective-modal")
+      .then((m) => { if (!cancelled) setRetroModal(() => m.RetrospectiveModal); })
+      .catch((e) => console.error("retrospective-modal failed to load:", e));
+    return () => { cancelled = true; };
+  }, [selectedIter, RetroModal]);
 
   const refreshAll = useCallback(async () => {
     if (!taskId) return;
@@ -195,8 +207,8 @@ export function TaskDetailView({ taskId, run, status, onChange, onOpenRetro, lab
               : html`<span class="muted">该任务类型未注册详情视图插件</span>`}
           </div>`}
 
-      ${selectedIter != null ? html`
-        <${RetrospectiveModal}
+      ${selectedIter != null && RetroModal ? html`
+        <${RetroModal}
           taskId=${taskId}
           iteration=${selectedIter}
           onClose=${() => setSelectedIter(null)} />

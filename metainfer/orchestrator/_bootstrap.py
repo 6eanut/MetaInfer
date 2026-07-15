@@ -1,8 +1,8 @@
 """Shared bootstrap helpers for per-task-type orchestrators.
 
-Each orchestrator package (``gen_infer_framework/``, ``calc_value/``, ...)
-lives in its own subpackage and owns its pipeline logic. But every
-orchestrator subprocess has the same lifecycle:
+Each task package lives in its own subpackage under
+``metainfer/tasks/<task_pkg>/orchestrator/`` and owns its pipeline
+logic. But every orchestrator subprocess has the same lifecycle:
 
   1. Read ``requirements.json``
   2. Resolve + mkdir the ``state_dir`` layout (task-type-specific subdirs)

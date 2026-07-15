@@ -1,4 +1,4 @@
-"""The orchestrator package: per-task-type pipelines + shared infrastructure.
+"""The orchestrator package: shared infrastructure for task pipelines.
 
 Top-level modules here are **shared** by every orchestrator:
 
@@ -9,19 +9,16 @@ Top-level modules here are **shared** by every orchestrator:
 * :mod:`metainfer.orchestrator.gpu_preflight`  — GPU availability check
 * :mod:`metainfer.orchestrator.oracles`        — per-task-type oracle registry
 * :mod:`metainfer.orchestrator._bootstrap`     — shared PID / signal / manager setup
-* :mod:`metainfer.orchestrator.registry`       — task_type → orchestrator dispatch table
+* :mod:`metainfer.orchestrator.tasks`          — TaskPlugin registry (task_type → cli/phases modules)
 
-Each task type has its own subpackage with its pipeline, phases, prompts,
-and bootstrap entry point:
+Each task type lives in its own self-contained subpackage under
+``metainfer/tasks/<task_pkg>/`` — pipeline, phases, prompts, bootstrap
+entry point, web plugin, frontend assets, tests. Adding a task type does
+NOT require editing any file in this package; the registry is populated
+by side-effect of importing the task package.
 
-* :mod:`metainfer.orchestrator.gen_infer_framework`
-  — the 6-phase ABCDEF iteration loop (plan→implement→test→review→perf→perf_plan)
-
-* :mod:`metainfer.orchestrator.calc_value`
-  — the linear 4-step calc-theoretical-value pipeline (analyze→graph→calculate→visualize)
-
-The WebUI dispatches to these via the registry; see
-``metainfer.web.launcher`` and :func:`metainfer.orchestrator.registry.get_orchestrator`.
+The WebUI dispatches to orchestrators via the registry; see
+``metainfer.web.launcher``.
 """
 
 __version__ = "0.3.0"

@@ -1,8 +1,9 @@
 """calc_value-specific test helpers.
 
-Kept separate from :mod:`mock_agent` because it's only useful for tests
-that exercise the ``calc_value`` orchestrator or web plugin — but it's
-small enough that pulling it in via ``metainfer.testing`` is fine.
+Lives inside the calc_value task package (not the shared
+:mod:`metainfer.testing` package) because it's only useful for tests
+that exercise the calc_value orchestrator or web plugin. Other task
+packages should ship their own helpers in their own ``tests/`` dir.
 """
 
 from __future__ import annotations

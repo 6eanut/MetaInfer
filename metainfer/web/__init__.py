@@ -8,7 +8,8 @@ This package is the long-lived main process. It serves:
   - per-task orchestrator subprocess management via :mod:`metainfer.web.launcher`
 
 Orchestrators live in :mod:`metainfer.orchestrator` (shared infrastructure)
-and its task-type-specific subpackages (``gen_infer_framework``,
-``calc_value``, ...). One orchestrator subprocess is spawned per task,
-dispatched by task_type via :mod:`metainfer.orchestrator.registry`.
+and the self-contained task packages under :mod:`metainfer.tasks`. One
+orchestrator subprocess is spawned per task, dispatched by ``task_type``
+via the plugin registries (``metainfer.orchestrator.tasks`` and
+``metainfer.web.registry``).
 """

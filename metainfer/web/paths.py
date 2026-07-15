@@ -7,8 +7,9 @@ machines can share a filesystem without write conflicts::
     └── nodes/
         └── <node_id>/                        ($METAINFER_NODE_ID or hostname)
             ├── workspaces/                   iteration-generated artifacts
-            │   └── <task_id>/                one dir per task (gf: 001/, 002/...;
-            │                                  calc_value: step0..4/)
+            │   └── <task_id>/                one dir per task; layout is
+            │                                  task-type-specific (the task
+            │                                  package owns its workspace tree)
             └── .metainfer/                   metadata + logs + prompts
                 ├── registry.json             global task list
                 ├── registry.lock             flock for atomic registry updates
@@ -22,8 +23,8 @@ machines can share a filesystem without write conflicts::
                         ├── orchestrator.{pid,log}
                         ├── agents.json
                         ├── token_budget.json
-                        ├── iterations/*.json  (gf only — per-iter records)
-                        └── logs/<NNN>/        (gf only — prompts/oracle/server)
+                        ├── iterations/*.json  (per-iter records, when applicable)
+                        └── logs/<NNN>/        (prompt/oracle/server logs)
 
 Why the split: artifacts the user cares about (the generated framework code)
 live in a visible, navigable ``workspaces/`` tree; orchestrator bookkeeping

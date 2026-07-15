@@ -30,7 +30,7 @@ from . import paths as _paths
 class TaskEntry:
     """One row in the registry."""
     id: str                                 # user-visible task id, unique
-    type: str                               # task type id (e.g. "gen-infer-framework")
+    type: str                               # task type id (matches WebPlugin.type)
     label: str                              # short display name
     state_dir: str                          # absolute path to task metadata dir
     created_at: float

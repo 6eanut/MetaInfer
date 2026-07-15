@@ -32,7 +32,7 @@ def test_every_task_type_has_a_web_plugin():
     """Each registered task type must own a web plugin package — peer
     design, no "base" vs "extension" split. Both calc-theoretical-value
     and gen-infer-framework register a WebPlugin with at minimum a
-    detail_view_module + frontend_dir + qa_config."""
+    detail_view_module + frontend_dir + qa_config + label/description."""
     types = {p.type for p in registry.all_plugins()}
     assert "calc-theoretical-value" in types
     assert "gen-infer-framework" in types
@@ -42,11 +42,17 @@ def test_every_task_type_has_a_web_plugin():
         assert p.detail_view_module, f"{p.type} missing detail_view_module"
         assert p.frontend_dir, f"{p.type} missing frontend_dir"
         assert p.frontend_dir.exists(), f"{p.type} frontend_dir missing on disk"
-        # importmap_entries must include the detail_view_module so the
-        # browser can resolve the dynamic import.
-        assert p.detail_view_module in p.importmap_entries, (
-            f"{p.type} importmap missing {p.detail_view_module}"
+        # detail_view_module is an importmap key like "app/<stem>". The
+        # corresponding file must exist under frontend_dir — the auto-
+        # discovery in create_app registers it under that key. (Plugins
+        # may also list it explicitly in importmap_entries to override.)
+        stem = p.detail_view_module.split("/", 1)[-1]
+        assert (p.frontend_dir / f"{stem}.js").exists(), (
+            f"{p.type} detail view file {stem}.js not in frontend_dir"
         )
+        # label + description come from the plugin now (no central dict).
+        assert p.label, f"{p.type} missing label"
+        assert p.description, f"{p.type} missing description"
 
 
 def test_get_returns_none_for_unknown_type():
@@ -56,11 +62,12 @@ def test_get_returns_none_for_unknown_type():
 def test_register_rejects_duplicate():
     """Duplicate registration must raise — guards against plugin packages
     accidentally double-importing."""
-    p = registry.WebPlugin(type="__test_dup__")
+    p = registry.WebPlugin(type="__test_dup__", label="t", description="t")
     registry.register(p)
     try:
         with pytest.raises(ValueError):
-            registry.register(registry.WebPlugin(type="__test_dup__"))
+            registry.register(registry.WebPlugin(
+                type="__test_dup__", label="t", description="t"))
     finally:
         # Clean up so other tests aren't polluted.
         registry._REGISTRY.pop("__test_dup__", None)
@@ -72,23 +79,6 @@ def test_all_plugins_returns_copy():
     snap1.clear()
     snap2 = registry.all_plugins()
     assert len(snap2) >= 1  # still has the production plugins
-
-
-# --------------------------------------------------------------------------- #
-# TASK_TYPE_META coverage
-# --------------------------------------------------------------------------- #
-
-@pytest.mark.parametrize("tt", [
-    "gen-infer-framework",
-    "opt-kernel",
-    "port-model",
-    "calc-theoretical-value",
-])
-def test_task_type_meta_has_label_and_description(tt):
-    meta = forms.TASK_TYPE_META.get(tt)
-    assert meta is not None, f"missing TASK_TYPE_META entry for {tt}"
-    assert meta.get("label"), f"{tt} has empty label"
-    assert meta.get("description"), f"{tt} has empty description"
 
 
 # --------------------------------------------------------------------------- #
@@ -107,16 +97,14 @@ def test_load_form_schema_unknown_type_returns_none():
     assert forms.load_form_schema("nonexistent-type") is None
 
 
-def test_list_task_types_includes_yaml_backed_types():
-    """``list_task_types`` only emits types whose YAML file exists."""
+def test_list_task_types_includes_registered_plugins():
+    """``list_task_types`` emits one entry per registered plugin whose
+    task package ships a form.yaml."""
     out = forms.list_task_types()
     ids = [t["id"] for t in out]
-    # All 4 YAML files ship in the repo, so all 4 should appear.
     assert set(ids) >= {
         "gen-infer-framework",
         "calc-theoretical-value",
-        "opt-kernel",
-        "port-model",
     }
     # Every entry has label + description.
     for t in out:

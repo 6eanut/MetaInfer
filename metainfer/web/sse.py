@@ -5,11 +5,17 @@ only — no watchdog dependency). When any tracked file in a task's
 ``state_dir`` changes, an event is pushed to every connected SSE client
 so the frontend can refetch just the affected panels.
 
-Files watched per task:
+Files watched per task (always):
   - run.json         (phase / iteration transitions)
   - timeline.jsonl   (any append)
   - agents.json      (subagent lifecycle)
   - iterations/*.json (iteration record updates)
+
+Plus per-plugin extra paths declared via
+``WebPlugin.extra_watch_paths(entry)`` (e.g. a task package that streams
+incremental artifacts into its ``workspace_dir``). This module is
+task-type-agnostic — adding a new incremental-progress file for your
+task is a plugin-only change, not a public-file edit.
 
 We don't watch the orchestrator.log (too chatty) or code/ (irrelevant to
 the dashboard).
@@ -41,52 +47,64 @@ def _task_state_dir(task_id: str) -> Path:
 def _scan_task(task_id: str) -> Dict[str, float]:
     """Return a {relative_path: mtime} snapshot of every watched file
     currently present under the task's state_dir. Files that don't exist
-    are simply omitted (so missing files don't pollute the diff)."""
+    are simply omitted (so missing files don't pollute the diff).
+
+    Two sources:
+      1. The always-watched canonical files (``WATCHED_RELPATHS`` +
+         ``iterations/*.json``).
+      2. Per-plugin extras via ``WebPlugin.extra_watch_paths(entry)`` —
+         plugin-supplied paths (under or outside state_dir), keyed by
+         their stringified form so the diff is stable across polls.
+    """
+    from . import tasks as _tasks
+    from .registry import get as _get_plugin
+
     state_dir = _task_state_dir(task_id)
     out: Dict[str, float] = {}
     if not state_dir.exists():
-        return out
-    for rel in WATCHED_RELPATHS:
-        p = state_dir / rel
-        if p.exists():
-            try:
-                out[rel] = p.stat().st_mtime
-            except OSError:
-                pass
-    # iterations/ dir: glob all *.json files
-    iters_dir = state_dir / "iterations"
-    if iters_dir.exists():
-        for p in iters_dir.glob("*.json"):
-            try:
-                out[f"iterations/{p.name}"] = p.stat().st_mtime
-            except OSError:
-                pass
-    # calc-theoretical-value streaming artifacts. S0's rough_results.json
-    # and S3's cells/_state.json are written every time a cell completes,
-    # so the audit panel can refresh incrementally. These live under the
-    # task's workspace_dir (NOT state_dir) alongside step0..step4 — look
-    # up the workspace path from the registry; skip these watches for
-    # legacy tasks that don't have a workspace_dir field.
-    from . import tasks as _tasks
+        # Still fall through to the plugin extras — a plugin might
+        # watch workspace files even before state_dir is materialized.
+        pass
+    else:
+        for rel in WATCHED_RELPATHS:
+            p = state_dir / rel
+            if p.exists():
+                try:
+                    out[rel] = p.stat().st_mtime
+                except OSError:
+                    pass
+        iters_dir = state_dir / "iterations"
+        if iters_dir.exists():
+            for p in iters_dir.glob("*.json"):
+                try:
+                    out[f"iterations/{p.name}"] = p.stat().st_mtime
+                except OSError:
+                    pass
+
     entry = _tasks.get_task(task_id)
-    workspace_dir = None
-    if entry is not None:
-        wd = getattr(entry, "workspace_dir", "") or ""
-        if wd:
-            workspace_dir = Path(wd)
-    if workspace_dir is not None:
-        rough = workspace_dir / "step0" / "rough_results.json"
-        if rough.exists():
-            try:
-                out["step0/rough_results.json"] = rough.stat().st_mtime
-            except OSError:
-                pass
-        cell_state = workspace_dir / "step3" / "cells" / "_state.json"
-        if cell_state.exists():
-            try:
-                out["step3/cells/_state.json"] = cell_state.stat().st_mtime
-            except OSError:
-                pass
+    if entry is None:
+        return out
+    plugin = _get_plugin(entry.type)
+    if plugin is None or plugin.extra_watch_paths is None:
+        return out
+    try:
+        extras = plugin.extra_watch_paths(entry) or []
+    except Exception:  # noqa: BLE001 — never let a buggy plugin kill SSE
+        return out
+    for p in extras:
+        if p is None:
+            continue
+        try:
+            p = Path(p)
+        except TypeError:
+            continue
+        if not p.exists():
+            continue
+        try:
+            # Key by absolute path so two extras in different dirs don't collide.
+            out[str(p)] = p.stat().st_mtime
+        except OSError:
+            pass
     return out
 
 

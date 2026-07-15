@@ -22,10 +22,10 @@
 |---|---|---|
 | 预算阈值 | `token_budget.json::config.max_cost_usd` | `requirements.json::token_budget_max_cost_usd`（建任务时表单值，运行时不再读） |
 | 预算累计 | `token_budget.json::totals` | `timeline.jsonl` 的 `token_usage` 事件（展示用，从权威派生） |
-| 运行时状态 | `run.json`（phase / iteration / **finished / final_status**） | `registry.json`（缓存，由 reconcile 从 run.json 派生） |
+| 运行时状态 | `run.json`（phase / iteration / **finished / final_status**） | `registry.json`（**仅身份**：id/type/label/state_dir/workspace_dir/created_at/launcher。**绝不**缓存进程状态） |
 | 任务规格 | `requirements.json`（task_type / form / label / created_at） | `registry.json::type/label`（缓存）；run.json 不再存 task_type |
-| 进程存活 | OS 进程表（`/proc/<pid>`） | `orchestrator.pid` / `runtime.json::tasks.<id>.pid`（reconcile 时从进程表验证） |
-| 进程退出时间 | `orchestrator.pid::finished_at`（进程级元数据） | `registry.json::finished_at`（**派生缓存**——每个写 orchestrator.pid 的地方必须同时 update_task 镜像，reconcile 也会重导） |
+| 进程存活 | OS 进程表（`/proc/<pid>`）+ `orchestrator.pid`（pid / started_at / finished_at / exit_hint） | `runtime.json::tasks.<id>`（仅 WebUI session 用 boot_id 标记归属，不作为状态查询源）；**registry.json 不存进程状态** |
+| 进程死亡清理 | `launcher._reap_dead_pid_file()`（单一 reap 路径） | reconcile / liveness / kill 都**调它**，禁止另写 `_write_pid_file_finished` 这种只更新部分文件的简化版 |
 
 ### 已知反模式（**禁止**）
 
@@ -33,6 +33,8 @@
   - 已修复的例子：`requirements.json::token_budget_max_cost_usd` 和 `token_budget.json::config.max_cost_usd` 曾经都被读，导致 WebUI 调整预算后冷重启失效（commit 待补）。
   - 已修复的例子：`task_type` 曾经同时存在 requirements.json / run.json / registry.json，已从 run.json 移除（orchestrator 加载时 load_run 过滤未知字段，兼容旧文件）。
   - 已修复的例子：`created_at` 曾经同时存在 registry.json / run.json，已从 run.json 移除（registry.json::created_at 是唯一权威源）。
+  - 已修复的例子：进程状态 (pid / started_at / finished_at) 曾经**三处存储** —— `orchestrator.pid` / `runtime.json::tasks.<id>` / `registry.json::tasks[]`。registry 那份名义上是"派生缓存",实际**没有任何派生函数**,reconcile / _reap_dead_pid_file / kill 各自选择性同步;`tasks.update_task` 里 `if v is None: continue` 还静默吞掉了 `pid=None` 的清除语义,导致死任务的 registry 永远显示 stale pid,liveness 用它做 pre-filter 时直接走错路。已**从 registry 移除 pid/started_at/finished_at 字段**,所有进程状态查询只走 `launcher.status()` 读 `orchestrator.pid`;旧 registry.json 通过 `_strip_legacy` 兼容。
+- **多条 reap 路径效果不一致**：reconcile 原来用自己的 `_write_pid_file_finished`(只碰 orchestrator.pid),而 liveness 用 `launcher._reap_dead_pid_file`(还会刷 run.json + 写 timeline)。两条路径 → 同样的死亡事件,UI 拿到的信号不一致。**任何"清理死亡任务"的代码都必须调 `launcher._reap_dead_pid_file`**,禁止另写简化版。
 - **构造函数参数压过文件**：构造函数从 A 文件读值传入，`_load()` 看到"非 None"就跳过 B 文件——这等价于把 A 钉死为权威。正确做法是构造函数只传"env override"，文件值由 `_load()` 单独决定。
 - **多 task 包复制同一份解析逻辑**：每个 task orchestrator 自己实现一遍 cascade → 修一个 bug 要改 N 处。共享逻辑下沉到 `metainfer/orchestrator/` 公共层。
 - **字段别名 + 多 reader 各写一份 fallback 链**：例如 requirements.json 曾经既支持扁平 `target_model` 又支持嵌套 `answers.target_model` / `form.target_model`，每个 reader 自己写 `req.get("x") or (req.get("answers") or {}).get("x")` —— 12+ 处复制，每处 null 处理略有不同。已加 `metainfer.orchestrator.requirements.req_field()` 统一读取，所有 task 包的读取都应走这个 helper。

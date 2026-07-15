@@ -177,9 +177,20 @@ def build_router(plugin):
         try:
             pid = launcher.start(task_id, requirements, sd, wd, extra_args=extra_args)
         except Exception as e:  # noqa: BLE001
-            # Spawn failed — keep the registration so the user can see
-            # the error in the UI, but mark as not running.
-            _tasks.update_task(task_id, pid=None, finished_at=time.time())
+            # Spawn failed — stamp orchestrator.pid with finished_at so
+            # launcher.status() reports not-running. Process state lives
+            # only in orchestrator.pid (SSOT); registry holds identity.
+            pf = sd / "orchestrator.pid"
+            try:
+                import json as _json
+                pf.write_text(_json.dumps({
+                    "pid": None,
+                    "task_id": task_id,
+                    "finished_at": time.time(),
+                    "exit_hint": "spawn-failed",
+                }, indent=2), encoding="utf-8")
+            except OSError:
+                pass
             raise HTTPException(500, detail={"error": f"spawn failed: {e!r}"})
         return {"task_id": task_id, "pid": pid,
                 "state_dir": str(sd), "workspace_dir": str(wd)}

@@ -57,69 +57,29 @@ def _perf_plan_section(text):
 def prepare_prompt(req, iter_dir, notebooks_dir, iteration,
                    prev_failures=None, review_feedback=None, perf_plan=None,
                    logs_dir=None):
+    """Agent only called when review feedback exists. Job: tweak config.yaml."""
     prev_snap = logs_dir / PREV_ITER_LOGS_SUBDIR if logs_dir is not None else None
-    ks = req.get('target_kernel_source', '')
-    kf = req.get('target_kernel_file', '')
-    kfunc = req.get('target_kernel_func', 'fused_moe_kernel')
-    api_base = req.get('llm_api_base', '')
-    model = req.get('llm_model', '')
-    oe_iters = req.get('openevolve_iterations', '50')
     lines = []
-    lines.append("STOP IMMEDIATELY after creating the 3 files. Do NOT verify, test, or spawn sub-agents. Write files and exit.")
+    lines.append("STOP IMMEDIATELY. Your ONLY job: read review feedback and update %s/config.yaml accordingly." % iter_dir)
+    lines.append("evaluator.py and initial_program.py are already verified — do NOT touch them.")
     lines.append("")
-    lines.append("Write these 3 files in %s:" % iter_dir)
+    if review_feedback:
+        lines.append("Review feedback (ACT ON THIS):")
+        lines.append(review_feedback[:3000])
+    if perf_plan:
+        lines.append("Perf plan: %s" % perf_plan[:1000])
+    if prev_failures:
+        lines.append("Previous failures: %s" % str(prev_failures)[:1000])
     lines.append("")
-    lines.append("1) initial_program.py")
-    lines.append("   Read kernel '%s' from %s/%s" % (kfunc, ks, kf))
-    lines.append("   Copy imports + deps needed by the kernel.")
-    lines.append("   Wrap kernel COMPUTATION body in EVOLVE-BLOCK-START/END markers.")
-    lines.append("   Add invoke() function that takes (A, B, topk_weights, expert_ids, ...)")
-    lines.append("   and runs the kernel via triton grid launch. No sglang imports.")
+    lines.append("Adjust ONLY these config.yaml keys based on feedback:")
+    lines.append("- max_iterations (if convergence was too slow/fast)")
+    lines.append("- temperature (if exploration was too narrow/broad)")
+    lines.append("- population_size (if diversity was low)")
+    lines.append("- checkpoint_interval")
+    lines.append("- system_message (add missing DCU architecture hints)")
     lines.append("")
-    lines.append("2) evaluator.py -- CRITICAL RULES:")
-    lines.append("   def evaluate(program_text: str) -> dict:")
-    lines.append("     # 1. FILE PATH support: OpenEvolve passes temp file path, NOT raw text")
-    lines.append("     if os.path.isfile(program_text) and chr(10) not in program_text:")
-    lines.append("         with open(program_text) as f: source = f.read()")
-    lines.append("     else: source = program_text")
-    lines.append("     ns = {}; exec(source, ns)")
-    lines.append("     # 2. TINY shapes to avoid GPU OOM: M=4, N=128, K=256, E=4, top_k=2, dtype=float32")
-    lines.append("     # 3. device='cuda' if torch.cuda.is_available() else 'cpu'")
-    lines.append("     # 4. torch.einsum reference, allclose with rtol=0.01")
-    lines.append("     # 5. Return {combined_score: float, passed: bool}")
-    lines.append("     #    combined_score: -1000 on crash, -500 on NaN, 0-50 fail, 50+50*speedup pass")
-    lines.append("     # 6. Catch ALL exceptions. Return {combined_score:-1000, passed:False} on error")
-    lines.append("")
-    lines.append("3) config.yaml — OpenEvolve YAML with EXACT keys:")
-    lines.append("   llm:")
-    lines.append("     primary_model: '%s'" % model)
-    lines.append("     api_base: '%s'" % api_base)
-    lines.append("     api_key: '${OPENAI_API_KEY}'")
-    lines.append("   database:")
-    lines.append("     population_size: 25")
-    lines.append("     num_islands: 3")
-    lines.append("   evaluator:")
-    lines.append("     timeout: 120")
-    lines.append("     cascade_evaluation: false")
-    lines.append("   max_iterations: %s" % oe_iters)
-    lines.append("   diff_based_evolution: false")
-    lines.append("   allow_full_rewrites: true")
-    lines.append("   max_code_length: 30000")
-    lines.append("")
-    lines.append("Requirements:")
-    lines.append(_render_req(req))
-    lines.append("")
-    lines.append("Working dir: %s" % iter_dir)
-    lines.append("Iteration: %s" % iteration)
-    lines.append(_perf_plan_section(perf_plan))
-    lines.append(_review_feedback_section(review_feedback))
-    lines.append(_prev_logs_section(prev_failures, prev_snap))
+    lines.append("Iter: %s. Write the updated config.yaml, then exit." % iteration)
     return "\n".join(lines)
-
-
-# --------------------------------------------------------------------------- #
-# D_review
-# --------------------------------------------------------------------------- #
 
 def review_prompt(req, iter_dir, notebooks_dir, iteration,
                   outcome=None, failure=None, perf=None, logs_dir=None):

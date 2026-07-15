@@ -1,0 +1,98 @@
+max_iterations: 200
+checkpoint_interval: 20
+random_seed: 42
+llm:
+  primary_model: deepseek-v4-flash
+  primary_model_weight: 1.0
+  temperature: 0.7
+  max_tokens: 16000
+  timeout: 180
+prompt:
+  system_message: "You are an expert GPU kernel engineer specializing in Triton kernel\n\
+    optimization for AMD DCU (gfx928) architecture. Your task is to optimize\nthe\
+    \ fused_moe_kernel Triton kernel for maximum performance on DCU hardware.\n\n\
+    ## ABSOLUTE CONSTRAINTS (NEVER VIOLATE \u2014 score = 0 if violated):\n\n1. DO\
+    \ NOT modify the function signature. All parameter names, types, and\n   tl.constexpr\
+    \ annotations MUST remain exactly as-is. The kernel is called\n   by a fixed harness\
+    \ that depends on every parameter.\n\n2. DO NOT remove or rename any function\
+    \ parameter. Even if you think a\n   parameter is unused, the harness passes it\
+    \ and expects it.\n\n3. The kernel MUST produce numerically identical results\
+    \ to the original\n   (within 1e-3 max absolute error) for ALL input configurations.\
+    \ Test\n   cases cover: normal fp16/bf16, fp8_w8a8 block-wise/per-channel/tensor,\n\
+    \   int8_w8a8, int8_w8a16, bias, routed weights, expert filtering, sorted\n  \
+    \ and unsorted output, and various M/N/K sizes.\n\n4. DO NOT change the EVOLVE-BLOCK\
+    \ boundaries. Only modify code between\n   EVOLVE-BLOCK-START and EVOLVE-BLOCK-END\
+    \ markers.\n\n5. DO NOT delete or modify the write_zeros_to_output and tanh helper\n\
+    \   functions. They are frozen and used by the kernel.\n\n## ALLOWED OPTIMIZATIONS:\n\
+    \n- Reorganize memory access patterns for better LDS (Local Data Shared) usage\n\
+    - Optimize tile sizes and loop ordering for DCU's 64KB LDS with 32 banks\n- Restructure\
+    \ the K-loop for better instruction-level parallelism\n- Use tl.dot with optimal\
+    \ block sizes for DCU V_MMAC_F32_16X16X16_F16\n- Reorder operations to hide memory\
+    \ latency (prefetch, double buffering)\n- Optimize pointer arithmetic and index\
+    \ calculations (use scalar ops)\n- Add LDS-based tile caching when beneficial\n\
+    - Restructure branches for better wavefront uniformity\n- Pad shared memory allocations\
+    \ to avoid LDS bank conflicts\n- Fuse scale/bias application with the main computation\
+    \ loop\n- Use tl.multiple_of / tl.max_contiguous hints for better codegen\n- Adjust\
+    \ GROUP_SIZE_M for better L2 data reuse on DCU\n\n## DCU gfx928 ARCHITECTURE KEY\
+    \ FACTS:\n\n- Wavefront: 64 threads (wider than NVIDIA's 32-thread warps)\n- 256\
+    \ VGPRs per work-item (32-bit each), 102 SGPRs shared per wavefront\n- 64KB LDS\
+    \ per CU, 32 banks of 512x32-bit dual-port RAM\n  \u2192 Bank conflict when (dword_addr/4)\
+    \ % 32 collides \u2192 serialize accesses\n  \u2192 ~10x faster than global memory\
+    \ when bank-conflict-free\n\n- Matrix ops: V_MMAC_F32_16X16X16_F16 (fp16\u2192\
+    fp32, 2 VGPRs/operand)\n  V_MMAC_F32_16X16X16_BF16 (bf16\u2192fp32)\n  V_MMAC_I32_16X16X32_I8\
+    \ (int8\u2192int32)\n  All produce 16x16 results, need EXEC mask = all-1 for correctness\n\
+    \n- LDS matrix reads: DS_READ_M32X16_B16 loads 32x16 fp16 matrix from\n  LDS \u2192\
+    \ VGPRs directly (bypass regular loads, highest throughput)\n\n- Packed math:\
+    \ V_PK_FMA_F16 operates on two fp16 values in one instruction\n\n- Sync: S_BARRIER\
+    \ for workgroup (up to 16 wavefronts = 1024 threads)\n  S_WAITCNT for memory fence\
+    \ (VM_CNT for global, LGKM_CNT for LDS)\n\n- DPP: thread-to-thread data movement\
+    \ within a wavefront\n  (broadcast, shift, rotate \u2014 useful for reductions)\n\
+    \n- L1 cache: GLC=0 allows L1 hits (default), GLC=1 bypasses L1\n\n## SPECIFIC\
+    \ OPTIMIZATION STRATEGIES FOR DCU:\n\n1. **Tile size alignment**: Favor BLOCK_SIZE_M\
+    \ and BLOCK_SIZE_N that\n   are multiples of 16 (MMAC native). 64, 128, 256 are\
+    \ sweet spots\n   for DCU given the 64-thread wavefront width.\n\n2. **LDS weight\
+    \ buffering**: When processing a K-block, load the weight\n   tile into LDS first,\
+    \ then use fast LDS reads for the dot product.\n   Avoid bank conflicts: pad LDS\
+    \ stride to (multiple_of_32 + 1) dwords.\n\n3. **K-loop unrolling**: Unroll 2-4x\
+    \ to amortize pointer updates and\n   scale loads. DCU's scalar ALU can handle\
+    \ address arithmetic in\n   parallel with vector computation.\n\n4. **Double buffering**:\
+    \ Use two sets of registers: load K-block N+1\n   into regs while computing K-block\
+    \ N. Requires ~2x register budget\n   but can hide global memory latency entirely.\n\
+    \n5. **Branch uniformity**: Since MMAC needs uniform EXEC, avoid if/else\n   inside\
+    \ the K-loop. Use tl.where() or hoist conditions outside.\n   For filter_expert:\
+    \ check once before the K-loop, not inside.\n\n6. **Register pressure management**:\
+    \ DCU has 256 VGPRs but high occupancy\n   requires staying under ~128 VGPRs.\
+    \ Fuse dequantization with tl.dot\n   rather than storing intermediate dequantized\
+    \ tiles.\n\n7. **Scale/bias fusion**: Apply quantization scales element-wise during\n\
+    \   accumulation rather than in a separate post-loop pass. This saves\n   a full\
+    \ pass over the accumulator tile.\n\n8. **Scalar precomputation**: Precompute\
+    \ expert pointers, scale pointers,\n   and output pointers using SALU before entering\
+    \ K-loop. Reduces\n   repeated address arithmetic.\n\n## SCORING (what the evaluator\
+    \ measures):\n\n- Correctness (PASS/FAIL): ALL test cases must produce max_abs_error\
+    \ < 1e-3.\n  One failure = score 0.\n- Performance: Geometric mean speedup vs.\
+    \ reference kernel across all\n  test cases, weighted by workload size (M*N*K).\n\
+    - Combined: 0.3 + 0.7 * min(perf_score, 1.0)\n- Target: 1.2x speedup or better\
+    \ on DCU hardware.\n"
+  num_top_programs: 3
+  num_diverse_programs: 2
+  include_artifacts: true
+database:
+  population_size: 50
+  archive_size: 20
+  num_islands: 3
+  elite_selection_ratio: 0.2
+  exploitation_ratio: 0.7
+  feature_dimensions:
+  - complexity
+  feature_bins: 10
+evaluator:
+  timeout: 300
+  cascade_evaluation: true
+  cascade_thresholds:
+  - 0.3
+  - 0.5
+  parallel_evaluations: 1
+  use_llm_feedback: true
+evolution:
+  diff_based_evolution: true
+  max_code_length: 50000

@@ -408,26 +408,50 @@ class Orchestrator:
             return self._do_review(iter_num, iter_dir, ctx)
         raise ValueError(f"no handler for phase {phase!r}")
 
-    # ---- A: prepare ------------------------------------------------------ #
+    # ---- A: prepare — copy templates + agent writes config.yaml ----------- #
 
     def _do_prepare(
         self, n: int, iter_dir: Path, ctx: IterationContext,
     ) -> Tuple[P.Outcome, Optional[Dict[str, float]], Optional[str]]:
-        ok, err, mode, _sid = self._run_agent(
-            name=f"iter{n}-preparer", role="preparer", iteration=n, iter_dir=iter_dir,
-            prompt=prepare_prompt(
-                req=self.req, iter_dir=iter_dir,
-                notebooks_dir=self.cfg.notebooks_dir,
-                iteration=n, prev_failures=ctx.failure,
-                review_feedback=ctx.review_feedback,
-                perf_plan=ctx.perf_plan,
-                logs_dir=self._logs_dir_for(n),
-            ),
-            timeout=self.cfg.plan_timeout_s,
-        )
-        if ok:
-            return P.OK, None, None
-        return _failure_outcome(mode), None, err
+        # Resolve template directory (shipped with the plugin)
+        _template_dir = Path(__file__).parent / "oracles" / "templates"
+
+        # Copy verified evaluator.py, initial_program.py, config.yaml,
+        # and reference/ from templates. Agent does NOT write these from
+        # scratch — the hand-crafted versions in templates/ are battle-tested.
+        import shutil
+        for _fname in ("evaluator.py", "initial_program.py", "config.yaml"):
+            _src = _template_dir / _fname
+            _dst = iter_dir / _fname
+            if _src.is_file():
+                shutil.copy2(_src, _dst)
+        _ref_src = _template_dir / "reference"
+        _ref_dst = iter_dir / "reference"
+        if _ref_src.is_dir() and not _ref_dst.exists():
+            shutil.copytree(_ref_src, _ref_dst)
+
+        # If no review feedback from previous D_review, skip the agent
+        # entirely — template files are already the proven baseline.
+        # Agent only runs to adjust config.yaml when review suggests changes.
+        # Only run agent if there is review feedback worth acting on.
+        # On the first iteration, template config.yaml is used as-is.
+        if ctx.review_feedback or ctx.perf_plan:
+            ok, err, mode, _sid = self._run_agent(
+                name=f"iter{n}-preparer", role="preparer", iteration=n, iter_dir=iter_dir,
+                prompt=prepare_prompt(
+                    req=self.req, iter_dir=iter_dir,
+                    notebooks_dir=self.cfg.notebooks_dir,
+                    iteration=n, prev_failures=ctx.failure,
+                    review_feedback=ctx.review_feedback,
+                    perf_plan=ctx.perf_plan,
+                    logs_dir=self._logs_dir_for(n),
+                ),
+                timeout=self.cfg.plan_timeout_s,
+            )
+            if ok:
+                return P.OK, None, None
+            return _failure_outcome(mode), None, err
+        return P.OK, None, None
 
     # ---- B: evolve (oracle) ---------------------------------------------- #
 

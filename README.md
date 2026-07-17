@@ -79,6 +79,14 @@
 
 ## Quick start
 
+### Step 1: Install ccb (MetaInfer currently uses the open-source Claude Code CLI; other coding agents are not yet supported — contributions welcome)
+
+Open-source ccb repository: https://github.com/claude-code-best/claude-code
+```
+npm i -g claude-code-best
+```
+
+### Step 2: Install MetaInfer
 ```bash
 git clone https://github.com/MetaInfer/MetaInfer.git
 cd MetaInfer
@@ -87,7 +95,7 @@ pip install -r requirements.txt
 ```
 
 Open [http://127.0.0.1:8765](http://127.0.0.1:8765), click **+ New Task**,
-pick a task type, describe your requirements, and the LLM gets to work.
+pick a task type, fill in your requirements, and the LLM gets to work.
 
 ```bash
 # Other ways to start

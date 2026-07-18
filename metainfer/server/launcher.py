@@ -139,6 +139,23 @@ def _read_pid_file(task_id: str) -> Dict[str, Any]:
         return {}
 
 
+def _write_pid_file_placeholder(state_dir: Path, task_id: str, pid: int, started_at: float) -> None:
+    """Write a transitional orchestrator.pid so launcher.status() returns
+    running=True immediately after spawn.  The orchestrator's own
+    ``write_pid_file()`` overwrites this with its real values within
+    seconds; if the orchestrator crashes before that, liveness detects
+    the dead pid and reaps it.
+
+    Uses tmp+replace for atomicity (no flock needed — single writer per
+    task at this point).
+    """
+    pf = state_dir / "orchestrator.pid"
+    tmp = pf.with_suffix(".tmp")
+    data = {"pid": pid, "task_id": task_id, "started_at": started_at}
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.replace(pf)
+
+
 def json_loads_safe(s: str) -> Dict[str, Any]:
     import json
     try:
@@ -207,9 +224,11 @@ class LocalLauncher:
     ) -> int:
         state_dir.mkdir(parents=True, exist_ok=True)
         workspace_dir.mkdir(parents=True, exist_ok=True)
-        req_path = state_dir / "requirements.json"
         import json
-        req_path.write_text(json.dumps(requirements, indent=2), encoding="utf-8")
+        req_path = state_dir / "requirements.json"
+        tmp = req_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(requirements, indent=2), encoding="utf-8")
+        tmp.replace(req_path)
 
         log_path = state_dir / "orchestrator.log"
         log_fp = open(log_path, "ab", buffering=0)
@@ -257,6 +276,17 @@ class LocalLauncher:
         )
         log_fp.close()  # child holds the fd now; parent doesn't need it
         spawn_time = time.time()
+        # Write a PLACEHOLDER orchestrator.pid IMMEDIATELY so
+        # launcher.status() returns running=True within milliseconds of
+        # spawn. Without this there is a 2-10 second gap (orchestrator
+        # startup — imports, dir creation, agent init) where the OLD pid
+        # file (with finished_at from the prior kill/reap) is still on
+        # disk and the UI shows "stopped" even though a new process IS
+        # running. The orchestrator's write_pid_file() will overwrite
+        # this placeholder with its own pid + started_at when it's ready;
+        # if it never does (crash-on-start), the 10-second liveness scan
+        # will detect the dead pid and mark it accordingly.
+        _write_pid_file_placeholder(state_dir, task_id, proc.pid, spawn_time)
         # Record in runtime.json so reconciliation on next WebUI start
         # can recognize the process as ours. Process state (pid,
         # started_at) is owned by orchestrator.pid + runtime.json

@@ -79,6 +79,14 @@
 
 ## 快速开始
 
+### 第一步，安装ccb。（本项目目前使开源的claude code版本，暂不支持其他coding agent，欢迎贡献代码以支持更多coding agent）
+
+开源ccb项目地址：https://github.com/claude-code-best/claude-code
+```
+npm i -g claude-code-best
+```
+
+### 第二步，安装MetaInfer
 ```bash
 git clone https://github.com/MetaInfer/MetaInfer.git
 cd MetaInfer

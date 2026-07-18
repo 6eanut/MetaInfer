@@ -194,6 +194,84 @@ skip the self-test, C will fail and you will be back here next iteration
 reading this same prompt. Save everyone the round-trip."""
 
 
+# Asyncio anti-pattern mandate (gen-infer-framework).
+#
+# Born from a real 12-iteration death spiral: the implementer called
+# HuggingFace tokenizer.apply_chat_template() directly inside the async
+# FastAPI route handler. This BLOCKS the asyncio event loop (no other
+# coroutines run while the tokenizer is computing). At concurrency=1
+# most requests timed out (>120s); at concurrency≥4 ALL requests got
+# ConnectionRefused because the TCP accept queue filled up while the
+# event loop was blocked by the first request's tokenizer call.
+#
+# The fix is a one-liner change — see the mandate below.
+ASYNC_NONBLOCK_MANDATE = """# MANDATORY: never block the asyncio event loop (gen-infer-framework)
+Your inference server uses **asyncio** (FastAPI + uvicorn). A single
+blocking synchronous call inside an `async def` route handler FREEZES
+the entire event loop — no other request can be processed while it runs,
+the TCP accept queue fills up, and concurrent benchmarks fail instantly.
+
+A real 12-iteration death spiral proved this: the implementer's server
+passed C-test (8 serial requests) but E-perf got **0 requests/s at
+concurrency≥4** and **nearly all timeouts at concurrency=1** because:
+
+  async def chat_completions(req):
+      prompt = engine.tokenizer.apply_chat_template(...)  # ← BLOCKS!
+
+## The fix (MUST apply to ALL CPU-heavy / I/O calls in route handlers)
+
+Wrap every blocking call in ``await asyncio.to_thread(...)`` (Python 3.9+):
+
+  async def chat_completions(req):
+      prompt = await asyncio.to_thread(
+          engine.tokenizer.apply_chat_template, messages, ...)
+
+This runs the tokenizer in a background thread so the event loop stays
+alive to accept new connections, run the step loop, and drain responses.
+
+## What counts as BLOCKING (must be offloaded)
+
+- Tokenizer calls: ``tokenizer.encode()``, ``tokenizer.apply_chat_template()``,
+  ``tokenizer.decode()``, ``tokenizer.__call__()``
+- Model weight loading: ``torch.load(...)``, ``safetensors`` loads
+- File I/O: ``open(...).read()`` on large files
+- NumPy / torch CPU compute: big ``torch.matmul``, ``.numpy()``
+- Profiler flush: ``profiler.export_chrome_trace(...)``
+
+## What is SAFE (no offload needed)
+
+- ``await asyncio.sleep()`` — naturally yields
+- ``await`` on FastAPI / httpx / aiohttp — naturally async
+- ``await`` on asyncio.Queue — naturally async
+- GPU calls (``.to("cuda")``, ``torch.cuda.synchronize()``) — they
+  release the GIL internally but still run on the CPU thread; wrap
+  them in ``asyncio.to_thread`` to be safe
+- GPU inference: ``model.forward()`` — technically releases GIL, but
+  the surrounding scheduler logic (pre/post-processing) is CPU-bound;
+  wrap the entire engine step in ``asyncio.to_thread``
+
+## Test your fix
+
+Before declaring B done, run the import smoke test AND then a local
+concurrency smoke test:
+
+  python3 -c "
+import asyncio, urllib.request, json, concurrent.futures
+def hit():
+    data = json.dumps({...}).encode()
+    r = urllib.request.urlopen('http://127.0.0.1:<PORT>/v1/chat/completions', data=data, timeout=30)
+    return r.status
+with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+    results = list(pool.map(hit, range(4)))
+assert all(s==200 for s in results), f'some workers got {results}'
+print('concurrency smoke OK')
+  "
+
+If 4 concurrent requests can't all get 200 within 30s, you are NOT done
+— the E-phase perf oracle will fail exactly the same way.
+"""
+
+
 # GPU preflight mandate (gen-infer-framework).
 #
 # Every iteration's B-phase self-test boots serve.sh, which loads model
@@ -955,9 +1033,14 @@ file:line first.
 - Run the import + server-boot smoke tests from SMOKE_TEST_MANDATE
   before exiting — your last turn's exit without a passing smoke check
   is exactly why we're back here.
+- Do NOT block the asyncio event loop with synchronous tokenizer / file
+  I/O calls — see ASYNC_NONBLOCK_MANDATE below. Wrap blocking calls in
+  ``await asyncio.to_thread(...)``.
 - Be terse. Stop as soon as smoke checks pass.
 
 {PROCESS_SAFETY_MANDATE}
+
+{ASYNC_NONBLOCK_MANDATE}
 
 # Knowledge base
 {NOTEBOOKS_HINT}
@@ -1032,6 +1115,8 @@ def _deliverables_for_task(task_type: str, iter_dir: Path, req: Dict[str, Any]) 
 {IMPORT_SMOKE_TEST_MANDATE}
 
 {SMOKE_TEST_MANDATE}
+
+{ASYNC_NONBLOCK_MANDATE}
 """
     # default: agent-written test.sh
     return f"""2. A test script at `{iter_dir}/test.sh` (bash, executable) that:

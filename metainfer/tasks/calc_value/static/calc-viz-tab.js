@@ -10,14 +10,34 @@ import { html } from "htm/preact";
 import { useCallback, useEffect, useState } from "preact/hooks";
 
 const STEPS = [
-  { id: "s1_analyze",    label: "S1: Analyze (2 agents)" },
-  { id: "s2_graph",      label: "S2: Build graph" },
-  { id: "s3_calculate",  label: "S3: Calculate" },
-  { id: "s4_visualize",  label: "S4: Visualize" },
+  { id: "s0_rough",      label: "S0: Rough",      ctrl: "S0_rough" },
+  { id: "s1_analyze",    label: "S1: Analyze",     ctrl: "S1_analyze" },
+  { id: "s2_graph",      label: "S2: Graph",       ctrl: "S2_graph" },
+  { id: "s3_calculate",  label: "S3: Calculate",   ctrl: "S3_calculate" },
+  { id: "s4_visualize",  label: "S4: Visualize",   ctrl: "S4_visualize" },
 ];
+
+async function rerunStep(taskId, stepCtrl, setRerunState) {
+  try {
+    const r = await fetch(`/api/calc-theoretical-value/${taskId}/control`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "rerun_step", step: stepCtrl }),
+    });
+    if (r.ok) {
+      setRerunState({ ok: true, step: stepCtrl });
+    } else {
+      const err = await r.json().catch(() => ({}));
+      setRerunState({ ok: false, step: stepCtrl, error: err.detail || r.statusText });
+    }
+  } catch (e) {
+    setRerunState({ ok: false, step: stepCtrl, error: e.message });
+  }
+}
 
 export function CalcVizTab({ taskId }) {
   const [summary, setSummary] = useState(null);
+  const [rerunState, setRerunState] = useState(null);
 
   const refreshSummary = useCallback(async () => {
     if (!taskId) return;
@@ -32,6 +52,13 @@ export function CalcVizTab({ taskId }) {
     const id = setInterval(refreshSummary, 5000);
     return () => clearInterval(id);
   }, [refreshSummary]);
+
+  // Auto-clear rerun feedback after 5s.
+  useEffect(() => {
+    if (!rerunState) return;
+    const id = setTimeout(() => setRerunState(null), 5000);
+    return () => clearTimeout(id);
+  }, [rerunState]);
 
   const vizReady = !!summary?.steps?.s4_visualize?.done;
 
@@ -50,10 +77,22 @@ export function CalcVizTab({ taskId }) {
                 ? html`<span class="muted">(${info.node_count} nodes)</span>` : null}
               ${s.id === "s3_calculate" && info?.node_count != null
                 ? html`<span class="muted">(${info.node_count} scripts)</span>` : null}
+              ${done ? html`
+                <button class="btn ghost step-rerun"
+                  title="Re-run ${s.ctrl} (wipes this step + all later steps)"
+                  onClick=${() => rerunStep(taskId, s.ctrl, setRerunState)}>↻ re-run</button>
+              ` : null}
             </div>
           `;
         })}
       </div>
+      ${rerunState ? html`
+        <div class=${`step-msg ${rerunState.ok ? "" : "step-msg-err"}`}>
+          ${rerunState.ok
+            ? `Re-running ${rerunState.step} — orchestrator restarted, refresh in a moment.`
+            : `Failed to re-run ${rerunState.step}: ${rerunState.error || "unknown"}`}
+        </div>
+      ` : null}
     </section>
 
     ${vizReady ? html`

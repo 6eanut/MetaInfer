@@ -50,6 +50,17 @@ def create_app() -> FastAPI:
         print(f"[metainfer-web] reconciliation failed: {e!r}", file=sys.stderr)
 
     # ------------------------------------------------------------------ #
+    # Cluster-wide coordination routes (workers, scoreboard, job logs).
+    # Mounted at /api/cluster/* — stateless, all reads go to disk.
+    # ------------------------------------------------------------------ #
+    try:
+        from . import cluster_routes as _cluster_routes
+        app.include_router(_cluster_routes.build_router(), prefix="/api/cluster")
+    except ImportError as e:
+        import sys
+        print(f"[metainfer-web] cluster routes not loaded: {e!r}", file=sys.stderr)
+
+    # ------------------------------------------------------------------ #
     # Plugin routers
     # ------------------------------------------------------------------ #
     # Each plugin's build_router(plugin) returns an APIRouter of relative-path

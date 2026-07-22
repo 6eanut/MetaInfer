@@ -103,6 +103,7 @@ class MockAgentManager:
         Records the spec, resolves the canned result, stores it. The
         AgentPool's worker thread calls this serially per worker.
         """
+        self._check_workdir(spec)
         if self.delay_s:
             time.sleep(self.delay_s)
         with self._lock:
@@ -116,6 +117,7 @@ class MockAgentManager:
         return None
 
     def launch_async(self, spec: Any, on_done: Optional[Callable] = None):
+        self._check_workdir(spec)
         if self.delay_s:
             time.sleep(self.delay_s)
         with self._lock:
@@ -133,6 +135,26 @@ class MockAgentManager:
 
     def result(self, name: str) -> Optional[AgentResult]:
         return self.results.get(name)
+
+    @staticmethod
+    def _check_workdir(spec: Any) -> None:
+        """Mimic the real SubAgentManager's Popen(cwd=spec.workdir)
+        contract: if the workdir doesn't exist, subprocess.Popen raises
+        FileNotFoundError. Production code MUST mkdir workdir before
+        calling launch; the mock enforces the same invariant so tests
+        catch the bug locally instead of needing a real subprocess.
+        """
+        wd = getattr(spec, "workdir", None)
+        if wd is None:
+            return
+        # str(Path) works for both Path objects and PathLike.
+        if not hasattr(wd, "exists"):
+            return
+        if not wd.exists():
+            raise FileNotFoundError(
+                f"[Errno 2] No such file or directory: '{wd}' "
+                f"(agent workdir must be created before launch)"
+            )
 
     def results(self) -> Dict[str, AgentResult]:
         return dict(self.results)

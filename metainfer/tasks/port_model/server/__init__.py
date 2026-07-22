@@ -1,7 +1,8 @@
-"""port-model server package."""
+"""port-model web server handler.
 
-from metainfer.server.registry import register
-
-from .plugin import plugin
-
-register(plugin)
+FastAPI routes + JSON readers + QA pathsolver + the WebPlugin
+descriptor that mounts them into the WebUI. ``plugin`` is imported
+lazily from ``metainfer.tasks.port_model.__init__`` which triggers
+``server.plugin`` (and its ``register(plugin)`` side-effect) exactly
+once.
+"""

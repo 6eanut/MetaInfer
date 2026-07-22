@@ -1,7 +1,13 @@
-"""CLI entry point for the port-model orchestrator.
+"""CLI for the port-model orchestrator subprocess.
 
-Contract: ``python -m <this_module> run <req.json> --state-dir … --workspace-dir …``
-See CLAUDE.md — all task orchestrator CLIs must accept this exact argv shape.
+Mirrors :mod:`metainfer.tasks.calc_value.orchestrator.cli` (shared
+CLI shape) but dispatches into
+:mod:`metainfer.tasks.port_model.orchestrator.orchestrator`.
+
+Direct CLI usage::
+
+    python -m metainfer.tasks.port_model.orchestrator.cli run req.json \\
+        --state-dir /path/to/task --workspace-dir /path/to/workspace
 """
 
 from __future__ import annotations
@@ -11,40 +17,57 @@ import sys
 from pathlib import Path
 
 
-def main(argv: list[str] | None = None) -> None:
+DEFAULT_CLAUDE_BIN = "ccb"
+DEFAULT_PERMISSION_MODE = "bypassPermissions"
+_VALID_PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions", "auto")
+DEFAULT_EFFORT = "max"
+_VALID_EFFORTS = ("low", "medium", "high", "max")
+
+
+def _resolve(arg_val, env_var, default, valid=None):
+    v = arg_val or __import__("os").environ.get(env_var, default)
+    if valid and v not in valid:
+        raise SystemExit(f"invalid value {v!r}; expected one of {valid}")
+    return v
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="metainfer-orchestrator-port-model",
-        description="port-model — port a model to a target inference framework",
+        prog="metainfer-port-model",
+        description="MetaInfer port-model orchestrator.",
     )
-    sub = parser.add_subparsers(dest="command")
-    run_p = sub.add_parser("run", help="start the orchestrator from a requirements file")
-    run_p.add_argument("requirements", type=Path, help="path to requirements.json")
-    run_p.add_argument("--state-dir", type=Path, required=True, help="state directory (.metainfer/tasks/<id>)")
-    run_p.add_argument("--workspace-dir", type=Path, required=True, help="workspace directory for generated artifacts")
-    run_p.add_argument("--claude-bin", type=str, default="ccb", help="claude-code binary (default: ccb)")
-    run_p.add_argument("--permission-mode", type=str, default="bypassPermissions", help="permission mode for agents")
-    run_p.add_argument("--model", type=str, default=None, help="override model for agents")
-    run_p.add_argument("--effort", type=str, default="max", help="effort level (default: max)")
-    run_p.add_argument("--extra-claude-arg", action="append", dest="extra_claude_args", default=[], help="extra arg to forward to claude-cli (repeatable)")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    run_p = sub.add_parser("run", help="Run the port-model orchestrator")
+    run_p.add_argument("requirements", type=Path, help="Path to requirements.json")
+    run_p.add_argument("--state-dir", type=Path, default=None,
+                      help="Metadata dir (run.json, timeline.jsonl, agents.json, etc.).")
+    run_p.add_argument("--workspace-dir", type=Path, default=None,
+                      help="Generated-artifacts dir (per-phase outputs, dumps).")
+    run_p.add_argument("--claude-bin", default=None)
+    run_p.add_argument("--permission-mode", default=None,
+                      choices=_VALID_PERMISSION_MODES)
+    run_p.add_argument("--model", default=None)
+    run_p.add_argument("--effort", default=None, choices=_VALID_EFFORTS)
+    run_p.add_argument("--extra-claude-arg", action="append", default=[])
 
     args = parser.parse_args(argv)
-    if args.command != "run":
-        parser.print_help()
-        sys.exit(2)
 
-    from .orchestrator import run_with_requirements
-
-    run_with_requirements(
-        req_path=args.requirements,
-        state_dir=args.state_dir,
-        workspace_dir=args.workspace_dir,
-        claude_bin=args.claude_bin,
-        permission_mode=args.permission_mode,
-        model=args.model,
-        effort=args.effort,
-        extra_claude_args=args.extra_claude_args,
-    )
+    if args.cmd == "run":
+        from .orchestrator import run_with_requirements
+        return run_with_requirements(
+            requirements_path=args.requirements,
+            state_dir=args.state_dir,
+            workspace_dir=args.workspace_dir,
+            claude_bin=_resolve(args.claude_bin, "METAINFER_CLAUDE_BIN", DEFAULT_CLAUDE_BIN),
+            permission_mode=_resolve(args.permission_mode, "METAINFER_PERMISSION_MODE",
+                                     DEFAULT_PERMISSION_MODE, _VALID_PERMISSION_MODES),
+            model=args.model,
+            extra_claude_args=args.extra_claude_arg,
+            effort=_resolve(args.effort, "METAINFER_EFFORT", DEFAULT_EFFORT, _VALID_EFFORTS),
+        )
+    return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

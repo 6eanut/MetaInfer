@@ -5,6 +5,13 @@
 // No router — view state is just: { activeTabId | null, showNewTask | false }.
 // A null activeTabId shows an empty-state.
 
+// Bootstrap form widgets BEFORE any view import so the renderer has
+// the full dispatch table available on first paint. Order matters:
+//   1. Built-ins (registers text/textarea/number/... and locks them).
+//   2. Per-plugin overrides (discovered via importmap, loaded below).
+import "app/form-builtin-registrations";
+import { loadAllPluginOverrides } from "app/form-overrides-loader";
+
 import { html, render } from "htm/preact";
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import {
@@ -239,4 +246,9 @@ function EmptyState({ onNewTask }) {
   `;
 }
 
-render(html`<${App} />`, document.getElementById("app"));
+// Wait for any plugin-supplied form widgets to finish registering
+// before first paint so the NewTaskView never renders an "unknown
+// widget" fallback. Plugins without overrides resolve immediately.
+loadAllPluginOverrides().finally(() => {
+  render(html`<${App} />`, document.getElementById("app"));
+});

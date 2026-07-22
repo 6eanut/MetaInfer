@@ -1,18 +1,23 @@
-"""QA config for port-model — maps QA session targets to agent event files.
-
-Mirrors the pattern in opt_kernel/server/_qa.py and gen_infer_framework/server/_qa.py:
-a QAConfig subclass whose ``resolve_target`` accepts either an explicit
-``events_file`` path or a ``(step, agent)`` tuple that the method translates
-into the actual events.jsonl on disk.
-"""
+"""QA config for port-model — maps QA session targets to agent event files."""
 
 from __future__ import annotations
 
 import glob
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict
 
 from metainfer.server._helpers import find_events_file
+
+
+# Map a phase id to its logs/ subdir under state_dir.
+_PHASE_LOG_DIR = {
+    "P1_weight_analysis":   "p1",
+    "P2_framework_analysis": "p2",
+    "P3_architect_review":  "p3",
+    "P4_minimal_framework": "p4",
+    "P5_verify_minimal":    "p5",
+    "P6_port_engine":       "p6",
+}
 
 
 class PortModelQAConfig:
@@ -32,40 +37,42 @@ class PortModelQAConfig:
                 }
             raise FileNotFoundError(f"events_file not found: {events_file}")
 
-        # Tuple lookup: (step, agent) → logs/<step>/<agent>.events.jsonl
-        step = payload.get("step")
+        phase = payload.get("phase") or payload.get("step")
         agent = payload.get("agent")
-        if step and agent:
-            return self._resolve_by_step_agent(state_dir, step, agent)
+        if phase and agent:
+            return self._resolve_by_phase_agent(state_dir, phase, agent)
 
         raise ValueError(
-            "payload must have either 'events_file' or ('step', 'agent')"
+            "payload must have either 'events_file' or ('phase', 'agent')"
         )
 
-    def _resolve_by_step_agent(
-        self, state_dir: Path, step: str, agent: str,
+    def _resolve_by_phase_agent(
+        self, state_dir: Path, phase: str, agent: str,
     ) -> Dict[str, Any]:
-        logs_dir = state_dir / "logs" / step
+        sub = _PHASE_LOG_DIR.get(phase)
+        if sub is None:
+            raise ValueError(f"unknown phase {phase!r}")
+        # logs may be nested under attempt_XX / iter_XX — search recursively.
+        log_root = state_dir / "logs" / sub
         # Try exact match first.
-        candidate = logs_dir / f"{agent}.events.jsonl"
-        if candidate.is_file():
+        for cand in log_root.rglob(f"{agent}.attempt*.events.jsonl"):
             return {
-                "events_file": str(candidate),
-                "target_workdir": str(logs_dir),
-                "target_label": f"{step}/{agent}",
+                "events_file": str(cand),
+                "target_workdir": str(cand.parent),
+                "target_label": f"{phase}/{agent}",
             }
-        # Fallback: glob for agent*.events.jsonl (some steps use name-prefix variants).
-        pattern = str(logs_dir / f"{agent}*.events.jsonl")
-        matches = glob.glob(pattern, recursive=False)
+        # Fallback: glob for agent*.events.jsonl.
+        pattern = str(log_root / "**" / f"{agent}*.events.jsonl")
+        matches = glob.glob(pattern, recursive=True)
         if matches:
             m = Path(matches[0])
             return {
                 "events_file": str(m),
-                "target_workdir": str(logs_dir),
-                "target_label": f"{step}/{m.stem}",
+                "target_workdir": str(m.parent),
+                "target_label": f"{phase}/{m.stem}",
             }
         raise FileNotFoundError(
-            f"no events file found for step={step!r} agent={agent!r} in {logs_dir}"
+            f"no events file found for phase={phase!r} agent={agent!r} under {log_root}"
         )
 
 

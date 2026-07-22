@@ -1,49 +1,25 @@
-- key: model_dir
-  question: 模型权重目录路径
-  header: Model dir
-  required: true
-  form: file
-
-- key: source_framework_dir
-  question: 源框架源码目录（已支持该模型的参考实现）
-  header: Source FW
+- key: model_params_path
+  question: 模型权重参数文件路径（包含 config.json 与权重文件的目录，或单个 .safetensors/.bin 文件）
+  header: Model weights
   required: true
   form: file
 
 - key: target_framework_dir
-  question: 目标框架源码目录（需要在此框架中新增模型支持）
+  question: 移植的目标推理框架源码路径（修改这里的代码以新增模型支持）
   header: Target FW
   required: true
   form: file
 
-- key: target_framework_type
-  question: 目标推理框架类型
-  header: FW type
-  required: true
-  form: select
-  choices:
-    - vLLM
-    - SGLang
-    - TensorRT-LLM
-    - TGI
-    - llama.cpp
+- key: reference_sources
+  question: 一个或多个不能在目标机器上运行的参考实现源码目录（动态增删，每个可附带备注）
+  header: Ref sources
+  required: false
+  form: textarea
+  override_component: kv-list-path-notes
 
-- key: target_hardware
-  question: GPU 硬件平台
-  header: HW
-  required: true
-  form: select
-  choices:
-    - NVIDIA H100
-    - NVIDIA H200
-    - NVIDIA B200
-    - NVIDIA A100
-    - Hygon K100AI
-    - Hygon BW1000
-
-- key: test_prompts
-  question: 基准测试用例（每行一个 prompt；留空则用内置通用用例）
-  header: Prompts
+- key: user_notes
+  question: 额外的原始诉求 / 业务约束 / 注意事项（自由文本）
+  header: User notes
   required: false
   form: textarea
 

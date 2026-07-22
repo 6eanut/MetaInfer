@@ -121,6 +121,29 @@ $METAINFER_ROOT/                    (默认 <cwd>)
 - task plugin → `/api/{type}/{task_id}`
 - 前端静态资源 → `/static/plugins/{type}/`
 
+### Form Widget Registry
+
+新建任务类型时如果需要 form.yaml 内建 widget（text/textarea/number/select/multiselect/radio/file）以外的输入控件，**不要改 sys_shell**。改用自己的 widget：
+
+1. 把 widget 组件写到 `tasks/<your_task>/static/components/<name>.js`，导出一个 Preact 组件，props 至少支持 `{ field, value, onChange, onInput, error }`（你的组件按需 destructure）。
+2. 写一个 `tasks/<your_task>/static/form-overrides.js`，在其中调用：
+   ```js
+   import { registerFormWidget } from "app/form-registry";
+   import { MyWidget } from "./components/my-widget.js";
+   registerFormWidget("my-widget", MyWidget);
+   ```
+3. 在 `WebPlugin.importmap_entries` 里登记一个 `app/form-overrides/<type>` 键指向该文件：
+   ```python
+   _IMPORTMAP_ENTRIES = {
+       "app/form-overrides/<your-task-type>": f"{_STATIC_PREFIX}/form-overrides.js?v=CACHE_BUST",
+   }
+   ```
+4. 在 `form.yaml` 里通过 `override_component: my-widget` 引用。
+
+加载顺序：`main.js` 先 eagerly import `app/form-builtin-registrations`（注册并 lock 内建 widget），再 `await loadAllPluginOverrides()` 扫描 importmap 里所有 `app/form-overrides/*` 键动态 import。Last-wins：同名 widget 后注册者覆盖先注册者。被 lock 的内建名需要 `{force: true}` 才能覆盖。
+
+**单源原则**：form widget 的"权威注册表"在浏览器运行时的 form-registry.js 中，sys_shell 没有任何 widget 代码硬编码在 form-renderer.js 里——后者只是个 dispatcher。新增/修改 widget 只动 `<your_task>/static/`，其他 task 包零改动。
+
 ### 验证
 
 ```bash

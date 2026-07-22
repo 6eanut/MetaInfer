@@ -1,6 +1,6 @@
 """Read-only access to port-model on-disk state.
 
-These are called by the API routes. All reads are defensive: missing files
+Called by the API routes. All reads are defensive: missing files
 return None / empty defaults rather than raising.
 """
 
@@ -10,8 +10,16 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from metainfer.orchestrator.requirements import req_field
 from metainfer.server import state_reader as _sr
+
+
+def _load_json(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return default
 
 
 def read_iterations(state_dir: Path) -> List[Dict[str, Any]]:
@@ -21,23 +29,15 @@ def read_iterations(state_dir: Path) -> List[Dict[str, Any]]:
         return []
     out: List[Dict[str, Any]] = []
     for p in sorted(iters_dir.glob("*.json")):
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
+        data = _load_json(p, None)
+        if data is not None:
             data.setdefault("iteration", int(p.stem))
             out.append(data)
-        except (ValueError, OSError):
-            continue
     return out
 
 
 def read_iteration(state_dir: Path, n: int) -> Optional[Dict[str, Any]]:
-    path = state_dir / "iterations" / f"{n:03d}.json"
-    if not path.is_file():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (ValueError, OSError):
-        return None
+    return _load_json(state_dir / "iterations" / f"{n:03d}.json", None)
 
 
 def read_state_graph(state_dir: Path) -> Dict[str, Any]:
@@ -54,9 +54,9 @@ def read_state_graph(state_dir: Path) -> Dict[str, Any]:
     )
 
 
-def read_memory_markdown(workspace_dir: Path, step: str) -> Optional[str]:
-    """Read a memory/*.md file."""
-    path = workspace_dir / "memory" / f"{step}.md"
+def read_memory_markdown(workspace_dir: Path, name: str) -> Optional[str]:
+    """Read a memory/<name>.md file (canonical consolidated artifacts)."""
+    path = workspace_dir / "memory" / f"{name}.md"
     if not path.is_file():
         return None
     try:
@@ -65,23 +65,70 @@ def read_memory_markdown(workspace_dir: Path, step: str) -> Optional[str]:
         return None
 
 
-def read_diff(workspace_dir: Path) -> Optional[str]:
-    """Read the diff/model_port.patch file."""
-    path = workspace_dir / "diff" / "model_port.patch"
-    if not path.is_file():
+def read_phase_summary(workspace_dir: Path, phase: str) -> Optional[str]:
+    """Read a phase workdir's summary.md."""
+    phase_dirs = {
+        "P1_weight_analysis": "p1",
+        "P2_framework_analysis": "p2",
+        "P3_architect_review": "p3",
+        "P4_minimal_framework": "p4",
+        "P5_verify_minimal": "p5",
+        "P6_port_engine": "p6",
+    }
+    sub = phase_dirs.get(phase)
+    if sub is None:
+        return None
+    summary_path = workspace_dir / sub / "summary.md"
+    if not summary_path.is_file():
         return None
     try:
-        return path.read_text(encoding="utf-8")
+        return summary_path.read_text(encoding="utf-8")
     except OSError:
         return None
 
 
-def read_test_results(workspace_dir: Path) -> Optional[Dict[str, Any]]:
-    """Read the test/test_results.json file."""
-    path = workspace_dir / "test" / "test_results.json"
-    if not path.is_file():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (ValueError, OSError):
-        return None
+def read_p5_dumps_index(workspace_dir: Path) -> Dict[str, Any]:
+    """List hidden_state dumps produced by the minimal framework."""
+    dumps_dir = workspace_dir / "dumps"
+    if not dumps_dir.is_dir():
+        return {"configured": False, "dumps": []}
+    dumps = sorted(p.name for p in dumps_dir.glob("layer_*.npy"))
+    return {"configured": True, "dumps_dir": str(dumps_dir), "dumps": dumps}
+
+
+def read_p6_iterations(workspace_dir: Path) -> List[Dict[str, Any]]:
+    """List P6 attempt dirs + their verdict JSONs."""
+    p6_root = workspace_dir / "p6"
+    if not p6_root.is_dir():
+        return []
+    out: List[Dict[str, Any]] = []
+    for iter_dir in sorted(p6_root.glob("iter_*")):
+        verdict_files = sorted(iter_dir.glob("verdict_*.json"))
+        verdict: Dict[str, Any] = {}
+        if verdict_files:
+            try:
+                verdict = json.loads(verdict_files[-1].read_text(encoding="utf-8"))
+            except (ValueError, OSError):
+                verdict = {}
+        commit_files = sorted(iter_dir.glob("commit_*.txt"))
+        commit_sha = None
+        if commit_files:
+            try:
+                commit_sha = commit_files[-1].read_text(encoding="utf-8").strip()
+            except OSError:
+                commit_sha = None
+        summary_path = iter_dir / "summary.md"
+        summary = None
+        if summary_path.is_file():
+            try:
+                summary = summary_path.read_text(encoding="utf-8")
+            except OSError:
+                summary = None
+        out.append({
+            "dir": str(iter_dir),
+            "name": iter_dir.name,
+            "verdict": verdict,
+            "commit_sha": commit_sha,
+            "summary": summary,
+        })
+    return out

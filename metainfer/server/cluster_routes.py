@@ -22,6 +22,7 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, HTTPException
 
 from metainfer.cluster import worker_registry
+from metainfer.cluster import scoreboard
 from metainfer.cluster.fs_primitives import is_stale_heartbeat
 from metainfer.cluster.paths import worker_heartbeat
 
@@ -57,6 +58,26 @@ def build_router() -> APIRouter:
             "alive": not stale,
             "last_heartbeat_ago_s": _heartbeat_age(node_id),
         }
+
+    # ------------------------------------------------------------------ #
+    # Scoreboard
+    # ------------------------------------------------------------------ #
+    @router.get("/scoreboard")
+    def get_scoreboard() -> List[Dict[str, Any]]:
+        return scoreboard.list_claims(node_id=None)
+
+    @router.post("/scoreboard/force-release")
+    def force_release(payload: Dict[str, Any]) -> Dict[str, Any]:
+        node_id = payload.get("node_id")
+        gpu_idx = payload.get("gpu_idx")
+        if not isinstance(node_id, str) or not isinstance(gpu_idx, int):
+            raise HTTPException(status_code=400,
+                                detail="node_id (str) and gpu_idx (int) required")
+        existed = scoreboard.force_release(
+            (node_id, gpu_idx),
+            reason=str(payload.get("reason", "admin-kill")),
+        )
+        return {"node_id": node_id, "gpu_idx": gpu_idx, "was_held": existed}
 
     return router
 

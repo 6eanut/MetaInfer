@@ -149,6 +149,7 @@ def _write_pid_file_placeholder(state_dir: Path, task_id: str, pid: int, started
     Uses tmp+replace for atomicity (no flock needed — single writer per
     task at this point).
     """
+    import json
     pf = state_dir / "orchestrator.pid"
     tmp = pf.with_suffix(".tmp")
     data = {"pid": pid, "task_id": task_id, "started_at": started_at}

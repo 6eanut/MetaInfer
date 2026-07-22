@@ -2,7 +2,13 @@
 
 from metainfer.orchestrator.tasks.base import TaskPlugin
 
-DIAGNOSTIC_GLOBS = ("*.md", "*.json", "*.prompt.txt", "*.patch")
+DIAGNOSTIC_GLOBS = (
+    "*.md",
+    "*.json",
+    "*.prompt.txt",
+    "*.patch",
+    "*.py",
+)
 
 PLUGIN = TaskPlugin(
     task_type="port-model",

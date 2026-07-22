@@ -3,30 +3,32 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 def make_requirements(
     task_id: str = "pm-1",
     *,
-    form: Optional[Dict[str, Any]] = None,
+    model_params_path: str = "/tmp/fake/model",
+    target_framework_dir: str = "/tmp/fake/target_fw",
+    reference_sources: Optional[List[Dict[str, Any]]] = None,
+    user_notes: str = "test notes",
+    overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    base_form = {
-        "model_dir": "/tmp/fake/model",
-        "source_framework_dir": "/tmp/fake/source_fw",
-        "target_framework_dir": "/tmp/fake/target_fw",
-        "target_framework_type": "vLLM",
-        "target_hardware": "NVIDIA H100",
-        "test_prompts": "",
-    }
-    if form:
-        base_form.update(form)
-    return {
+    """Build a flat (post-WebUI-flatten) requirements.json dict."""
+    req: Dict[str, Any] = {
         "task_id": task_id,
         "task_type": "port-model",
         "created_at": 0.0,
-        "form": base_form,
+        "label": "Port Model",
+        "model_params_path": model_params_path,
+        "target_framework_dir": target_framework_dir,
+        "reference_sources": reference_sources if reference_sources is not None else [],
+        "user_notes": user_notes,
     }
+    if overrides:
+        req.update(overrides)
+    return req
 
 
 def make_minimal_config() -> Dict[str, Any]:

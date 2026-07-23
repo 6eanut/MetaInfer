@@ -42,6 +42,7 @@ def cluster_dir() -> Path:
 # Worker registry
 # --------------------------------------------------------------------------- #
 def workers_dir() -> Path:
+    """``cluster/workers/`` — worker registry root (SSOT JSONs + heartbeats)."""
     p = cluster_dir() / "workers"
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -61,6 +62,7 @@ def worker_heartbeat(node_id: str) -> Path:
 # Scoreboard
 # --------------------------------------------------------------------------- #
 def scoreboard_root() -> Path:
+    """``cluster/scoreboard/`` — root of per-node GPU claim directories."""
     p = cluster_dir() / "scoreboard"
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -91,6 +93,7 @@ def gpu_meta_path(node_id: str, gpu_idx: int) -> Path:
 # Message queue
 # --------------------------------------------------------------------------- #
 def inbox_root() -> Path:
+    """``cluster/inbox/`` — root of the submission queue (per-worker subdirs)."""
     p = cluster_dir() / "inbox"
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -119,6 +122,7 @@ def job_cancel_marker(job_dir_path: Path) -> Path:
 
 
 def replies_root() -> Path:
+    """``cluster/replies/`` — root of result.json directory tree."""
     p = cluster_dir() / "replies"
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -132,4 +136,5 @@ def replies_dir(orchestrator_node_id: str) -> Path:
 
 
 def result_path(orchestrator_node_id: str, job_id: str) -> Path:
+    """``replies/<orchestrator>/<job_id>.result.json`` — authoritative job result."""
     return replies_dir(orchestrator_node_id) / f"{job_id}.result.json"

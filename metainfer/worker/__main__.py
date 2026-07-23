@@ -19,6 +19,7 @@ from metainfer.worker.daemon import WorkerConfig, WorkerDaemon
 
 
 def main(argv: list[str] | None = None) -> int:
+    """``python -m metainfer.worker`` entry point. Returns process exit code."""
     parser = argparse.ArgumentParser(prog="metainfer.worker", description=__doc__)
     parser.add_argument("--node-id", default=os.environ.get("METAINFER_NODE_ID") or socket.gethostname(),
                         help="Worker node identifier (defaults to $METAINFER_NODE_ID or hostname)")

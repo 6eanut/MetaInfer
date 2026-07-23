@@ -43,6 +43,7 @@ POLL_INTERVAL_S = 1.0
 
 @dataclass
 class WorkerConfig:
+    """Configuration for a WorkerDaemon: identity + max in-flight jobs."""
     node_id: str
     metainfer_root: Optional[str] = None
     ip: Optional[str] = None
@@ -116,6 +117,7 @@ class WorkerDaemon:
         self.start()
 
     def stop(self) -> None:
+        """Signal the daemon's main loop to exit (idempotent)."""
         self._stop.set()
 
     def _on_signal(self, signum, frame) -> None:  # noqa: ARG002

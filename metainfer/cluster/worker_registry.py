@@ -49,6 +49,7 @@ class WorkerRecord:
     boot_id: str = ""
 
     def to_dict(self) -> Dict[str, object]:
+        """Serialize to a JSON-friendly dict (gpu_topology keys cast to str)."""
         # JSON keys must be strings — gpu_topology dict has int keys.
         topo_serializable = {str(k): v for k, v in self.gpu_topology.items()}
         return {
@@ -63,6 +64,7 @@ class WorkerRecord:
 
     @classmethod
     def from_dict(cls, d: Dict[str, object]) -> "WorkerRecord":
+        """Inverse of to_dict; casts gpu_topology keys back to int."""
         raw_topo = d.get("gpu_topology", {}) or {}
         topo: Dict[int, Dict[str, object]] = {}
         if isinstance(raw_topo, dict):

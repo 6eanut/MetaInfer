@@ -49,6 +49,7 @@ class JobSpec:
     meta: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a JSON-friendly dict for writing job.json."""
         return {
             "job_id": self.job_id,
             "type": self.type,
@@ -67,6 +68,7 @@ class JobSpec:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "JobSpec":
+        """Inverse of to_dict; tolerates missing keys."""
         slots_raw = d.get("gpu_slots") or []
         slots: List[Tuple[str, int]] = []
         for s in slots_raw:
@@ -89,6 +91,7 @@ class JobSpec:
         )
 
     def validate(self) -> None:
+        """Check required fields; raise ValueError on invalid combos."""
         if self.type not in ("script", "agent"):
             raise ValueError(f"invalid job type: {self.type!r}")
         if self.type == "script" and not self.script_body.strip():
@@ -110,6 +113,10 @@ class JobHandle:
 
 @dataclass
 class JobResult:
+    """Result of a completed (or failed) job. Written atomically to
+    ``replies/<orchestrator>/<job_id>.result.json`` by the worker (or by
+    the orchestrator-side reaper when worker is presumed dead).
+    """
     status: str
     exit_code: Optional[int] = None
     signal: Optional[int] = None
@@ -118,6 +125,7 @@ class JobResult:
     job_id: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a JSON-friendly dict for writing result.json."""
         return {
             "job_id": self.job_id,
             "status": self.status,
@@ -129,6 +137,7 @@ class JobResult:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "JobResult":
+        """Inverse of to_dict; tolerates missing keys."""
         return cls(
             job_id=str(d.get("job_id", "")),
             status=str(d.get("status", "")),
@@ -140,8 +149,10 @@ class JobResult:
 
 
 def new_job_id() -> str:
+    """Generate a fresh hex job id (32-char uuid4). Used by submit_job."""
     return uuid.uuid4().hex
 
 
 def now_ts() -> float:
+    """Current wall-clock time (seconds since epoch). Thin alias for time.time."""
     return time.time()

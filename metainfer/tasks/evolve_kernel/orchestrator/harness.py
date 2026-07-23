@@ -444,11 +444,16 @@ def _run_perf_test_remote(
         return False, {"passed": False, "error": f"Remote submit failed: {e!r}"}
 
     if result is None:
-        return False, {"passed": False, "error": "Remote result unavailable"}
+        return False, {"passed": False, "error": "Remote result unavailable",
+                       "worker_status": "unknown", "worker_node": worker}
     if result.status != "done":
-        return False, {"passed": False, "error": f"Remote status={result.status}"}
+        return False, {"passed": False, "error": f"Remote status={result.status}",
+                       "worker_status": result.status, "worker_node": worker,
+                       "job_id": result.job_id}
     if result.exit_code != 0:
-        return False, {"passed": False, "error": f"Remote exit_code={result.exit_code}"}
+        return False, {"passed": False, "error": f"Remote exit_code={result.exit_code}",
+                       "worker_status": "failed", "worker_node": worker,
+                       "job_id": result.job_id}
 
     # Read stdout.log to parse the harness's JSON output.
     from metainfer.cluster import paths as cluster_paths
@@ -456,11 +461,16 @@ def _run_perf_test_remote(
     try:
         stdout_text = stdout_log.read_text()
     except OSError:
-        return False, {"passed": False, "error": "Could not read remote stdout.log"}
+        return False, {"passed": False, "error": "Could not read remote stdout.log",
+                       "worker_status": "done", "worker_node": worker,
+                       "job_id": result.job_id}
 
     parsed = _extract_json(stdout_text)
     if parsed is None:
         parsed = {"passed": False, "error": "No JSON in remote harness stdout"}
+    parsed.setdefault("worker_status", "done")
+    parsed.setdefault("worker_node", worker)
+    parsed.setdefault("job_id", result.job_id)
     passed = bool(parsed.get("passed", False))
     return passed, parsed
 

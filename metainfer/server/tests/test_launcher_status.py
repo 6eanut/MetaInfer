@@ -107,3 +107,50 @@ def test_status_pid_alive_no_finished_at(isolated_env):
     assert status.running is True
     assert status.exit_hint == "pid-alive"
     assert status.finished_at is None
+
+
+def test_status_remote_hostname_treated_as_alive(isolated_env):
+    """Regression (multi-node): when the orchestrator.pid was minted on
+    a different host than this WebUI (e.g. orchestrator started via CLI on
+    its own node), the local /proc/<pid> check will ALWAYS fail — the pid
+    doesn't exist here. We must NOT call it dead; instead treat it as
+    running with exit_hint="remote-pid-unchecked" and rely on the remote
+    node's finished_at stamping when the orchestrator actually exits."""
+    home = isolated_env["home"]
+    _write_pid_file(home, "t-remote", {
+        "pid": 999_999_989,  # would be reported dead if we hit /proc
+        "task_id": "t-remote",
+        "started_at": time.time(),
+        "hostname": "some-other-node-not-this-one",
+    })
+
+    launcher = LocalLauncher()
+    status = launcher.status("t-remote")
+    assert status.running is True
+    assert status.exit_hint == "remote-pid-unchecked"
+    assert status.finished_at is None
+
+
+def test_kill_on_remote_hostname_does_not_reap(isolated_env, monkeypatch):
+    """Regression (multi-node): kill() on a pid that lives on another
+    node must NOT local-kill + then call _reap_dead_pid_file (which would
+    wrongly mark a still-running remote task as stopped). Just return
+    False so the user knows to go kill it on the right node."""
+    home = isolated_env["home"]
+    _write_pid_file(home, "t-remote-kill", {
+        "pid": 999_999_989,
+        "task_id": "t-remote-kill",
+        "started_at": time.time(),
+        "hostname": "some-other-node-not-this-one",
+    })
+
+    reaped = {"called": False}
+    launcher = LocalLauncher()
+    # Trap _reap_dead_pid_file so we can assert it's never invoked.
+    monkeypatch.setattr(
+        launcher, "_reap_dead_pid_file",
+        lambda *a, **kw: reaped.__setitem__("called", True),
+    )
+    ok = launcher.kill("t-remote-kill", force=True)
+    assert ok is False
+    assert reaped["called"] is False

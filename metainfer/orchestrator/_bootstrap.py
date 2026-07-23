@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import socket
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -76,11 +77,20 @@ def set_process_name(name: str) -> None:
 
 def write_pid_file(pid_file: Path, task_id: str) -> None:
     """Stamp the current PID + task_id so the WebUI can detect a live
-    orchestrator and offer kill/restart controls."""
+    orchestrator and offer kill/restart controls.
+
+    ``hostname`` records where the orchestrator is actually running. In a
+    multi-node setup the WebUI may be on a different node than the
+    orchestrator (started via CLI on its own node); without this field the
+    WebUI would probe its local ``/proc/<pid>``, fail to find the pid, and
+    mark a live orchestrator as dead. See ``launcher.status()`` for the
+    consumer of this field.
+    """
     payload = {
         "pid": os.getpid(),
         "task_id": task_id,
         "started_at": time.time(),
+        "hostname": socket.gethostname(),
     }
     pid_file.parent.mkdir(parents=True, exist_ok=True)
     tmp = pid_file.with_suffix(".tmp")

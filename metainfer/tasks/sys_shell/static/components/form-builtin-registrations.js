@@ -16,8 +16,10 @@ import { SelectField } from "app/form-fields/select-field";
 import { MultiSelectField } from "app/form-fields/multiselect-field";
 import { RadioField } from "app/form-fields/radio-field";
 import { FileField } from "app/form-fields/file-field";
+import { WorkerMultiSelect } from "app/worker-multiselect";
 
-const _BUILTINS = [
+// Primitives: locked so plugins cannot hijack text/number/etc.
+const _PRIMITIVES = [
   ["text", TextField],
   ["textarea", TextAreaField],
   ["number", NumberField],
@@ -27,7 +29,11 @@ const _BUILTINS = [
   ["file", FileField],
 ];
 
-for (const [name, component] of _BUILTINS) {
+for (const [name, component] of _PRIMITIVES) {
   registerFormWidget(name, component);
   lockFormWidget(name);
 }
+
+// Shell-level composite widgets (not locked — plugins may override if needed).
+// worker-multiselect dynamically loads from /api/cluster/workers.
+registerFormWidget("worker-multiselect", WorkerMultiSelect);

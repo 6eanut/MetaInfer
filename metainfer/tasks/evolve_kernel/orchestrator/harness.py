@@ -15,7 +15,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # --------------------------------------------------------------------------- #
@@ -368,11 +368,27 @@ def run_perf_test(
     harness_path: Path,
     kernel_path: Path,
     timeout_s: int = 600,
+    worker_nodes: Optional[List[str]] = None,
 ) -> Tuple[bool, Dict[str, Any]]:
     """Run the performance harness against a kernel.
 
-    Returns (success, parsed_output_dict with exec_time_ms).
+    If ``worker_nodes`` is non-empty, the perf test is delegated to the first
+    listed worker via the cluster SDK (avoids interference from other GPU
+    workloads on the orchestrator's node). Otherwise, runs locally via
+    ``subprocess.run``.
+
+    Returns ``(success, parsed_output_dict with exec_time_ms)``.
     """
+    if worker_nodes:
+        return _run_perf_test_remote(harness_path, kernel_path, worker_nodes, timeout_s)
+    return _run_perf_test_local(harness_path, kernel_path, timeout_s)
+
+
+def _run_perf_test_local(
+    harness_path: Path,
+    kernel_path: Path,
+    timeout_s: int,
+) -> Tuple[bool, Dict[str, Any]]:
     env = dict(os.environ)
     env["METAINFER_KERNEL_PATH"] = str(kernel_path)
 
@@ -394,6 +410,57 @@ def run_perf_test(
         parsed = _extract_json(stderr) or {}
         parsed["passed"] = False
 
+    passed = bool(parsed.get("passed", False))
+    return passed, parsed
+
+
+def _run_perf_test_remote(
+    harness_path: Path,
+    kernel_path: Path,
+    worker_nodes: List[str],
+    timeout_s: int,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Delegate perf test to the first listed worker via the cluster SDK.
+
+    Assumes harness_path and kernel_path are on shared NFS so the worker can
+    read them. Sends GPU 0 on the first worker.
+    """
+    from metainfer.cluster import sdk
+    worker = worker_nodes[0]
+    # Build a shell script that runs the harness and lets its stdout carry the
+    # parsed JSON back to the orchestrator.
+    script = (
+        f"python3 {harness_path} {kernel_path}\n"
+    )
+    try:
+        _, result = sdk.submit_script(
+            worker_node_id=worker,
+            script_body=script,
+            gpu_slots=[(worker, 0)],
+            timeout_s=float(timeout_s),
+            env={"METAINFER_KERNEL_PATH": str(kernel_path)},
+        )
+    except Exception as e:
+        return False, {"passed": False, "error": f"Remote submit failed: {e!r}"}
+
+    if result is None:
+        return False, {"passed": False, "error": "Remote result unavailable"}
+    if result.status != "done":
+        return False, {"passed": False, "error": f"Remote status={result.status}"}
+    if result.exit_code != 0:
+        return False, {"passed": False, "error": f"Remote exit_code={result.exit_code}"}
+
+    # Read stdout.log to parse the harness's JSON output.
+    from metainfer.cluster import paths as cluster_paths
+    stdout_log = cluster_paths.job_dir(worker, result.job_id) / "stdout.log"
+    try:
+        stdout_text = stdout_log.read_text()
+    except OSError:
+        return False, {"passed": False, "error": "Could not read remote stdout.log"}
+
+    parsed = _extract_json(stdout_text)
+    if parsed is None:
+        parsed = {"passed": False, "error": "No JSON in remote harness stdout"}
     passed = bool(parsed.get("passed", False))
     return passed, parsed
 

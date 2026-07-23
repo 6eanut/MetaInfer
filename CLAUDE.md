@@ -26,6 +26,13 @@
 | 任务规格 | `requirements.json`（task_type / form / label / created_at） | `registry.json::type/label`（缓存）；run.json 不再存 task_type |
 | 进程存活 | OS 进程表（`/proc/<pid>`）+ `orchestrator.pid`（pid / started_at / finished_at / exit_hint） | `runtime.json::tasks.<id>`（仅 WebUI session 用 boot_id 标记归属，不作为状态查询源）；**registry.json 不存进程状态** |
 | 进程死亡清理 | `launcher._reap_dead_pid_file()`（单一 reap 路径） | reconcile / liveness / kill 都**调它**，禁止另写 `_write_pid_file_finished` 这种只更新部分文件的简化版 |
+| Worker 身份 + GPU 拓扑 | `cluster/workers/<node_id>.json` | WebUI `/api/cluster/workers` 响应（运行时派生，**不缓存到任何其他文件**） |
+| Worker 心跳 | `cluster/workers/<node_id>.heartbeat` 的 mtime | `.alive` 派生量（`is_stale_heartbeat()` 读取）；**永不重写 JSON 来更新心跳** |
+| GPU slot 持有者 | `cluster/scoreboard/<n>/gpu-<i>.claim`（link 后不可变） | `.meta.json`（lease_until 可改；renew_lease 写这里） |
+| 远程 Job spec | `cluster/inbox/<worker>/<job_id>/job.json` | WebUI `/api/cluster/jobs` 响应（派生） |
+| 远程 Job 结果 | `cluster/replies/<orch>/<job_id>.result.json` | timeline.jsonl 的 `worker_failure` 事件（派生，展示用） |
+| 远程 Job 日志 | `cluster/inbox/<worker>/<job_id>/{stdout,stderr}.log` | 唯一权威，无派生 |
+| Slot 强制释放 | `scoreboard.force_release()`（**单一 reap 路径**，与 cluster reaper 共享） | WebUI `/api/cluster/scoreboard/force-release` 调它；mqueue `reap_orphaned_submissions` 调它；scoreboard `reap_expired_claims` 调它。**禁止另写简化版 reaper** |
 
 ### 已知反模式（**禁止**）
 
@@ -38,6 +45,11 @@
 - **构造函数参数压过文件**：构造函数从 A 文件读值传入，`_load()` 看到"非 None"就跳过 B 文件——这等价于把 A 钉死为权威。正确做法是构造函数只传"env override"，文件值由 `_load()` 单独决定。
 - **多 task 包复制同一份解析逻辑**：每个 task orchestrator 自己实现一遍 cascade → 修一个 bug 要改 N 处。共享逻辑下沉到 `metainfer/orchestrator/` 公共层。
 - **字段别名 + 多 reader 各写一份 fallback 链**：例如 requirements.json 曾经既支持扁平 `target_model` 又支持嵌套 `answers.target_model` / `form.target_model`，每个 reader 自己写 `req.get("x") or (req.get("answers") or {}).get("x")` —— 12+ 处复制，每处 null 处理略有不同。已加 `metainfer.orchestrator.requirements.req_field()` 统一读取，所有 task 包的读取都应走这个 helper。
+- **跨主机 flock**：NFS 上 `fcntl.flock` 语义不可靠，多个主机可能同时拿到同一把锁。cluster 模块**必须**用 `os.link`-based claim（`fs_primitives.link_claim`），禁止用 flock 跨节点互斥。
+- **写第二个 reaper**：cluster 已有 `scoreboard.force_release` 作为**单一 reap 路径**（镜像 `launcher._reap_dead_pid_file` 不变量）。WebUI force-kill / mqueue `reap_orphaned_submissions` / scoreboard `reap_expired_claims` 全部**必须**调它。禁止写只 unlink claim 文件不写 cancel.marker、或不调 `force_release` 的简化版"清理函数"。
+- **重写 heartbeat JSON**：worker 心跳只通过 `touch_heartbeat()` 更新 `cluster/workers/<id>.heartbeat` 文件的 **mtime**。重写 `workers/<id>.json` 来"更新心跳"会破坏 SSOT（JSON 是身份+拓扑的权威源，应在 cold start 时一次性写）。
+- **claim 文件 link 后改动**：`gpu-<i>.claim` 通过 `os.link` 创建后**不可变**。续约写到 sibling `.meta.json`（flock 内 atomic rewrite），reaper 优先读 meta.json 的 lease_until。直接 unlink+relink claim 来"续约"会丢失 secret 校验，破坏租约安全。
+- **Worker 持有 LeaseToken**：租约属 orchestrator（它在 `RemoteJob.__exit__` 里 release）。worker 只负责跑 job + 写 result，**永远不**调用 `release_gpus`。否则 worker 进程崩溃时 slot 不会被 orchestrator 的 finally 释放。
 
 ### requirements.json 扁平化规约
 

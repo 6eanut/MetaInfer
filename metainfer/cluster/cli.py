@@ -21,6 +21,7 @@ from typing import List, Optional
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    """``metainfer-cluster`` CLI entry point. Returns process exit code."""
     parser = argparse.ArgumentParser(prog="metainfer-cluster")
     sub = parser.add_subparsers(dest="cmd", required=True)
 

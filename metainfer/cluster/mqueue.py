@@ -148,6 +148,7 @@ def consume_next_job(worker_node_id: str, worker_pid: int) -> Optional[JobHandle
 
 
 def is_cancelled(job_dir: str | Path) -> bool:
+    """True iff a cancel.marker exists in the job dir (worker should SIGTERM)."""
     return paths.job_cancel_marker(Path(job_dir)).exists()
 
 

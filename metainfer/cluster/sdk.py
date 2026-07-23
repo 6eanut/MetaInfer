@@ -137,12 +137,14 @@ class RemoteJob:
     # ------------------------------------------------------------------ #
     @property
     def job_id(self) -> str:
+        """The job_id assigned at submit time. Raises if called pre-__enter__."""
         if self._job_id is None:
             raise RuntimeError("job_id not available until __enter__")
         return self._job_id
 
     @property
     def token(self) -> Optional[LeaseToken]:
+        """The LeaseToken for acquired GPU slots (None if no slots or pre-enter)."""
         return self._token
 
     def result_ready(self) -> bool:
@@ -192,6 +194,7 @@ class RemoteJob:
         return tail_stdout(self.job_id, self.spec.worker_node_id, offset)
 
     def tail_stderr(self, offset: int = 0) -> bytes:
+        """Read stderr.log from ``offset``. Returns bytes (may be empty)."""
         return tail_stderr(self.job_id, self.spec.worker_node_id, offset)
 
     # ------------------------------------------------------------------ #
@@ -281,6 +284,10 @@ def submit_agent(
 # --------------------------------------------------------------------------- #
 @dataclass
 class PP2RankSpec:
+    """Per-rank spec for ``submit_pp2_ranks``: which worker + GPU runs this rank,
+    and the shell command to launch it. The SDK injects ``RANK``/``WORLD_SIZE``/
+    ``MASTER_ADDR``/``MASTER_PORT`` env vars automatically.
+    """
     worker_node_id: str
     gpu_idx: int
     command: str  # shell command to run as this rank (passed as script body)
@@ -371,6 +378,7 @@ def tail_stdout(job_id: str, worker_node_id: str, offset: int = 0) -> bytes:
 
 
 def tail_stderr(job_id: str, worker_node_id: str, offset: int = 0) -> bytes:
+    """Read ``<job_dir>/stderr.log`` from ``offset``. Returns b"" if missing."""
     p = paths.job_dir(worker_node_id, job_id) / "stderr.log"
     return _read_from_offset(p, offset)
 

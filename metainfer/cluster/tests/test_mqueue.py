@@ -222,9 +222,11 @@ def test_reap_force_releases_scoreboard_slots() -> None:
 
     reaped = mqueue.reap_orphaned_submissions("orch", grace_s=0.0)
     assert job_id in reaped
-    # Slot now free
+    # Slot now free (list_claims returns free rows too — filter to status=held)
     claims = scoreboard.list_claims()
-    assert all(not (c["node_id"] == "w0" and c["gpu_idx"] == 0) for c in claims)
+    held = [c for c in claims if c["status"] == "held"
+            and c["node_id"] == "w0" and c["gpu_idx"] == 0]
+    assert held == [], "reaped slot must not show as held"
 
 
 # --------------------------------------------------------------------------- #

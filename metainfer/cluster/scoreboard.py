@@ -299,20 +299,54 @@ def reap_expired_claims(node_id: str) -> List[Slot]:
 
 
 def list_claims(node_id: Optional[str] = None) -> List[Dict[str, object]]:
-    """Snapshot of current claims. If ``node_id`` is None, scan all nodes."""
-    out: List[Dict[str, object]] = []
-    nodes: List[str]
-    if node_id is not None:
-        nodes = [node_id]
-    else:
-        try:
-            nodes = sorted(p.name for p in paths.scoreboard_root().iterdir() if p.is_dir())
-        except OSError:
-            nodes = []
+    """Snapshot of every GPU in the cluster, free OR held.
 
-    for nid in nodes:
+    Joins the worker topology (``cluster/workers/<id>.json::gpu_topology``)
+    with current claim files. Every GPU the cluster knows about produces
+    one row, with ``status="free"`` or ``status="held"``. Free GPUs carry
+    empty ``holder``/``job_id``; held GPUs carry the claim metadata plus
+    lease remaining.
+
+    If ``node_id`` is given, restrict to that node. GPUs referenced by a
+    claim file but missing from the worker's topology (e.g. worker record
+    deleted mid-run) are still reported so leases aren't silently lost.
+    """
+    # Lazy import to avoid circular dependency at module load.
+    from . import worker_registry
+
+    now = time.time()
+
+    # Collect the set of nodes to report. We union:
+    #   (a) worker records (canonical GPU topology source), AND
+    #   (b) scoreboard dirs that have claim files (covers the case where
+    #       a worker record was deleted but a claim is still live).
+    nodes_topology: Dict[str, Dict[int, Dict[str, object]]] = {}
+    for w in worker_registry.list_workers():
+        if node_id is not None and w.node_id != node_id:
+            continue
+        nodes_topology[w.node_id] = {
+            int(k): v for k, v in (w.gpu_topology or {}).items()
+        }
+    try:
+        for entry in paths.scoreboard_root().iterdir():
+            if not entry.is_dir():
+                continue
+            nid = entry.name
+            if node_id is not None and nid != node_id:
+                continue
+            nodes_topology.setdefault(nid, {})
+    except OSError:
+        pass
+
+    # Collect claim data per (node_id, gpu_idx).
+    claims_by_slot: Dict[Tuple[str, int], Dict[str, object]] = {}
+    for nid in nodes_topology:
         d = paths.scoreboard_dir(nid)
-        for entry in d.iterdir():
+        try:
+            entries = list(d.iterdir())
+        except OSError:
+            entries = []
+        for entry in entries:
             if not entry.name.startswith("gpu-") or not entry.name.endswith(".claim"):
                 continue
             try:
@@ -322,12 +356,43 @@ def list_claims(node_id: Optional[str] = None) -> List[Dict[str, object]]:
             claim = fs_primitives.read_claim(entry)
             if claim is None:
                 continue
+            claims_by_slot[(nid, idx)] = claim
+
+    # Emit one row per known GPU, plus rows for claim files whose GPU idx
+    # isn't in the topology (orphaned claim — shouldn't happen normally
+    # but must be surfaced so it can be released).
+    out: List[Dict[str, object]] = []
+    for nid in sorted(nodes_topology):
+        topo = nodes_topology[nid]
+        all_idxs = set(topo.keys()) | {
+            idx for (n, idx) in claims_by_slot if n == nid
+        }
+        for idx in sorted(all_idxs):
+            claim = claims_by_slot.get((nid, idx))
+            topo_entry = topo.get(idx, {}) or {}
+            if claim is None:
+                out.append({
+                    "node_id": nid,
+                    "gpu_idx": idx,
+                    "status": "free",
+                    "gpu_name": topo_entry.get("name", ""),
+                    "total_memory_mib": topo_entry.get("total_memory_mib", 0),
+                    "holder": "",
+                    "job_id": "",
+                    "acquired_at": 0,
+                    "acquired_ago_s": 0,
+                    "lease_until": 0,
+                    "lease_remaining_s": 0,
+                })
+                continue
             meta = fs_primitives.read_claim(gpu_meta_path(nid, idx)) or {}
             lease_until = float(meta.get("lease_until", claim.get("lease_until", 0)))
-            now = time.time()
             out.append({
                 "node_id": nid,
                 "gpu_idx": idx,
+                "status": "held",
+                "gpu_name": topo_entry.get("name", ""),
+                "total_memory_mib": topo_entry.get("total_memory_mib", 0),
                 "holder": claim.get("holder", ""),
                 "job_id": claim.get("job_id", ""),
                 "acquired_at": float(claim.get("acquired_at", 0)),

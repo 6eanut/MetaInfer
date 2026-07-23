@@ -104,6 +104,45 @@ METAINFER_PORT=9000 ./serve.py
 python -m metainfer.server.app
 ```
 
+## Multi-node setup (optional)
+
+The Quick Start above runs everything on one node. To run GPU workloads on
+remote worker nodes (multi-task GPU isolation, cross-node PP2/TP debugging),
+start a worker daemon on each GPU machine:
+
+```bash
+# On each worker node (must share the same NFS mount as the orchestrator):
+pip install -r requirements.txt   # same deps as the orchestrator
+npm i -g claude-code-best         # ccb needed for agent-type jobs
+
+# Pick a stable node id (defaults to $METAINFER_NODE_ID or hostname)
+METAINFER_ROOT=/shared/metainfer \
+METAINFER_NODE_ID=gpu-worker-1 \
+python -m metainfer.worker --ip 10.0.0.5
+```
+
+The worker registers itself in `cluster/workers/<node_id>.json` and starts
+polling `cluster/inbox/<node_id>/` for jobs. It touches
+`cluster/workers/<node_id>.heartbeat` every 15s — orchestrators and the
+WebUI consider it dead if the heartbeat goes >60s stale.
+
+From the WebUI's **Cluster** tab you can see registered workers, GPU
+scoreboard (free/held per slot), and force-release any stuck slot. Tasks
+that accept a `worker_nodes` form field (e.g. `evolve_kernel`,
+`port_model`) will route GPU work to the listed workers when set.
+
+Admin CLI:
+
+```bash
+metainfer-cluster workers ls          # list workers + alive status
+metainfer-cluster scoreboard show     # show GPU claims across all workers
+metainfer-cluster tail stdout gpu-worker-1 <job_id>   # read a job's stdout
+```
+
+See `docs/multi-node-architecture.md` for the NFS-safe claim algorithm,
+lease/reaper rules, and the single-reap-path invariant, and
+`docs/agent-sdk-guide.md` for the SDK cookbook.
+
 ## License
 
 MIT

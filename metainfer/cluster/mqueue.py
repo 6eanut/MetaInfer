@@ -298,30 +298,32 @@ def reap_orphaned_submissions(
 def list_jobs(worker_node_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Snapshot of jobs across one or all workers' inboxes."""
     out: List[Dict[str, Any]] = []
-    roots = [paths.inbox_dir(worker_node_id)] if worker_node_id else [paths.inbox_root()]
-    for root in roots:
-        if not root.exists():
+    if worker_node_id is not None:
+        worker_dirs = [paths.inbox_dir(worker_node_id)]
+    else:
+        iroot = paths.inbox_root()
+        worker_dirs = [d for d in iroot.iterdir() if d.is_dir()] if iroot.exists() else []
+
+    for worker_dir in worker_dirs:
+        if not worker_dir.exists() or not worker_dir.is_dir():
             continue
-        for worker_dir in root.iterdir() if worker_node_id else [root]:
-            if not worker_dir.is_dir():
+        for job_entry in worker_dir.iterdir():
+            if not job_entry.is_dir() or job_entry.name.startswith("."):
                 continue
-            for job_entry in worker_dir.iterdir():
-                if not job_entry.is_dir() or job_entry.name.startswith("."):
-                    continue
-                spec = read_job(worker_dir.name, job_entry.name)
-                if spec is None:
-                    continue
-                status_data = fs_primitives.read_claim(job_entry / "status.json") or {}
-                out.append({
-                    "job_id": spec.job_id,
-                    "worker_node_id": worker_dir.name,
-                    "submitter": spec.submitter,
-                    "type": spec.type,
-                    "submitted_at": spec.submitted_at,
-                    "submitted_ago_s": max(0.0, now_ts() - spec.submitted_at),
-                    "status": status_data.get("status", STATUS_PENDING),
-                    "claimed": paths.job_claimed_marker(job_entry).exists(),
-                    "cancelled": paths.job_cancel_marker(job_entry).exists(),
-                    "timeout_s": spec.timeout_s,
-                })
+            spec = read_job(worker_dir.name, job_entry.name)
+            if spec is None:
+                continue
+            status_data = fs_primitives.read_claim(job_entry / "status.json") or {}
+            out.append({
+                "job_id": spec.job_id,
+                "worker_node_id": worker_dir.name,
+                "submitter": spec.submitter,
+                "type": spec.type,
+                "submitted_at": spec.submitted_at,
+                "submitted_ago_s": max(0.0, now_ts() - spec.submitted_at),
+                "status": status_data.get("status", STATUS_PENDING),
+                "claimed": paths.job_claimed_marker(job_entry).exists(),
+                "cancelled": paths.job_cancel_marker(job_entry).exists(),
+                "timeout_s": spec.timeout_s,
+            })
     return out

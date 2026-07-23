@@ -1104,3 +1104,22 @@ code {
   color: #8b949e;
   font-weight: 500;
 }
+
+/* Cluster admin views */
+.cluster-overview, .cluster-job-detail { padding: 12px; }
+.cluster-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.cluster-header h2 { margin: 0; }
+.cluster-overview section, .cluster-job-detail section { margin-top: 18px; }
+.cluster-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.cluster-table th, .cluster-table td { padding: 6px 10px; border-bottom: 1px solid #30363d; text-align: left; }
+.cluster-table th { font-weight: 600; color: #8b949e; }
+.pill.ok { color: #3fb950; }
+.pill.dead { color: #f85149; }
+.cluster-err { background: #3a1518; color: #f85149; padding: 8px 12px; border-radius: 4px; margin: 8px 0; }
+.log-box {
+  background: #0d1117; color: #c9d1d9; padding: 10px; border-radius: 4px;
+  font-family: ui-monospace, monospace; font-size: 12px;
+  max-height: 360px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+}
+.btn.danger { background: #da3633; color: white; border-color: #f85149; }
+.btn.danger.small, .btn.small { padding: 2px 8px; font-size: 12px; }

@@ -910,7 +910,15 @@ class Pipeline:
                 f"port_model(P6): target framework ported (iter {iter_idx + 1})"
             )
             return P.OK, None
-        return outcome, verdict.get("reason") or err or "P6 iteration incomplete"
+        # Hand the next P6 iteration a STRUCTURED view of this iter's
+        # verdict (operator_replacements, first_bad_layer, reason) so it
+        # resumes from known progress instead of starting blind. The
+        # format_prev_p6_verdict helper lives in prompts.py so what the
+        # next agent reads matches the prompt's contract.
+        handover = PP.format_prev_p6_verdict(verdict)
+        if not handover:
+            handover = verdict.get("reason") or err or "P6 iteration incomplete"
+        return outcome, handover
 
     # ------------------------------------------------------------------ #
     # Helpers: phase wipe, commit, abort

@@ -718,6 +718,8 @@ class Orchestrator:
             "speedup": speedup,
         })
 
+        self._emit_worker_failure_if_any(perf_result, phase="perf_test", iteration=n)
+
         if not perf_ok:
             ctx.no_improvement_count += 1
             return P.LOGIC_FAIL, None, f"Perf measurement failed: {perf_result.get('error', 'unknown')}"
@@ -779,6 +781,25 @@ class Orchestrator:
 
         return P.OK, perf_dict, None
 
+    def _emit_worker_failure_if_any(
+        self, perf_result: Dict[str, Any], *, phase: str, iteration: int,
+    ) -> None:
+        """Emit a ``worker_failure`` timeline event when a remote worker
+        failed/timed out/died. Local perf runs never set ``worker_status``,
+        so this is a no-op for them.
+        """
+        status = perf_result.get("worker_status")
+        if not status or status == "done":
+            return
+        self.store.append_timeline("worker_failure", {
+            "phase": phase,
+            "iteration": iteration,
+            "worker_status": status,
+            "worker_node": perf_result.get("worker_node"),
+            "job_id": perf_result.get("job_id"),
+            "error": perf_result.get("error"),
+        })
+
     def _measure_original_perf(
         self, n: int, iter_dir: Path, ctx: IterationContext,
     ) -> Tuple[P.Outcome, Optional[Dict[str, float]], Optional[str]]:
@@ -794,6 +815,8 @@ class Orchestrator:
             timeout_s=self.cfg.perf_timeout_s,
             worker_nodes=self.cfg.perf_worker_nodes,
         )
+
+        self._emit_worker_failure_if_any(perf_result, phase="perf_test_original", iteration=n)
 
         if perf_ok:
             exec_time = perf_result.get("evo_median_ms", 0.0)

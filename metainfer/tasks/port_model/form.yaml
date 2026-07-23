@@ -28,3 +28,10 @@
   header: Budget
   required: false
   form: number
+
+- key: worker_nodes
+  question: 用于端到端分布式测试（P5/P6）的 worker 节点（留空则在编排器本地测试；至少 2 个则启用 PP2 跨节点调试）
+  header: Worker nodes
+  required: false
+  form: text
+  override_component: worker-multiselect

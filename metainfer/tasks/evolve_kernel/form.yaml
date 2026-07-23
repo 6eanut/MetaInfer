@@ -32,3 +32,10 @@
   question: "Extra constraints or notes for the optimizer?"
   header: "Notes"
   required: false
+
+- key: worker_nodes
+  question: "Perf-test worker node IDs (leave blank to run perf tests locally; specify one to delegate perf measurement to a dedicated benchmarking node, avoiding interference from other GPU workloads)"
+  header: "Perf workers"
+  required: false
+  form: text
+  override_component: worker-multiselect

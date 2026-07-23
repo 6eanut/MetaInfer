@@ -82,6 +82,11 @@ def run_with_requirements(
     iterations_root = paths["code_root"]
 
     store = StateStore(state_dir)
+    # Optional perf-test worker nodes (comma-separated string in req)
+    from metainfer.orchestrator.requirements import req_field
+    raw_workers = req_field(req, "worker_nodes", "") or ""
+    perf_workers = [w.strip() for w in str(raw_workers).split(",") if w.strip()]
+
     cfg = OrchestratorConfig(
         workdir=state_dir,
         state_dir=state_dir,
@@ -94,6 +99,7 @@ def run_with_requirements(
         model=model,
         permission_mode=permission_mode,
         extra_claude_args=list(extra_claude_args or []),
+        perf_worker_nodes=perf_workers,
     )
 
     manager = make_subagent_manager(

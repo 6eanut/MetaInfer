@@ -133,6 +133,9 @@ class OrchestratorConfig:
     harness_timeout_s: int = 300  # 5 min for correctness
     perf_timeout_s: int = 600    # 10 min for performance
     stuck_timeout_s: int = 600
+    # Optional worker nodes for perf testing (delegated via cluster SDK).
+    # Empty list = run locally.
+    perf_worker_nodes: List[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -702,6 +705,7 @@ class Orchestrator:
         perf_ok, perf_result = run_perf_test(
             harness_path, evolved_path,
             timeout_s=self.cfg.perf_timeout_s,
+            worker_nodes=self.cfg.perf_worker_nodes,
         )
 
         exec_time_ms = perf_result.get("evo_median_ms", 0.0)
@@ -788,6 +792,7 @@ class Orchestrator:
         perf_ok, perf_result = run_perf_test(
             harness_path, ctx.ref_kernel_path,
             timeout_s=self.cfg.perf_timeout_s,
+            worker_nodes=self.cfg.perf_worker_nodes,
         )
 
         if perf_ok:

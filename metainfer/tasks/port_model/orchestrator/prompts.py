@@ -289,18 +289,28 @@ def _distributed_block(worker_nodes: Optional[List[str]]) -> str:
 # 🌐 Distributed workers configured — multi-node launch is REQUIRED
 
 This task lists **{len(worker_nodes)} worker nodes**: ``{nodes_str}``.
-**Every end-to-end framework launch in this iteration MUST span all of
-them.** Single-node / single-GPU launches are forbidden as a final
-verdict — they defeat the purpose of having multi-node workers, and
-the iteration's port-test verdict will be rejected if it doesn't show
+**Every framework launch in this iteration MUST span all of them.**
+This includes diagnostic probes, smoke tests, and boot-only checks —
+not only the final verdict-producing run. The agent MUST NOT write
+or invoke a single-node launcher (e.g. ``run_sglang_offline.py`` with
+``pp_size=1``) as a "quick diagnostic" while ``worker_nodes`` is set.
+The temptation to "fall back to single-node to make progress" is the
+exact anti-pattern this constraint exists to prevent — it produces
+verdicts that don't reflect whether the model actually ports to the
+configured multi-node topology the user asked for.
+
+If a multi-worker launch keeps failing, the correct response is to
+diagnose the failure via the multi-worker logs (``tail_stdout`` /
+``tail_stderr`` on each rank's job) and iterate on the operator /
+kernel / rendezvous issue — NOT to switch to a single-node script.
+A persistent failure must surface in ``verdict_*.json`` as
+``outcome: logic_fail`` with the cross-node evidence attached, so the
+user sees the real state of the port.
+
+The iteration's port-test verdict will be rejected if it doesn't show
 evidence of a real cross-node run (scoreboard claims on every worker,
 torch.distributed rendezvous env in the launch logs, results collected
 from every rank).
-
-Transient single-node probes inside the inner port-test loop are OK as
-a diagnostic (e.g. "does the framework even import on this node"), but
-the iteration's final launch attempt that produces the verdict MUST be
-the full multi-worker launch.
 
 ## Use the cluster SDK — never invoke the framework locally
 
@@ -371,6 +381,25 @@ confirm ALL of:
 If any of these is missing, the iteration's verdict MUST reflect that
 (``outcome: logic_fail`` with a clear reason), not claim success.
 
+## Hard rule — no single-node fallback
+
+If you find yourself about to write or invoke any framework launcher
+that does not span **every** worker in ``worker_nodes`` (e.g. an
+``offline`` / ``smoke`` / ``pp_size=1`` script on a single node), STOP.
+This is forbidden while ``worker_nodes`` is configured. The correct
+action when a multi-worker launch fails is:
+
+  1. Read **both ranks'** stdout/stderr via ``tail_stdout`` / ``tail_stderr``.
+  2. Diagnose the actual root cause (operator crash, rendezvous race,
+     OOM, etc.) — same as you would for any framework port bug.
+  3. Apply the fix (env var, operator replacement, launch-flag tweak)
+     and re-submit via ``submit_pp2_ranks``.
+  4. If after sustained effort the cross-node launch genuinely cannot
+     be made to work, write ``verdict_*.json`` with
+     ``outcome: logic_fail`` and attach the cross-node failure evidence
+     (scoreboard claim snapshots, both ranks' logs). Do NOT silently
+     downgrade to single-node to manufacture a green result.
+
 See ``docs/agent-sdk-guide.md`` for the full SDK cookbook (log tailing,
 error handling, status codes).
 
@@ -380,9 +409,13 @@ error handling, status codes).
 # 🌐 Remote worker configured — launch via cluster SDK is REQUIRED
 
 This task has one worker node configured: ``{nodes_str}``. **Every
-end-to-end framework launch MUST run on that worker via the cluster
-SDK**, not locally on the orchestrator node. The whole point of having
-a remote worker is GPU isolation from the orchestrator.
+framework launch MUST run on that worker via the cluster SDK**, not
+locally on the orchestrator node — including diagnostic probes and
+boot-only smoke tests. Do not write or invoke a local launcher that
+runs on the orchestrator's own GPUs while ``worker_nodes`` is set.
+The whole point of having a remote worker is GPU isolation from the
+orchestrator; running locally defeats that isolation and produces
+verdicts that don't reflect the configured topology.
 
 ```python
 from metainfer.cluster.sdk import submit_script

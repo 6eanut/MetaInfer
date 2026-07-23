@@ -106,3 +106,52 @@ class TestPromptInjection:
         assert "submit_pp2_ranks" not in prompt
         assert "Remote worker available" in prompt
         assert "wOnly" in prompt
+
+
+class TestLaunchConstraintsInjection:
+    def test_p5_empty_launch_constraints_omits_block(self, tmp_path: Path):
+        prompt = p5_verify_minimal_prompt(
+            req=_basic_req(), workdir=tmp_path, p4_dir=tmp_path,
+        )
+        assert "Launch constraints" not in prompt
+
+    def test_p5_launch_constraints_injected(self, tmp_path: Path):
+        req = _basic_req()
+        req["launch_constraints"] = (
+            "Must use --quantization compressed-tensors\n"
+            "378GB model, PP2 must combine with lazy loading"
+        )
+        prompt = p5_verify_minimal_prompt(
+            req=req, workdir=tmp_path, p4_dir=tmp_path,
+        )
+        assert "Launch constraints" in prompt
+        assert "compressed-tensors" in prompt
+        assert "lazy loading" in prompt
+        assert "AUTHORITATIVE" in prompt
+
+    def test_p6_launch_constraints_injected(self, tmp_path: Path):
+        req = _basic_req()
+        req["launch_constraints"] = (
+            "sglang flags: --trust-remote-code --dtype bfloat16\n"
+            "Timeout >= 1800s"
+        )
+        prompt = p6_port_engine_prompt(
+            req=req, workdir=tmp_path,
+            p3_path=tmp_path / "p3.md", p5_dumps_dir=tmp_path / "dumps",
+            iteration=1,
+        )
+        assert "Launch constraints" in prompt
+        assert "--trust-remote-code" in prompt
+        assert "1800s" in prompt
+
+    def test_launch_constraints_doesnt_clobber_distributed_block(self, tmp_path: Path):
+        """Both blocks should coexist when both are configured."""
+        req = _basic_req()
+        req["launch_constraints"] = "PP2 must combine with lazy loading"
+        prompt = p5_verify_minimal_prompt(
+            req=req, workdir=tmp_path, p4_dir=tmp_path,
+            worker_nodes=["wA", "wB"],
+        )
+        assert "Launch constraints" in prompt
+        assert "PP2-capable" in prompt
+        assert "submit_pp2_ranks" in prompt

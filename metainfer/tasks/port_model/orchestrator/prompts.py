@@ -235,6 +235,36 @@ def _user_notes_block(req: Dict[str, Any]) -> str:
 """
 
 
+def _launch_constraints_block(req: Dict[str, Any]) -> str:
+    """Inject user-supplied launch constraints into P5/P6 prompts.
+
+    The field is a free-form textarea where the user describes model-specific
+    launch requirements: required CLI flags, env vars, memory budget facts,
+    known OOM pitfalls, recommended strategies (e.g. "must combine PP2 with
+    lazy loading"), timeout hints. The agent uses this as authoritative
+    constraints when synthesising the actual launch command — port_model
+    itself stays generic (no hardcoded framework names).
+
+    Returns "" when the field is absent or empty (no change to the prompt).
+    """
+    constraints = (req_field(req, "launch_constraints") or "").strip()
+    if not constraints:
+        return ""
+    return f"""\
+# 📋 Launch constraints (user-supplied, AUTHORITATIVE for this model)
+
+The user has provided the following model-specific launch constraints.
+Treat these as hard requirements when synthesising the launch command /
+script — they capture facts about this specific model+framework combo
+that the generic port_model flow does not know:
+
+```
+{constraints}
+```
+
+"""
+
+
 def _distributed_block(worker_nodes: Optional[List[str]]) -> str:
     """Inject distributed-testing guidance when worker_nodes is configured.
 
@@ -628,7 +658,7 @@ def p5_verify_minimal_prompt(
     )
     notes = _user_notes_block(req)
 
-    return banner + CORE_DISCIPLINE + P5_DISCIPLINE + notes + _distributed_block(worker_nodes) + f"""\
+    return banner + CORE_DISCIPLINE + P5_DISCIPLINE + notes + _launch_constraints_block(req) + _distributed_block(worker_nodes) + f"""\
 # Task: 精简推理框架验证工程师 — verify the minimal framework
 
 The minimal framework from P4 lives in (READ + EXECUTE):
@@ -744,6 +774,62 @@ prompts.
 # Phase 6: Port to target framework
 # --------------------------------------------------------------------------- #
 
+def format_prev_p6_verdict(prev_verdict: Dict[str, Any]) -> str:
+    """Render the previous P6 iteration's verdict into a structured handover
+    block for the next iteration.
+
+    The orchestrator stores this string in its ``prev_failure`` slot and
+    passes it to the next ``p6_port_engine_prompt`` call. Keeping the
+    formatting in prompts.py (not in pipeline.py) ensures the rendered
+    block matches what the prompt's ``# Previous iteration handover``
+    section documents.
+
+    Returns "" if ``prev_verdict`` is empty / lacks the structured fields.
+    """
+    if not prev_verdict or not isinstance(prev_verdict, dict):
+        return ""
+
+    parts: List[str] = []
+
+    reason = (prev_verdict.get("reason") or "").strip()
+    if reason:
+        parts.append(f"reason: {reason}")
+
+    bad_layer = prev_verdict.get("similarity_first_bad_layer")
+    bad_row = prev_verdict.get("similarity_first_bad_row")
+    sim_min = prev_verdict.get("similarity_min")
+    if bad_layer is not None or bad_row is not None or sim_min is not None:
+        parts.append(
+            f"similarity_min={sim_min} first_bad_layer={bad_layer} "
+            f"first_bad_row={bad_row}"
+        )
+
+    inner = prev_verdict.get("inner_attempts")
+    if isinstance(inner, int):
+        parts.append(f"inner_attempts_this_iter={inner}")
+
+    replacements = prev_verdict.get("operator_replacements") or []
+    if isinstance(replacements, list) and replacements:
+        parts.append("operator_replacements_tried:")
+        for r in replacements:
+            if not isinstance(r, dict):
+                continue
+            op = r.get("op", "?")
+            strat = r.get("strategy", "?")
+            env = r.get("env_var", "-")
+            sha = r.get("commit_sha", "-")
+            why = (r.get("reason") or "").strip().replace("\n", " ")[:200]
+            parts.append(
+                f"  - op={op} strategy={strat} env={env} "
+                f"commit={sha} reason={why}"
+            )
+
+    if not parts:
+        return ""
+
+    return "\n".join(parts)
+
+
 def p6_port_engine_prompt(
     *, req: Dict[str, Any], workdir: Path,
     p3_path: Path, p5_dumps_dir: Path,
@@ -767,11 +853,15 @@ def p6_port_engine_prompt(
             "```\n" + prev_failure[:6000] + "\n```\n"
         )
 
-    return banner + CORE_DISCIPLINE + P6_DISCIPLINE + notes + prev_block + _distributed_block(worker_nodes) + f"""\
+    return banner + CORE_DISCIPLINE + P6_DISCIPLINE + notes + prev_block + _launch_constraints_block(req) + _distributed_block(worker_nodes) + f"""\
 # Task: 推理引擎移植工程师 — port the model into TARGET_FRAMEWORK_DIR
 
 P3 consolidated spec (READ):
   {p3_path}
+
+P4 minimal framework (READ — reuse its operator implementations as
+reference fallbacks; located under the workspace beside your workdir):
+  ../p4/
 
 Golden dumps from the minimal framework (READ, your similarity oracle):
   {p5_dumps_dir}
@@ -780,84 +870,194 @@ This is iteration #{iteration} of P6. Each iteration that produces a
 non-empty change set MUST end with a git commit inside
 ``TARGET_FRAMEWORK_DIR`` (see below).
 
-## Workflow per iteration
+## ⚙️ This is an iterative port-and-test loop, NOT a one-shot launch
 
-1. **Try to boot the model** in the target framework. Derive a sane
-   launch command from the framework's conventions (vLLM/SGLang/
-   TensorRT-LLM/llama.cpp/…). Capture full stdout+stderr to
-   ``{workdir}/launch_attempt_{iteration}.log``.
+Real target frameworks (sglang / vLLM / TRT-LLM / …) will almost never
+boot your model on the first try. Operator incompatibility (hardware-gen
+mismatch, missing fused kernel), shape / dtype drift, unsupported
+attention backend — they all show up as either launch crashes or output
+divergence. **Your job is to LOOP internally until the 3-prompt batch
+runs end-to-end with cosine ≥ 0.99 against the P5 golden dumps.**
 
-2. **If launch fails because of an unsupported operator**:
-   a. First, look for a flag / env var that falls back to a simpler
-      implementation. If found, use it.
-   b. Otherwise, **add a new code path** to the target framework that
-      routes the failing op to your own implementation. DO NOT DELETE
-      existing code — only ADD: gate the new path behind a new env var
-      or a new branch in the existing function. (E.g.
-      ``if os.environ.get("METAINFER_CUSTOM_OP") == "1": use_my_op()``
-      inserted at the top of the function.)
+Within THIS iteration, repeat the following cycle up to ~5 times (each
+cycle is a launch attempt; log every attempt, never silently overwrite):
 
-3. **If launch succeeds**, send the **3-prompt batch** that P5 used:
-   ```
-   世界上最高的山峰是
-   中国的国旗是
-   人体正常体温约为
-   ```
-   Run them as a batched forward pass (same as P4/P5 — left-pad, one
-   pass, three rows of output). Capture the output AND dump the same
-   hidden_state checkpoints the minimal framework produced, using the
-   **same per-row layout** (``dumps/row0/``, ``dumps/row1/``,
-   ``dumps/row2/``) and the same ``layer_<NNN>_<checkpoint>.npy``
-   naming inside each row subdir.
+    ATTEMPT 1..N (within this single P6 invocation):
+      1. LAUNCH     — boot the model with current code. Capture full
+                      stdout+stderr to ``{workdir}/launch_attempt_<K>.log``
+                      (K = monotonically increasing across attempts
+                      WITHIN this iteration; do NOT reuse numbers).
+      2. DIAGNOSE   — if it crashed, identify the SINGLE failing
+                      operator from the traceback (the deepest frame
+                      inside the framework's own kernel/op code, not
+                      Python stdlib noise). Write one short sentence:
+                      "operator X failed because Y".
+      3. REPLACE    — gate a fallback code path behind a NEW env var
+                      or branch. ADD-ONLY (never delete framework code).
+                      Pick a strategy from the hierarchy below.
+      4. RELAUNCH   — boot again with the new env var set. If it still
+                      crashes on the SAME operator, your replacement is
+                      wrong — revise it. If it crashes on a DIFFERENT
+                      operator, progress: back to step 2 with the new
+                      traceback.
+      5. INFER      — when boot succeeds, run the 3-prompt batch (see below)
+                      and dump hidden_states at the same checkpoints P4 used.
+      6. DUMP-CMP   — load P5 golden dumps, compute cosine per checkpoint.
+      7. BISECT     — if any cosine < 0.99: walk layers from 0 upward,
+                      find the FIRST divergent one — the operator that
+                      produces that layer's output is the next target.
+                      Back to step 3 (you have a new op to replace).
+      8. STOP       — cosine ≥ 0.99 everywhere AND output is semantically
+                      sensible → write verdict, commit, finish.
 
-4. **Compare hidden_states** between target framework and the golden
-   dumps **per row**. For each row<batch_idx>:
-   - Load every ``row<batch_idx>/layer_*.npy`` from both sides.
-   - Compute cosine similarity per checkpoint.
-   - Require ≥ 0.99 per checkpoint.
-   Do NOT use exact equality (different backends will diverge at
-   1e-3 scale). Report the **minimum similarity across all rows** as
-   ``similarity_min`` in the verdict.
+Cap your inner attempts around 5; if you cannot converge in one P6
+iteration, write the verdict with what you learned so the next P6
+iteration continues from there (the orchestrator will start one).
 
-5. **Verdict**:
-   - If output is semantically reasonable AND every checkpoint has
-     cosine ≥ 0.99: Outcome=ok.
-   - If checkpoints diverge: identify the first divergent operator,
-     fix it, Outcome=needs_repair (orchestrator will start another
-     P6 iteration).
-   - If you cannot even launch: Outcome=test_fail.
+### 🧱 Operator replacement strategy hierarchy (try in this order)
 
-6. **Git commit** (only if you modified target_fw this iteration):
-   ```
-   cd {target_fw}
-   git add -A
-   git commit -m "port_model(P6 iter {iteration}): <one-line summary>"
-   ```
-   If ``{target_fw}`` is not yet a git repo, run ``git init`` first.
-   Record the commit SHA to ``{workdir}/commit_{iteration}.txt``.
+When the framework's stock operator won't run on your hardware / model,
+pick the FIRST option that applies. Always gate behind a new env var so
+the original code path stays untouched:
 
-7. **Write ``{workdir}/verdict_{iteration}.json``** with:
-   ```
-   {{
-     "iteration": {iteration},
-     "launched": true|false,
-     "batch": [
-       {{"prompt": "世界上最高的山峰是", "topk_text": [...],
-         "verifier_judgment": "passed|failed", "verifier_reason": "..."}},
-       {{"prompt": "中国的国旗是", ...}},
-       {{"prompt": "人体正常体温约为", ...}}
-     ],
-     "similarity_min": <float or null — minimum across all rows>,
-     "similarity_first_bad_layer": <int or null>,
-     "similarity_first_bad_row": <int or null>,
-     "commit_sha": "<sha or null>",
-     "outcome": "ok|needs_repair|test_fail",
-     "reason": "..."
-   }}
-   ```
-   ``output_text`` is no longer a single string — use the per-row
-   ``batch[].topk_text`` instead. P5 had the same shape; keep them
-   aligned so the orchestrator's parsing stays uniform.
+  1. **Framework-native flag / env var fallback** — many frameworks
+     expose a "use simpler kernel" flag (e.g. ``--attention-backend
+     triton``, ``--disable-cuda-graph``, ``SGL_ENABLE_<X>_FALLBACK=1``).
+     grep the framework for env vars / config knobs referenced in the
+     failing code path. Always preferred: framework maintains it.
+
+  2. **Triton re-implementation** — write a Triton kernel with the same
+     I/O dtype+shape. Good for attention, fused GEMM, RMSNorm, RoPE,
+     quantized GEMM. Gate behind e.g. ``METAINFER_OPS_USE_TRITON=1``.
+
+  3. **Pure PyTorch reference** — last-resort, slowest, always correct.
+     Use the operator's mathematical definition from the P3 spec, OR
+     copy the relevant routine verbatim from ``../p4/`` (the P4
+     minimal framework is correctness-checked against the model — its
+     operators are by-definition correct). Gate behind
+     ``METAINFER_OPS_USE_TORCH=1``.
+
+  4. **P4 reference impl as drop-in** — for MoE routers, dequantization,
+     RoPE, attention scoring, the P4 code already has a working (if
+     slow) reference. Read it, adapt the interface, gate it.
+
+**Hard rules for every replacement**:
+  - ADD-ONLY. Gate every replacement behind a NEW env var or branch.
+    Never delete or overwrite framework code.
+  - One commit per replacement inside ``{target_fw}``:
+    ``git commit -m "port_model(P6 iter {iteration}): replace <op> via <strategy>"``
+  - Record every replacement in your verdict's ``operator_replacements``
+    field (see verdict schema below) — the next P6 iteration reads this
+    to skip already-tried approaches.
+
+### 🔬 Diagnosing "operator unsupported on my hardware"
+
+A common failure: the framework has a kernel that only supports specific
+hardware gens (e.g. aiter / tilelang fp8 MMAC requiring gfx938 / gfx92a
+/ gfx946; cutlass kernels requiring sm_80+). Symptoms include:
+
+  - Compile errors mentioning the GPU arch (``gfx928``, ``sm_80``, …) or
+    ``MMAC operations are only supported on … architectures``.
+  - ``RecursionError`` / ``ImportError`` from the operator's module
+    (some frameworks fail at import time when the kernel can't JIT).
+  - ``CUDA error: no kernel image is available for execution``.
+
+When you see these:
+  - The failing operator's module name is in the traceback — find it.
+  - grep the framework for the capability check (usually an ``if`` on
+    ``torch.cuda.get_device_capability()``, or a separate backend module
+    selected by arch string).
+  - Add a branch that forces the dispatch to a Triton or pure-torch
+    fallback you write (strategy #2 or #3 above), gated by e.g.
+    ``METAINFER_OPS_FORCE_<NAME>=1``.
+  - This is the canonical use case for strategy #2/#3 — the framework's
+    fast path simply doesn't target your hardware, so the only viable
+    path is a correct (if slow) replacement.
+
+### 🎯 Dump-driven bisection (when launch succeeds but output is wrong)
+
+When the framework boots and produces tokens but the 3-prompt batch is
+garbage (wrong language, ``<unk>``, punctuation-only, etc.), you MUST
+use the P5 golden dumps to localize the bug — do NOT guess:
+
+  - For each layer index ``L`` from 0 upward:
+    * Load ``{p5_dumps_dir}/row<R>/layer_<NNN>_<checkpoint>.npy``
+      (golden) and ``{workdir}/dumps/row<R>/layer_<NNN>_<checkpoint>.npy``
+      (yours), for every checkpoint the P4 framework dumped.
+    * Compute cosine similarity per checkpoint.
+    * The **first layer** where any checkpoint has cosine < 0.99 is
+      your culprit — record its index as ``similarity_first_bad_layer``.
+  - Read the framework code for that layer's forward pass; identify
+    which sub-operator (QK torch.mm, softmax, RoPE, MoE router, …)
+    produces the divergent checkpoint.
+  - Apply the replacement strategy hierarchy to that specific operator.
+  - On the next inner attempt, re-run and re-compare — cosine should
+    improve at that layer. If it doesn't, your replacement is wrong.
+
+### 📥 Test batch (the 3 prompts P5 used)
+
+When launch succeeds, run this exact batch as one left-padded forward
+pass (same convention as P4 / P5):
+
+```
+世界上最高的山峰是
+中国的国旗是
+人体正常体温约为
+```
+
+Dump hidden_states with the SAME per-row layout as P5:
+``dumps/row{0,1,2}/layer_<NNN>_<checkpoint>.npy``.
+
+### 📤 Git commit
+
+After each successful replacement AND at iteration end, commit inside
+``{target_fw}``:
+```
+cd {target_fw}
+git add -A
+git commit -m "port_model(P6 iter {iteration}): <one-line summary>"
+```
+If ``{target_fw}`` is not yet a git repo, run ``git init`` first.
+Record the FINAL commit SHA to ``{workdir}/commit_{iteration}.txt``.
+
+### 📋 Verdict — ``{workdir}/verdict_{iteration}.json``
+
+```
+{{
+  "iteration": {iteration},
+  "launched": true|false,
+  "inner_attempts": <int — launches tried within this iter>,
+  "operator_replacements": [
+    {{"op": "<fully-qualified op name, e.g. GlmMoeDSAAttention.forward>",
+      "strategy": "flag-fallback|triton|pure-torch|p4-reference",
+      "env_var": "<the new env var you introduced, or null>",
+      "commit_sha": "<sha of the per-replacement commit>",
+      "reason": "<one short sentence — what failed, why this fixes it>"}}
+  ],
+  "batch": [
+    {{"prompt": "世界上最高的山峰是", "topk_text": [...],
+      "verifier_judgment": "passed|failed", "verifier_reason": "..."}},
+    {{"prompt": "中国的国旗是", ...}},
+    {{"prompt": "人体正常体温约为", ...}}
+  ],
+  "similarity_min": <float or null — min cosine across all rows / checkpoints>,
+  "similarity_first_bad_layer": <int or null>,
+  "similarity_first_bad_row": <int or null>,
+  "commit_sha": "<final iter commit sha or null>",
+  "outcome": "ok|needs_repair|test_fail",
+  "reason": "<short — what blocked you; the next iter reads this>"
+}}
+```
+
+Outcome mapping:
+  - ``ok``          — cosine ≥ 0.99 everywhere AND output semantically correct.
+  - ``needs_repair`` — you made progress but didn't converge (e.g. ran
+                       out of inner attempts). MUST include the
+                       ``operator_replacements`` you've made and the
+                       ``similarity_first_bad_layer`` so the next iter
+                       continues.
+  - ``test_fail``   — you cannot even boot the model after exhausting
+                       the strategy hierarchy. Explain in ``reason``.
 
 {SUMMARY_CONTRACT}
 """

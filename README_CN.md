@@ -104,6 +104,45 @@ METAINFER_PORT=9000 ./serve.py
 python -m metainfer.server.app
 ```
 
+## 多节点部署（可选）
+
+上面的"快速开始"把所有工作放在同一台机器上。如果要把 GPU 任务派发到远端
+worker 节点（用于多任务 GPU 隔离 / 跨节点 PP2/TP 调试），在每台 GPU 机器
+上启动 worker daemon：
+
+```bash
+# 在每个 worker 节点（必须与编排器共享同一个 NFS 挂载）：
+pip install -r requirements.txt   # 与编排器相同的依赖
+npm i -g claude-code-best         # agent 类 job 需要 ccb
+
+# 选一个稳定的 node id（缺省取 $METAINFER_NODE_ID 或 hostname）
+METAINFER_ROOT=/shared/metainfer \
+METAINFER_NODE_ID=gpu-worker-1 \
+python -m metainfer.worker --ip 10.0.0.5
+```
+
+worker 启动后会把自己写入 `cluster/workers/<node_id>.json`，并轮询
+`cluster/inbox/<node_id>/` 等待任务。它每 15 秒 touch 一次
+`cluster/workers/<node_id>.heartbeat`；编排器和 WebUI 发现心跳超过 60 秒
+未更新就视作 worker 离线。
+
+在 WebUI 的 **Cluster** 标签页可以查看已注册 worker、GPU scoreboard
+（每个 slot 是 free/held）以及 force-release 卡住的 slot。支持
+`worker_nodes` 字段的任务（如 `evolve_kernel`、`port_model`）在表单里
+填写 worker 后会自动把 GPU 工作派发到指定节点。
+
+管理 CLI：
+
+```bash
+metainfer-cluster workers ls          # 列出 worker + alive 状态
+metainfer-cluster scoreboard show     # 显示所有 worker 上的 GPU claim
+metainfer-cluster tail stdout gpu-worker-1 <job_id>   # 读取某 job 的 stdout
+```
+
+架构细节（NFS-safe 原子 claim、租约/reaper 规则、单 reap 路径不变量）
+见 `docs/multi-node-architecture.md`；agent-facing SDK 食谱见
+`docs/agent-sdk-guide.md`。
+
 ## License
 
 MIT

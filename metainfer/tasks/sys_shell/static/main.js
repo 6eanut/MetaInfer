@@ -20,6 +20,7 @@ import {
 import { TaskDetailView } from "app/task-detail";
 import { NewTaskView } from "app/new-task";
 import { ConfirmActionModal } from "app/confirm-action-modal";
+import { ClusterOverview } from "app/cluster-overview";
 import { labelFor } from "app/utils";
 
 function App() {
@@ -39,6 +40,8 @@ function App() {
   // Pending task-close (× click) awaiting name-typed confirmation.
   // Holds the registry entry the user is trying to close.
   const [closeTarget, setCloseTarget] = useState(null);
+  // Cluster admin view visibility. Toggled by the topbar button.
+  const [showCluster, setShowCluster] = useState(false);
 
   // SSE subscription. Single connection, lives for the app's lifetime.
   const sseRef = useRef(null);
@@ -154,18 +157,21 @@ function App() {
       counts=${counts}
       listErr=${listErr}
       onNewTask=${() => setShowNewTask(true)}
-      onRefresh=${refreshList}>
-      ${active
-        ? html`<${TaskDetailView}
-            taskId=${active.id}
-            taskType=${active.type}
-            run=${cached?.run}
-            status=${active.status}
-            label=${cached?.label || active.label}
-            detailViewModule=${cached?.detail_view_module || active?.detail_view_module || null}
-            onChange=${refreshTick}
-            onOpenRetro=${() => {}} />`
-        : html`<${EmptyState} onNewTask=${() => setShowNewTask(true)} />`}
+      onRefresh=${refreshList}
+      onShowCluster=${() => setShowCluster(true)}>
+      ${showCluster
+        ? html`<${ClusterOverview} onClose=${() => setShowCluster(false)} />`
+        : (active
+          ? html`<${TaskDetailView}
+              taskId=${active.id}
+              taskType=${active.type}
+              run=${cached?.run}
+              status=${active.status}
+              label=${cached?.label || active.label}
+              detailViewModule=${cached?.detail_view_module || active?.detail_view_module || null}
+              onChange=${refreshTick}
+              onOpenRetro=${() => {}} />`
+          : html`<${EmptyState} onNewTask=${() => setShowNewTask(true)} />`)}
     </${Shell}>
 
     ${showNewTask ? html`
@@ -197,7 +203,7 @@ function App() {
 
 function Shell({
   tabs, activeId, onSelectTab, onCloseTab,
-  counts, listErr, onNewTask, onRefresh, children,
+  counts, listErr, onNewTask, onRefresh, onShowCluster, children,
 }) {
   return html`
     <div class="topbar">
@@ -210,6 +216,7 @@ function Shell({
         ${listErr ? html`<span class="topbar-err">${listErr}</span>` : null}
       </div>
       <div class="topbar-right">
+        <button class="btn ghost" onClick=${onShowCluster}>▦ Cluster</button>
         <button class="btn ghost" onClick=${onRefresh}>↻</button>
         <button class="btn primary" onClick=${onNewTask}>+ New Task</button>
       </div>

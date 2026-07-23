@@ -79,6 +79,31 @@ def build_router() -> APIRouter:
         )
         return {"node_id": node_id, "gpu_idx": gpu_idx, "was_held": existed}
 
+    # ------------------------------------------------------------------ #
+    # Jobs (inbox + replies listing, log tailing)
+    # ------------------------------------------------------------------ #
+    @router.get("/jobs")
+    def list_jobs(worker_node_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        from metainfer.cluster import mqueue
+        return mqueue.list_jobs(worker_node_id=worker_node_id)
+
+    @router.get("/jobs/{worker_node_id}/{job_id}/{stream}")
+    def tail_job_log(worker_node_id: str, job_id: str, stream: str,
+                     offset: int = 0) -> bytes:
+        """Tail stdout.log or stderr.log for one job. Returns raw bytes."""
+        if stream not in ("stdout", "stderr"):
+            raise HTTPException(status_code=400,
+                                detail="stream must be 'stdout' or 'stderr'")
+        from metainfer.cluster import sdk
+        from metainfer.cluster.paths import job_dir
+        # Verify job dir exists (404 otherwise)
+        jdir = job_dir(worker_node_id, job_id)
+        if not jdir.exists():
+            raise HTTPException(status_code=404, detail="job dir not found")
+        if stream == "stdout":
+            return sdk.tail_stdout(job_id, worker_node_id, offset=offset)
+        return sdk.tail_stderr(job_id, worker_node_id, offset=offset)
+
     return router
 
 

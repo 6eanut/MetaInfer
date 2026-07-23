@@ -19,7 +19,7 @@ Conventions:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from metainfer.orchestrator.requirements import req_field
 
@@ -231,6 +231,75 @@ def _user_notes_block(req: Dict[str, Any]) -> str:
 ```
 {notes}
 ```
+
+"""
+
+
+def _distributed_block(worker_nodes: Optional[List[str]]) -> str:
+    """Inject distributed-testing guidance when worker_nodes is configured.
+
+    Returns "" when worker_nodes is empty (orchestrator local mode — no change
+    to existing prompts). With ≥2 workers the block teaches the agent how to
+    launch PP2 via the cluster SDK; the agent still owns the decision of
+    whether to actually do so (single-node frameworks can ignore).
+    """
+    if not worker_nodes:
+        return ""
+    nodes_str = ", ".join(worker_nodes)
+    if len(worker_nodes) >= 2:
+        return f"""\
+# 🌐 Distributed workers available (PP2-capable)
+
+This task has {len(worker_nodes)} worker nodes available for cross-node
+end-to-end testing: ``{nodes_str}``.
+
+If the framework you're verifying supports tensor parallelism (TP) or
+pipeline parallelism (PP), you may use the cluster SDK to launch it
+across two workers simultaneously. The orchestrator pre-allocates one
+GPU per worker and injects ``RANK`` / ``WORLD_SIZE`` / ``MASTER_ADDR``
+/ ``MASTER_PORT`` for you; your framework's launch script only needs
+to honor the standard torch.distributed env.
+
+Minimal invocation (rank0 on first worker, rank1 on second):
+
+```python
+from metainfer.cluster.sdk import submit_pp2_ranks, PP2RankSpec
+results = submit_pp2_ranks(
+    rank_a=PP2RankSpec(
+        worker_node_id={worker_nodes[0]!r},
+        gpu_index=0,
+        script_body="cd {{target_fw}} && python -m {{launcher}} --rank 0\\n",
+    ),
+    rank_b=PP2RankSpec(
+        worker_node_id={worker_nodes[1]!r},
+        gpu_index=0,
+        script_body="cd {{target_fw}} && python -m {{launcher}} --rank 1\\n",
+    ),
+    timeout_s=1800,
+)
+```
+
+See ``docs/agent-sdk-guide.md`` for the full SDK cookbook (log tailing,
+error handling, status codes).
+
+"""
+    # Only one worker — still useful for GPU isolation but no PP2.
+    return f"""\
+# 🌐 Remote worker available
+
+This task has one worker node configured: ``{nodes_str}``. If you want
+a clean isolated GPU for the end-to-end run, you may submit the launch
+command via the cluster SDK instead of running locally:
+
+```python
+from metainfer.cluster.sdk import submit_script
+result = submit_script(
+    worker_node_id={worker_nodes[0]!r}, gpu_slots=[({worker_nodes[0]!r}, 0)],
+    script_body="python {{launcher}}\\n", timeout_s=1800,
+)
+```
+
+See ``docs/agent-sdk-guide.md`` for details.
 
 """
 
@@ -548,6 +617,7 @@ model's native dtype; do NOT cut corners on numerics).
 def p5_verify_minimal_prompt(
     *, req: Dict[str, Any], workdir: Path,
     p4_dir: Path,
+    worker_nodes: Optional[List[str]] = None,
 ) -> str:
     model_path = req_field(req, "model_params_path") or ""
     target_fw = req_field(req, "target_framework_dir") or ""
@@ -558,7 +628,7 @@ def p5_verify_minimal_prompt(
     )
     notes = _user_notes_block(req)
 
-    return banner + CORE_DISCIPLINE + P5_DISCIPLINE + notes + f"""\
+    return banner + CORE_DISCIPLINE + P5_DISCIPLINE + notes + _distributed_block(worker_nodes) + f"""\
 # Task: 精简推理框架验证工程师 — verify the minimal framework
 
 The minimal framework from P4 lives in (READ + EXECUTE):
@@ -678,6 +748,7 @@ def p6_port_engine_prompt(
     *, req: Dict[str, Any], workdir: Path,
     p3_path: Path, p5_dumps_dir: Path,
     iteration: int, prev_failure: str = "",
+    worker_nodes: Optional[List[str]] = None,
 ) -> str:
     model_path = req_field(req, "model_params_path") or ""
     target_fw = req_field(req, "target_framework_dir") or ""
@@ -696,7 +767,7 @@ def p6_port_engine_prompt(
             "```\n" + prev_failure[:6000] + "\n```\n"
         )
 
-    return banner + CORE_DISCIPLINE + P6_DISCIPLINE + notes + prev_block + f"""\
+    return banner + CORE_DISCIPLINE + P6_DISCIPLINE + notes + prev_block + _distributed_block(worker_nodes) + f"""\
 # Task: 推理引擎移植工程师 — port the model into TARGET_FRAMEWORK_DIR
 
 P3 consolidated spec (READ):

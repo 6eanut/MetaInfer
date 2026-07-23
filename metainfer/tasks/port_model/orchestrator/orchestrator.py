@@ -118,6 +118,14 @@ def _validate_inputs(req: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _parse_worker_nodes(req: Dict[str, Any]) -> List[str]:
+    """Read worker_nodes from req. Accepts list or comma-separated string."""
+    raw = req_field(req, "worker_nodes") or ""
+    if isinstance(raw, list):
+        return [str(w).strip() for w in raw if str(w).strip()]
+    return [w.strip() for w in str(raw).split(",") if w.strip()]
+
+
 def _normalize_reference_sources(req: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Always return a list, even if the user passed JSON-in-string."""
     refs = req_field(req, "reference_sources")
@@ -294,6 +302,7 @@ def run_with_requirements(
         model_params_path=model_path,
         reference_sources=refs,
         user_notes=req_field(req, "user_notes") or "",
+        worker_nodes=_parse_worker_nodes(req),
     )
 
     print(f"[port-model] task_id         = {task_id}")

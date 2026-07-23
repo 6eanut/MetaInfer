@@ -96,6 +96,9 @@ class PipelineConfig:
     model_params_path: Path
     reference_sources: List[Dict[str, Any]] = field(default_factory=list)
     user_notes: str = ""
+    # Optional worker node IDs for distributed end-to-end testing (P5/P6).
+    # Empty = run locally on the orchestrator node.
+    worker_nodes: List[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -737,6 +740,7 @@ class Pipeline:
         logs_dir = cfg.state_dir / "logs" / "p5" / f"attempt_{attempt:02d}"
         prompt = PP.p5_verify_minimal_prompt(
             req=self.req, workdir=attempt_dir, p4_dir=cfg.p4_dir,
+            worker_nodes=cfg.worker_nodes,
         )
         started = time.time()
         ok, err, mode, _ = _launch_blocking(
@@ -821,6 +825,7 @@ class Pipeline:
             req=self.req, workdir=attempt_dir,
             p3_path=p3_path, p5_dumps_dir=cfg.dumps_dir,
             iteration=iter_idx + 1, prev_failure=prev_failure,
+            worker_nodes=cfg.worker_nodes,
         )
         started = time.time()
         ok, err, mode, _ = _launch_blocking(

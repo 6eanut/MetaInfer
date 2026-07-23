@@ -129,6 +129,24 @@ def _pid_file_path(task_id: str) -> Path:
     return _paths.task_dir(task_id) / "orchestrator.pid"
 
 
+def _current_hostname() -> str:
+    """Local hostname for comparison with orchestrator.pid::hostname.
+
+    Cached at first call — ``socket.gethostname`` does a syscall and the
+    value won't change during a WebUI session. Used by status()/kill() to
+    decide whether ``/proc/<pid>`` can be trusted: only if the pid was
+    minted on THIS host.
+    """
+    global _CACHED_HOSTNAME
+    if _CACHED_HOSTNAME is None:
+        import socket as _socket
+        _CACHED_HOSTNAME = _socket.gethostname()
+    return _CACHED_HOSTNAME
+
+
+_CACHED_HOSTNAME: Optional[str] = None
+
+
 def _read_pid_file(task_id: str) -> Dict[str, Any]:
     p = _pid_file_path(task_id)
     if not p.exists():
@@ -147,12 +165,20 @@ def _write_pid_file_placeholder(state_dir: Path, task_id: str, pid: int, started
     the dead pid and reaps it.
 
     Uses tmp+replace for atomicity (no flock needed — single writer per
-    task at this point).
+    task at this point). The placeholder is written by the WebUI on its
+    own node right after Popen — so its hostname == current hostname,
+    which matches what the orchestrator will overwrite with seconds
+    later (the orchestrator is a local child of the WebUI under
+    LocalLauncher).
     """
     import json
+    import socket as _socket
     pf = state_dir / "orchestrator.pid"
     tmp = pf.with_suffix(".tmp")
-    data = {"pid": pid, "task_id": task_id, "started_at": started_at}
+    data = {
+        "pid": pid, "task_id": task_id, "started_at": started_at,
+        "hostname": _socket.gethostname(),
+    }
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     tmp.replace(pf)
 
@@ -323,6 +349,17 @@ class LocalLauncher:
                 running=False, pid=None, started_at=None,
                 finished_at=None, exit_hint="no-pid-file",
             )
+        # 多节点 PID 不变量：pid 文件里的 hostname 记录的是 orchestrator
+        # 真正运行的那个节点。如果与当前节点不同，本机 /proc 永远看不到
+        # 该 pid——既不能判定存活，也不能判定死亡。此时乐观地报告 running=True，
+        # 让 UI 继续显示运行态，直到 finished_at 被权威路径盖戳
+        # （orchestrator 自己 graceful exit 或其节点上的 _reap_dead_pid_file）。
+        pid_hostname = data.get("hostname")
+        if pid_hostname and pid_hostname != _current_hostname():
+            return ProcStatus(
+                running=True, pid=pid, started_at=started_at,
+                finished_at=None, exit_hint="remote-pid-unchecked",
+            )
         # 既没有 finished_at、pid 又存在：才走本机 liveness 探测。
         # 这一支只覆盖"orchestrator 硬死、还没来得及盖 finished_at"的场景
         # （SIGKILL / OOM / 内核 panic）。校验 kernel starttime 与 started_at
@@ -339,6 +376,13 @@ class LocalLauncher:
         pid = data.get("pid")
         started_at = data.get("started_at")
         if not pid:
+            return False
+        # 多节点安全：pid 在另一台节点上时，本机无法发信号，且本机
+        # kill_pid_validated 一定会返回 False —— 不能据此误判为"已死"
+        # 去 _reap_dead_pid_file（会把仍在运行的任务标 stopped）。
+        # 正确做法：直接返回 False，由用户去对应节点 kill。
+        pid_hostname = data.get("hostname")
+        if pid_hostname and pid_hostname != _current_hostname():
             return False
         sig = signal.SIGKILL if force else signal.SIGTERM
         # First, reap any sub-agent children. They live in their own

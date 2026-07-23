@@ -73,9 +73,24 @@ def build_router() -> APIRouter:
         if not isinstance(node_id, str) or not isinstance(gpu_idx, int):
             raise HTTPException(status_code=400,
                                 detail="node_id (str) and gpu_idx (int) required")
+        slot = (node_id, gpu_idx)
+        # Read the claim before breaking it so we can write cancel.marker
+        # into the worker's job_dir (signals the worker subprocess to SIGTERM).
+        from metainfer.cluster.paths import gpu_claim_path, job_dir
+        from metainfer.cluster.fs_primitives import read_claim
+        claim = read_claim(gpu_claim_path(node_id, gpu_idx))
+        cancel_jd = None
+        if claim is not None:
+            jid = claim.get("job_id")
+            if jid:
+                # The slot's node_id is the worker that hosts the job's inbox.
+                jd = job_dir(node_id, jid)
+                if jd.exists():
+                    cancel_jd = jd
         existed = scoreboard.force_release(
-            (node_id, gpu_idx),
+            slot,
             reason=str(payload.get("reason", "admin-kill")),
+            cancel_job_dir=cancel_jd,
         )
         return {"node_id": node_id, "gpu_idx": gpu_idx, "was_held": existed}
 

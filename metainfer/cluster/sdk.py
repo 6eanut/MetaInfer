@@ -284,13 +284,33 @@ def submit_agent(
 # --------------------------------------------------------------------------- #
 @dataclass
 class PP2RankSpec:
-    """Per-rank spec for ``submit_pp2_ranks``: which worker + GPU runs this rank,
-    and the shell command to launch it. The SDK injects ``RANK``/``WORLD_SIZE``/
-    ``MASTER_ADDR``/``MASTER_PORT`` env vars automatically.
+    """Per-rank spec for ``submit_pp2_ranks``: which worker + GPU(s) run this
+    rank, and the shell command to launch it. The SDK injects ``RANK``/
+    ``WORLD_SIZE``/``MASTER_ADDR``/``MASTER_PORT`` env vars automatically.
+
+    ``gpu_indices`` is the modern field — pass one or more GPU indices per
+    rank. For multi-GPU TP-per-rank, pass e.g. ``[0, 1, 2, 3]``; the SDK
+    acquires all those slots and sets ``NPROC_PER_NODE`` / ``LOCAL_RANK``
+    accordingly. ``gpu_idx`` (singular) is kept for back-compat and
+    treated as ``[gpu_idx]`` when ``gpu_indices`` is None.
     """
     worker_node_id: str
-    gpu_idx: int
     command: str  # shell command to run as this rank (passed as script body)
+    gpu_idx: Optional[int] = None  # back-compat: single-GPU rank
+    gpu_indices: Optional[List[int]] = None  # multi-GPU rank (TP-per-rank)
+
+    def resolved_slots(self) -> List[Slot]:
+        """All GPU slots this rank needs, as ``(worker_node_id, idx)`` tuples."""
+        if self.gpu_indices is not None:
+            idxs = list(self.gpu_indices)
+        elif self.gpu_idx is not None:
+            idxs = [self.gpu_idx]
+        else:
+            raise ValueError(
+                "PP2RankSpec requires gpu_idx or gpu_indices "
+                f"(worker={self.worker_node_id!r})"
+            )
+        return [(self.worker_node_id, i) for i in idxs]
 
 
 def submit_pp2_ranks(
@@ -304,10 +324,21 @@ def submit_pp2_ranks(
 ) -> Tuple[str, str, Optional[JobResult], Optional[JobResult]]:
     """Submit two rank jobs simultaneously for PP2 distributed testing.
 
-    Both jobs get torch.distributed rendezvous env injected:
-      RANK / NODE_RANK / LOCAL_RANK / WORLD_SIZE / NNODES / NPROC_PER_NODE
-      MASTER_ADDR (= rank0's worker hostname, unless overridden)
-      MASTER_PORT
+    Both jobs get torch.distributed rendezvous env injected. The full env
+    matrix per rank:
+
+      RANK, NODE_RANK          — 0 / 1 (one per pipeline stage)
+      WORLD_SIZE               — sum of NPROC_PER_NODE across both ranks
+      NNODES                   — always 2 (PP2 = 2 pipeline stages = 2 nodes)
+      NPROC_PER_NODE           — len(rank.gpu_indices); 1 for single-GPU ranks
+      TP_SIZE_PER_NODE         — same as NPROC_PER_NODE (local tensor parallel)
+      LOCAL_RANK               — 0 for the rank's primary process; for multi-
+                                  GPU ranks the launched command itself is
+                                  responsible for spawning one subprocess per
+                                  local rank (e.g. via torchrun or sglang's
+                                  own launcher). The SDK only sets the env.
+      MASTER_ADDR              — rank0's worker hostname (unless overridden)
+      MASTER_PORT              — from ``master_port``
 
     Jobs are submitted non-blocking; then both are awaited. Returns
     ``(job_id_0, job_id_1, result_0, result_1)``.
@@ -317,25 +348,30 @@ def submit_pp2_ranks(
     ``init_process_group`` until both sides connect.
     """
     rank0_worker_hostname = master_addr or _lookup_hostname(rank0.worker_node_id)
+    nproc0 = len(rank0.resolved_slots())
+    nproc1 = len(rank1.resolved_slots())
+    world_size = nproc0 + nproc1
     common_env = {
-        "WORLD_SIZE": "2",
+        "WORLD_SIZE": str(world_size),
         "NNODES": "2",
-        "NPROC_PER_NODE": "1",
         "MASTER_ADDR": rank0_worker_hostname,
         "MASTER_PORT": str(master_port),
         **(extra_env or {}),
     }
 
     def _build(rank: PP2RankSpec, rank_idx: int) -> Tuple[JobSpec, Dict[str, str]]:
+        nproc = len(rank.resolved_slots())
         env = dict(common_env)
         env["RANK"] = str(rank_idx)
         env["NODE_RANK"] = str(rank_idx)
         env["LOCAL_RANK"] = "0"
+        env["NPROC_PER_NODE"] = str(nproc)
+        env["TP_SIZE_PER_NODE"] = str(nproc)
         spec = JobSpec(
             type="script",
             worker_node_id=rank.worker_node_id,
             script_body=rank.command,
-            gpu_slots=[(rank.worker_node_id, rank.gpu_idx)],
+            gpu_slots=rank.resolved_slots(),
             timeout_s=timeout_s,
             env=env,
         )

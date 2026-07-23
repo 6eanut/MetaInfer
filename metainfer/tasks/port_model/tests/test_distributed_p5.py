@@ -85,7 +85,7 @@ class TestPromptInjection:
             worker_nodes=["wA", "wB"],
         )
         assert "submit_pp2_ranks" in prompt
-        assert "PP2-capable" in prompt
+        assert "Distributed workers configured" in prompt
         assert "wA" in prompt and "wB" in prompt
 
     def test_p6_two_workers_injects_pp2_block(self, tmp_path: Path):
@@ -104,7 +104,7 @@ class TestPromptInjection:
         )
         # Single worker: no PP2, but should mention remote worker
         assert "submit_pp2_ranks" not in prompt
-        assert "Remote worker available" in prompt
+        assert "Remote worker configured" in prompt
         assert "wOnly" in prompt
 
 
@@ -153,5 +153,5 @@ class TestLaunchConstraintsInjection:
             worker_nodes=["wA", "wB"],
         )
         assert "Launch constraints" in prompt
-        assert "PP2-capable" in prompt
+        assert "Distributed workers configured" in prompt
         assert "submit_pp2_ranks" in prompt

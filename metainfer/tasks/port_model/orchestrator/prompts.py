@@ -269,45 +269,107 @@ def _distributed_block(worker_nodes: Optional[List[str]]) -> str:
     """Inject distributed-testing guidance when worker_nodes is configured.
 
     Returns "" when worker_nodes is empty (orchestrator local mode — no change
-    to existing prompts). With ≥2 workers the block teaches the agent how to
-    launch PP2 via the cluster SDK; the agent still owns the decision of
-    whether to actually do so (single-node frameworks can ignore).
+    to existing prompts). With ≥2 workers the block **mandates** that the
+    agent use the cluster SDK to spread the framework launch across all
+    listed workers — single-node smoke tests are NOT an acceptable final
+    state because the whole point of having multiple workers is end-to-end
+    cross-node validation. (Single-node probes may still be used as a
+    transient diagnostic step inside the inner port-test loop, but the
+    iteration's final verdict must come from a multi-worker run.)
+
+    The number of GPUs per rank is intentionally NOT hardcoded here —
+    the agent reads it from the task's ``launch_constraints`` (e.g. a
+    "TP=4" hint) and passes ``gpu_indices=[...]`` accordingly.
     """
     if not worker_nodes:
         return ""
     nodes_str = ", ".join(worker_nodes)
     if len(worker_nodes) >= 2:
         return f"""\
-# 🌐 Distributed workers available (PP2-capable)
+# 🌐 Distributed workers configured — multi-node launch is REQUIRED
 
-This task has {len(worker_nodes)} worker nodes available for cross-node
-end-to-end testing: ``{nodes_str}``.
+This task lists **{len(worker_nodes)} worker nodes**: ``{nodes_str}``.
+**Every end-to-end framework launch in this iteration MUST span all of
+them.** Single-node / single-GPU launches are forbidden as a final
+verdict — they defeat the purpose of having multi-node workers, and
+the iteration's port-test verdict will be rejected if it doesn't show
+evidence of a real cross-node run (scoreboard claims on every worker,
+torch.distributed rendezvous env in the launch logs, results collected
+from every rank).
 
-If the framework you're verifying supports tensor parallelism (TP) or
-pipeline parallelism (PP), you may use the cluster SDK to launch it
-across two workers simultaneously. The orchestrator pre-allocates one
-GPU per worker and injects ``RANK`` / ``WORLD_SIZE`` / ``MASTER_ADDR``
-/ ``MASTER_PORT`` for you; your framework's launch script only needs
-to honor the standard torch.distributed env.
+Transient single-node probes inside the inner port-test loop are OK as
+a diagnostic (e.g. "does the framework even import on this node"), but
+the iteration's final launch attempt that produces the verdict MUST be
+the full multi-worker launch.
 
-Minimal invocation (rank0 on first worker, rank1 on second):
+## Use the cluster SDK — never invoke the framework locally
+
+Use ``metainfer.cluster.sdk.submit_pp2_ranks`` to launch two ranks
+simultaneously, one on each worker. The SDK:
+
+- acquires GPU slots atomically across nodes,
+- injects ``RANK`` / ``NODE_RANK`` / ``WORLD_SIZE`` / ``NNODES`` /
+  ``NPROC_PER_NODE`` / ``TP_SIZE_PER_NODE`` / ``LOCAL_RANK`` /
+  ``MASTER_ADDR`` / ``MASTER_PORT`` env vars into both ranks,
+- returns each rank's ``JobResult`` (exit_code, stdout/stderr tail,
+  duration) when both finish.
+
+The number of GPUs per rank is whatever the task needs — read the
+``launch_constraints`` block for the model's TP/PP requirements and
+pass ``gpu_indices=[...]`` accordingly. Do NOT assume 1 GPU per worker.
+
+## Sketch
 
 ```python
 from metainfer.cluster.sdk import submit_pp2_ranks, PP2RankSpec
-results = submit_pp2_ranks(
-    rank_a=PP2RankSpec(
+
+# Read TP-per-rank from launch_constraints; here we use 4 as an example.
+# The SDK does not care about the exact number — it just acquires that
+# many slots and sets NPROC_PER_NODE / TP_SIZE_PER_NODE to match.
+tp_per_rank = 4  # parsed from launch_constraints, NOT hardcoded by port_model
+
+job_id_0, job_id_1, res0, res1 = submit_pp2_ranks(
+    rank0=PP2RankSpec(
         worker_node_id={worker_nodes[0]!r},
-        gpu_index=0,
-        script_body="cd {{target_fw}} && python -m {{launcher}} --rank 0\\n",
+        gpu_indices=list(range(tp_per_rank)),  # ranks 0..tp_per_rank-1 on this node
+        command="export PYTHONPATH=... && python -m <framework.launcher> "
+                "--rank $RANK --world-size $WORLD_SIZE ...",
     ),
-    rank_b=PP2RankSpec(
+    rank1=PP2RankSpec(
         worker_node_id={worker_nodes[1]!r},
-        gpu_index=0,
-        script_body="cd {{target_fw}} && python -m {{launcher}} --rank 1\\n",
+        gpu_indices=list(range(tp_per_rank)),
+        command="<same launcher with --rank 1>",
     ),
-    timeout_s=1800,
+    timeout_s=1800,  # honor launch_constraints timeout hints
 )
 ```
+
+Inside ``command``, the framework's launcher is responsible for:
+- reading ``$RANK`` / ``$WORLD_SIZE`` / ``$MASTER_ADDR`` / ``$MASTER_PORT``
+  to call ``torch.distributed.init_process_group`` (with retry — the two
+  ranks start ~simultaneously and may race the rendezvous),
+- spawning one local subprocess per ``$NPROC_PER_NODE`` if it needs
+  intra-node tensor parallel (or letting its own internal launcher do it).
+
+## Verification before declaring the iteration's verdict
+
+Before writing ``verdict_*.json`` with ``outcome: ok`` or ``logic_fail``,
+confirm ALL of:
+
+1. **Scoreboard shows claims on every worker**: at some point during the
+   run, ``cluster/scoreboard/<worker>/*.claim`` existed for every worker
+   in the ``worker_nodes`` list. (Use ``metainfer.cluster.scoreboard.list_claims``
+   or read the files directly.)
+2. **Both ranks produced a result**: ``res0`` and ``res1`` from
+   ``submit_pp2_ranks`` are both non-None (neither timed out nor crashed
+   silently).
+3. **Distributed rendezvous actually happened**: the launch logs contain
+   evidence of ``init_process_group`` succeeding (or the framework's
+   equivalent) — not just one rank starting and the other immediately
+   erroring.
+
+If any of these is missing, the iteration's verdict MUST reflect that
+(``outcome: logic_fail`` with a clear reason), not claim success.
 
 See ``docs/agent-sdk-guide.md`` for the full SDK cookbook (log tailing,
 error handling, status codes).
@@ -315,17 +377,23 @@ error handling, status codes).
 """
     # Only one worker — still useful for GPU isolation but no PP2.
     return f"""\
-# 🌐 Remote worker available
+# 🌐 Remote worker configured — launch via cluster SDK is REQUIRED
 
-This task has one worker node configured: ``{nodes_str}``. If you want
-a clean isolated GPU for the end-to-end run, you may submit the launch
-command via the cluster SDK instead of running locally:
+This task has one worker node configured: ``{nodes_str}``. **Every
+end-to-end framework launch MUST run on that worker via the cluster
+SDK**, not locally on the orchestrator node. The whole point of having
+a remote worker is GPU isolation from the orchestrator.
 
 ```python
 from metainfer.cluster.sdk import submit_script
-result = submit_script(
-    worker_node_id={worker_nodes[0]!r}, gpu_slots=[({worker_nodes[0]!r}, 0)],
-    script_body="python {{launcher}}\\n", timeout_s=1800,
+
+# Read GPU count from launch_constraints; do NOT assume a single GPU.
+gpu_count = 4  # parsed from launch_constraints, NOT hardcoded by port_model
+job_id, result = submit_script(
+    worker_node_id={worker_nodes[0]!r},
+    gpu_slots=[({worker_nodes[0]!r}, i) for i in range(gpu_count)],
+    script_body="export PYTHONPATH=... && python -m <framework.launcher> ...",
+    timeout_s=1800,
 )
 ```
 

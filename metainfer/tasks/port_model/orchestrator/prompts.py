@@ -1006,7 +1006,8 @@ pass (same convention as P4 / P5):
 ```
 
 Dump hidden_states with the SAME per-row layout as P5:
-``dumps/row{0,1,2}/layer_<NNN>_<checkpoint>.npy``.
+``dumps/row0/``, ``dumps/row1/``, ``dumps/row2/``, each containing
+``layer_<NNN>_<checkpoint>.npy``.
 
 ### 📤 Git commit
 

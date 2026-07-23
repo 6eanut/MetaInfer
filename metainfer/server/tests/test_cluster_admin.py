@@ -60,9 +60,11 @@ def test_force_release_endpoint(client) -> None:
     body = r.json()
     assert body["was_held"] is True
 
-    # Slot is now free
+    # Slot is now free (list_claims returns free rows too — filter to status=held)
     claims = client.get("/api/cluster/scoreboard").json()
-    assert all(not (c["node_id"] == "w0" and c["gpu_idx"] == 0) for c in claims)
+    held = [c for c in claims if c.get("status") == "held"
+            and c.get("node_id") == "w0" and c.get("gpu_idx") == 0]
+    assert held == [], "force-released slot must not show as held"
 
 
 def test_force_release_404_on_missing_fields(client) -> None:

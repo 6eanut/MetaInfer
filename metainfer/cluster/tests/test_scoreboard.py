@@ -107,10 +107,11 @@ def test_multi_slot_partial_rolls_back() -> None:
     assert tok is None
 
     # Critical assertion: n0:0 must NOT be left held by failed acquirer.
+    # list_claims now returns free GPUs too — filter to status=held.
     claim = scoreboard.list_claims()
-    holders = [(c["node_id"], c["gpu_idx"]) for c in claim]
-    assert ("n0", 0) not in holders, "failed acquire must not leak held slot"
-    assert ("n1", 0) in holders, "blocker's slot must still be held"
+    held = [(c["node_id"], c["gpu_idx"]) for c in claim if c["status"] == "held"]
+    assert ("n0", 0) not in held, "failed acquire must not leak held slot"
+    assert ("n1", 0) in held, "blocker's slot must still be held"
 
     scoreboard.release_gpus(blocker)
 
@@ -137,9 +138,11 @@ def test_cross_set_no_double_hold_under_contention() -> None:
         with lock:
             hold_observed.append(rid)
             # Verify invariant: only THIS token holds the slots right now.
+            # Filter to status=held since list_claims now also returns free GPUs.
             claims_now = scoreboard.list_claims()
-            n0_holders = [c["holder"] for c in claims_now if c["node_id"] == "n0" and c["gpu_idx"] == 0]
-            n1_holders = [c["holder"] for c in claims_now if c["node_id"] == "n1" and c["gpu_idx"] == 0]
+            held_now = [c for c in claims_now if c["status"] == "held"]
+            n0_holders = [c["holder"] for c in held_now if c["node_id"] == "n0" and c["gpu_idx"] == 0]
+            n1_holders = [c["holder"] for c in held_now if c["node_id"] == "n1" and c["gpu_idx"] == 0]
             if len(n0_holders) > 1 or len(n1_holders) > 1:
                 violation["count"] += 1
             if n0_holders and n1_holders and n0_holders[0] != n1_holders[0]:
@@ -245,7 +248,8 @@ def test_release_with_wrong_secret_does_not_unlink() -> None:
 
     # Original slot still held.
     claims = scoreboard.list_claims()
-    assert any(c["node_id"] == "n0" and c["gpu_idx"] == 0 for c in claims)
+    held = [c for c in claims if c["status"] == "held"]
+    assert any(c["node_id"] == "n0" and c["gpu_idx"] == 0 for c in held)
 
     scoreboard.release_gpus(tok)
 
@@ -259,7 +263,13 @@ def test_force_release_unconditional() -> None:
     assert existed is True
 
     claims = scoreboard.list_claims()
-    assert all(not (c["node_id"] == "n0" and c["gpu_idx"] == 0) for c in claims)
+    held = [c for c in claims if c["status"] == "held"]
+    assert all(not (c["node_id"] == "n0" and c["gpu_idx"] == 0) for c in held)
+    # list_claims should still REPORT the slot (as free) — that's the new
+    # behavior that makes the WebUI show full topology when idle.
+    free = [c for c in claims if c["status"] == "free"]
+    assert any(c["node_id"] == "n0" and c["gpu_idx"] == 0 for c in free), \
+        "free GPUs must appear in list_claims so WebUI shows full topology"
 
 
 def test_force_release_writes_cancel_marker(tmp_path: Path) -> None:

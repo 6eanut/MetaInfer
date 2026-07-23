@@ -164,8 +164,17 @@ def build_router(plugin) -> APIRouter:
                         pass
                     removed.append(d)
                 dp.mkdir(parents=True, exist_ok=True)
-            # Drop canonical memory artifacts so resume logic re-detects.
-            for art_name in ("p1_weight_analysis", "p3_consolidated_spec"):
+            # Drop canonical memory artifacts so resume logic re-detects —
+            # but ONLY for steps at or below the one being re-run. Re-running
+            # P6 (start_idx=5) must NOT wipe P1/P3 canonical copies, since
+            # P6 reads them and they are not regenerated.
+            _memory_artifact_step = {
+                "p1_weight_analysis": _STEP_INDEX["p1"],
+                "p3_consolidated_spec": _STEP_INDEX["p3"],
+            }
+            for art_name, art_step_idx in _memory_artifact_step.items():
+                if start_idx > art_step_idx:
+                    continue
                 mp = wd / "memory" / f"{art_name}.md"
                 if mp.is_file():
                     try:

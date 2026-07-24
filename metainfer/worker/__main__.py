@@ -15,6 +15,7 @@ import os
 import socket
 import sys
 
+from metainfer.cluster.worker_registry import WorkerIdentityConflict
 from metainfer.worker.daemon import WorkerConfig, WorkerDaemon
 
 
@@ -46,6 +47,15 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         daemon.stop()
         return 0
+    except WorkerIdentityConflict as e:
+        # Fatal: this daemon's METAINFER_NODE_ID conflicts with an existing
+        # worker record on a different physical box. Refuse to enter the main
+        # loop — silently continuing would either (a) clobber the legit record
+        # (now blocked at the registry layer) or (b) consume jobs intended for
+        # the real worker. Surface loudly and exit non-zero so systemd / the
+        # operator sees the failure.
+        print(f"[metainfer.worker] FATAL: {e}", file=sys.stderr)
+        return 2
     return 0
 
 

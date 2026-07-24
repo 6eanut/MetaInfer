@@ -25,7 +25,6 @@ def _scratch_root(tmp_path: Path, monkeypatch) -> Path:
 # submit_script
 # --------------------------------------------------------------------------- #
 def test_submit_script_blocks_until_result() -> None:
-    worker_registry.register_worker("w0", "ip", "h", "m", {})
     fake = FakeWorker(node_id="w0")
     fake.register()
     fake.start_background()
@@ -43,7 +42,6 @@ def test_submit_script_blocks_until_result() -> None:
 
 def test_submit_script_no_gpu_slots_no_acquire() -> None:
     """When gpu_slots is empty, no scoreboard claim is created."""
-    worker_registry.register_worker("w0", "ip", "h", "m", {})
     fake = FakeWorker(node_id="w0")
     fake.register()
     fake.start_background()
@@ -57,7 +55,6 @@ def test_submit_script_no_gpu_slots_no_acquire() -> None:
 
 
 def test_submit_script_with_gpu_slot_acquires_and_releases() -> None:
-    worker_registry.register_worker("w0", "ip", "h", "m", {0: {"uuid": "x"}})
     fake = FakeWorker(node_id="w0")
     fake.register()
     fake.start_background()
@@ -81,7 +78,6 @@ def test_submit_script_acquire_failure_returns_none_no_leak() -> None:
     """If a slot is held by someone else, acquire fails and we return cleanly.
 
     No slot leak, no orphan job in the queue."""
-    worker_registry.register_worker("w0", "ip", "h", "m", {0: {"uuid": "x"}})
 
     # Pre-acquire the slot
     from metainfer.cluster import scoreboard
@@ -110,10 +106,11 @@ def test_submit_script_acquire_failure_returns_none_no_leak() -> None:
 def test_submit_script_result_status_timeout_when_worker_unresponsive() -> None:
     """Worker doesn't process the job — orchestrator's reap_orphaned_submissions
     eventually produces a synthetic result."""
-    worker_registry.register_worker("w0", "ip", "h", "m", {0: {"uuid": "x"}})
     # Register worker but never start the daemon — heartbeat goes stale.
     # Stale the heartbeat immediately
     import os as _os
+    worker_registry.register_worker("w0", "10.0.0.1", "w0", "m",
+                                     {0: {"uuid": "x"}})
     hb = paths.worker_heartbeat("w0")
     old = time.time() - 600
     _os.utime(hb, (old, old))
@@ -141,7 +138,6 @@ def test_submit_script_result_status_timeout_when_worker_unresponsive() -> None:
 # --------------------------------------------------------------------------- #
 def test_tail_stdout_returns_streamed_output() -> None:
     """FakeWorker writes to stdout.log; tail_stdout reads it."""
-    worker_registry.register_worker("w0", "ip", "h", "m", {})
     fake = FakeWorker(node_id="w0")
     fake.register()
     fake.start_background()
@@ -164,7 +160,6 @@ def test_tail_stdout_returns_streamed_output() -> None:
 # Non-blocking submit
 # --------------------------------------------------------------------------- #
 def test_submit_script_non_blocking_returns_immediately() -> None:
-    worker_registry.register_worker("w0", "ip", "h", "m", {})
     fake = FakeWorker(node_id="w0")
     fake.register()
     fake.start_background()

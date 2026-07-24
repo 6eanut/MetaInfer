@@ -171,8 +171,6 @@ def test_run_job_cancel_marker_arrives_mid_run() -> None:
 # FakeWorker end-to-end
 # --------------------------------------------------------------------------- #
 def test_fake_worker_completes_submitted_job() -> None:
-    worker_registry.register_worker("w0", "ip", "h", "m", {})
-
     fake = FakeWorker(node_id="w0")
     fake.register()
     fake.start_background()
@@ -193,7 +191,6 @@ def test_fake_worker_completes_submitted_job() -> None:
 
 def test_fake_worker_custom_handler() -> None:
     """Tests can inject their own job handler."""
-    worker_registry.register_worker("w0", "ip", "h", "m", {})
     seen: list[str] = []
 
     def custom(handle: JobHandle, own: str) -> object:

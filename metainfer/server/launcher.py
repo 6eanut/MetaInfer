@@ -170,6 +170,13 @@ def _write_pid_file_placeholder(state_dir: Path, task_id: str, pid: int, started
     which matches what the orchestrator will overwrite with seconds
     later (the orchestrator is a local child of the WebUI under
     LocalLauncher).
+
+    ``started_at`` here is the spawn-time wall clock captured right at
+    Popen return. This is close to (but not exactly) the kernel's
+    process start time; the orchestrator's own write_pid_file will
+    overwrite it with the precise kernel starttime. Until that
+    overwrite lands, validate_pid_started_at tolerates a 2s skew — well
+    within typical Python import delay.
     """
     import json
     import socket as _socket

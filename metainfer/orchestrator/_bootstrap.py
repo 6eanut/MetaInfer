@@ -85,11 +85,21 @@ def write_pid_file(pid_file: Path, task_id: str) -> None:
     WebUI would probe its local ``/proc/<pid>``, fail to find the pid, and
     mark a live orchestrator as dead. See ``launcher.status()`` for the
     consumer of this field.
+
+    ``started_at`` is the kernel's process start time (read from
+    /proc/self/stat), NOT ``time.time()`` at the moment of this call.
+    The WebUI's liveness check compares this value against the kernel
+    start time of the pid it sees; if we wrote ``time.time()`` here,
+    Python import delay (often 1–3s between Popen and this call) would
+    skew the two values apart and trigger a false-positive reap of a
+    live orchestrator.
     """
+    from metainfer.server.proc import pid_start_time
+    kernel_start = pid_start_time(os.getpid())
     payload = {
         "pid": os.getpid(),
         "task_id": task_id,
-        "started_at": time.time(),
+        "started_at": kernel_start if kernel_start is not None else time.time(),
         "hostname": socket.gethostname(),
     }
     pid_file.parent.mkdir(parents=True, exist_ok=True)

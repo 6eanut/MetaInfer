@@ -7,6 +7,8 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 from metainfer.cluster import paths, worker_registry
 
 
@@ -106,3 +108,75 @@ def test_gpu_topology_int_keys_preserved_through_json_round_trip(
     # And reader restores int keys
     rec = worker_registry.read_worker("w")
     assert set(rec.gpu_topology.keys()) == {0, 7}
+
+
+def test_register_rejects_hostname_drift(tmp_path: Path, monkeypatch) -> None:
+    """Regression: a daemon with a mis-set METAINFER_NODE_ID must NOT clobber
+    the real worker's record. Previously register_worker was unconditional
+    overwrite — a daemon on host B with METAINFER_NODE_ID=A would silently
+    overwrite A's hostname/IP/MAC with B's, corrupting PP2 rendezvous and
+    scoreboard slot ownership. The fix: refuse the second registration."""
+    monkeypatch.setenv("METAINFER_ROOT", str(tmp_path))
+    # Legit first registration: worker21 on host worker21
+    worker_registry.register_worker(
+        "worker21", ip="10.18.17.66", hostname="worker21",
+        mac="aa:bb:cc:dd:ee:66", gpu_topology={},
+    )
+    # Imposter: a daemon on host worker25 self-identifies as worker21
+    with pytest.raises(worker_registry.WorkerIdentityConflict) as ei:
+        worker_registry.register_worker(
+            "worker21", ip="10.18.17.73", hostname="worker25",
+            mac="aa:bb:cc:dd:ee:73", gpu_topology={},
+        )
+    assert "worker21" in str(ei.value)
+    assert "worker25" in str(ei.value)
+    # SSOT preserved: worker21.json still says worker21/10.18.17.66
+    rec = worker_registry.read_worker("worker21")
+    assert rec.hostname == "worker21"
+    assert rec.ip == "10.18.17.66"
+    assert rec.mac == "aa:bb:cc:dd:ee:66"
+    # Conflict forensics written for operator audit
+    conflicts = list(paths.workers_dir().glob("worker21.conflict.*.json"))
+    assert len(conflicts) == 1
+    payload = json.loads(conflicts[0].read_text())
+    assert payload["existing_record"]["hostname"] == "worker21"
+    assert payload["attempted_overwrite"]["hostname"] == "worker25"
+
+
+def test_register_allows_cold_restart_same_hostname(tmp_path: Path, monkeypatch) -> None:
+    """Cold restart on the same box is the legit re-registration path — must
+    not be blocked by the identity-drift check."""
+    monkeypatch.setenv("METAINFER_ROOT", str(tmp_path))
+    worker_registry.register_worker(
+        "worker21", ip="10.18.17.66", hostname="worker21",
+        mac="aa:bb:cc:dd:ee:66", gpu_topology={0: {"uuid": "x"}},
+    )
+    # Daemon restarts on same box: same hostname, new boot_id
+    worker_registry.register_worker(
+        "worker21", ip="10.18.17.66", hostname="worker21",
+        mac="aa:bb:cc:dd:ee:66", gpu_topology={0: {"uuid": "x"}},
+    )
+    rec = worker_registry.read_worker("worker21")
+    assert rec.hostname == "worker21"
+
+
+def test_register_allows_explicit_rehome_after_json_delete(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """If a box is genuinely re-homed (new hostname for the same node_id),
+    the operator path is: delete the JSON, then re-register. This keeps the
+    re-homing visible in filesystem history rather than silent."""
+    monkeypatch.setenv("METAINFER_ROOT", str(tmp_path))
+    worker_registry.register_worker(
+        "worker21", ip="10.18.17.66", hostname="worker21",
+        mac="aa:bb:cc:dd:ee:66", gpu_topology={},
+    )
+    # Explicit operator action: clear the record
+    paths.worker_record("worker21").unlink()
+    # Now re-registration with a different hostname is allowed
+    worker_registry.register_worker(
+        "worker21", ip="10.18.17.99", hostname="worker21-new",
+        mac="aa:bb:cc:dd:ee:99", gpu_topology={},
+    )
+    rec = worker_registry.read_worker("worker21")
+    assert rec.hostname == "worker21-new"

@@ -84,6 +84,52 @@ class WorkerRecord:
         )
 
 
+class WorkerIdentityConflict(Exception):
+    """Raised when a registration would change the physical identity of an
+    existing worker record.
+
+    Per SSOT, ``workers/<node_id>.json`` is authoritative for "which physical
+    box is worker N". A daemon that shows up with ``METAINFER_NODE_ID=worker21``
+    but ``hostname=worker25`` is either misconfigured or actively spoofing —
+    either way, letting it overwrite the record would corrupt the cluster map
+    (e.g. PP2 ranks would resolve to the wrong IP and rendezvous on the wrong
+    host).
+
+    The caller (worker daemon) MUST treat this as a fatal startup error: log
+    the conflict, refuse to enter the main loop, and exit non-zero. Recovery
+    requires an operator decision — either fix the new daemon's env (unset the
+    wrong ``METAINFER_NODE_ID``), or explicitly clear the existing record if
+    the box genuinely re-homed.
+    """
+
+
+def _write_conflict_file(node_id: str, existing: WorkerRecord,
+                          attempted: Dict[str, object]) -> None:
+    """Drop a sidecar ``.conflict.<ts>.json`` recording the rejected overwrite.
+
+    The conflict file is for forensic value only — it is never read back by
+    any runtime path. SSOT for the live record stays at ``<node_id>.json``.
+    """
+    import json as _json
+    ts = int(time.time())
+    path = paths.workers_dir() / f"{node_id}.conflict.{ts}.json"
+    payload = {
+        "existing_record": existing.to_dict(),
+        "attempted_overwrite": attempted,
+        "rejected_at": ts,
+        "reason": (
+            "register_worker refused to overwrite an existing worker record "
+            "with a different physical identity (hostname mismatch). If this "
+            "is a legitimate re-homing, delete workers/<node_id>.json first."
+        ),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError:
+        pass  # best-effort forensics; never block the reject path
+
+
 def register_worker(
     node_id: str,
     ip: str,
@@ -99,7 +145,40 @@ def register_worker(
 
     The JSON is the SSOT for identity + topology. Subsequent heartbeat touches
     update only the ``.heartbeat`` file's mtime — never the JSON.
+
+    Identity-drift rejection: if ``workers/<node_id>.json`` already exists and
+    its ``hostname`` differs from the registering daemon's reported hostname,
+    the registration is refused (see :class:`WorkerIdentityConflict`). This
+    stops a daemon with a mis-set ``METAINFER_NODE_ID`` from clobbering a
+    real worker's record with another box's hostname/IP/MAC, which would
+    silently corrupt PP2 rendezvous and scoreboard slot ownership.
+
+    The one legitimate re-homing path is explicit: delete the JSON first,
+    then register fresh. This makes the operator's intent visible in the
+    filesystem history instead of being silent overwrite-by-default.
     """
+    existing = read_worker(node_id)
+    if (existing is not None
+            and existing.hostname
+            and hostname
+            and existing.hostname != hostname):
+        _write_conflict_file(node_id, existing, {
+            "node_id": node_id,
+            "ip": ip,
+            "hostname": hostname,
+            "mac": mac,
+        })
+        raise WorkerIdentityConflict(
+            f"refusing to re-register worker {node_id!r}: existing record "
+            f"has hostname={existing.hostname!r} (ip={existing.ip!r}), but "
+            f"this daemon reports hostname={hostname!r} (ip={ip!r}). "
+            f"A worker's physical identity (hostname/IP/MAC) must not change "
+            f"between re-registrations. Either fix the new daemon's "
+            f"METAINFER_NODE_ID / --hostname, or explicitly delete "
+            f"{paths.worker_record(node_id)} to re-home this node_id. "
+            f"Conflict details written to workers/{node_id}.conflict.*.json."
+        )
+
     record = WorkerRecord(
         node_id=node_id,
         ip=ip,

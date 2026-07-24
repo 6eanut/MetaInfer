@@ -642,6 +642,93 @@ body {
   font-size: var(--fs-sm);
   color: var(--accent-2);
 }
+.agents-panel .hint {
+  margin-left: 0.5rem;
+  font-size: 0.85em;
+}
+.agents-panel .agents-row {
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.agents-panel .agents-row:hover {
+  background: var(--bg-elev);
+}
+.agents-panel .agents-row.expanded {
+  background: var(--bg-elev);
+}
+.agents-panel .expand-cell {
+  width: 1.2em;
+  text-align: center;
+  color: var(--muted);
+  user-select: none;
+}
+.agents-panel .agents-tail-row > td {
+  padding: 0;
+  background: var(--bg-subtle, #fafafa);
+  border-bottom: 1px solid var(--border-soft);
+}
+.agents-panel .agents-tail {
+  padding: var(--sp-2) var(--sp-3);
+  max-height: 22rem;
+  overflow-y: auto;
+  font-size: var(--fs-xs);
+}
+.agents-panel .agents-tail-header {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  margin-bottom: var(--sp-1);
+  word-break: break-all;
+}
+.agents-panel ul.agents-tail-events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.agents-panel ul.agents-tail-events > li {
+  padding: var(--sp-1) 0;
+  border-bottom: 1px dashed var(--border-soft);
+  display: flex;
+  gap: var(--sp-2);
+  align-items: flex-start;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.agents-panel ul.agents-tail-events > li:last-child {
+  border-bottom: none;
+}
+.agents-panel .evt-tag {
+  display: inline-block;
+  min-width: 2.6em;
+  padding: 0 var(--sp-1);
+  font-size: var(--fs-xs);
+  font-family: var(--fs-mono);
+  color: var(--muted);
+  text-align: center;
+  border-radius: 2px;
+  background: var(--bg-elev);
+  flex-shrink: 0;
+}
+.agents-panel .evt-tag.tool { color: var(--accent-2); }
+.agents-panel .evt-tag.text { color: var(--accent, #555); }
+.agents-panel .evt-tag.result { color: var(--muted); }
+.agents-panel .evt-tool-name {
+  font-family: var(--fs-mono);
+  font-weight: 500;
+  color: var(--accent-2);
+  flex-shrink: 0;
+}
+.agents-panel .evt-tool-input {
+  font-size: var(--fs-xs);
+  color: var(--fg-dim);
+  word-break: break-all;
+  min-width: 0;
+}
+.agents-panel .evt-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-width: 0;
+  flex: 1;
+}
 
 /* ------------------------- Timeline ------------------------- */
 ul.timeline {

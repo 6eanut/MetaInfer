@@ -110,6 +110,20 @@ export async function getAgents(taskId) {
   return r.json();
 }
 
+export async function getAgentTail(taskId, agentName, maxEvents = 50) {
+  // Tail of one agent's stream-json activity (text responses + tool uses).
+  // Used by the expandable row in AgentsPanel so the operator can see what
+  // an agent is currently doing without leaving the WebUI.
+  const url = `${TASK_SCOPE(taskId)}/agents/${encodeURIComponent(agentName)}/tail?max_events=${maxEvents}`;
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) {
+    // 404 when agent isn't in the snapshot anymore (finished + rotated out)
+    if (r.status === 404) return { agent_name: agentName, found: false, events: [] };
+    throw new Error(`agent tail: ${r.status}`);
+  }
+  return r.json();
+}
+
 export async function getTokenBudget(taskId) {
   // Returns the task's cost-budget snapshot. 200 with {configured:false}
   // when no budget file exists yet — caller should render nothing.

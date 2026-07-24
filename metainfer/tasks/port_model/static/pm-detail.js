@@ -509,7 +509,7 @@ export default function PortModelDetailView({
               （Elapsed / Last output 用于判断是否卡死）
             </span>
           </h3>
-          <${AgentsPanel} agents=${agents || []} />
+          <${AgentsPanel} agents=${agents || []} taskId=${taskId} />
         </section>
       ` : null}
 
@@ -534,7 +534,7 @@ export default function PortModelDetailView({
         <div style=${{ display: "grid", gap: "1rem", gridTemplateColumns: "1fr 1fr" }}>
           <div>
             <h3 style=${{ fontSize: "0.9rem" }}>Agents</h3>
-            <${AgentsPanel} agents=${agents || []} />
+            <${AgentsPanel} agents=${agents || []} taskId=${taskId} />
           </div>
           <div>
             <h3 style=${{ fontSize: "0.9rem" }}>Timeline</h3>

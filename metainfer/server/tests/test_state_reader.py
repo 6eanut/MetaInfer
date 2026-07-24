@@ -205,3 +205,102 @@ def test_reset_default_keeps_only_requirements_when_others_absent(tmp_path):
     assert summary["removed"] == []
     # The file we kept is unchanged.
     assert sr.read_requirements(state_dir) == {"task_type": "calc-theoretical-value"}
+
+
+# --------------------------------------------------------------------------- #
+# read_agent_tail
+# --------------------------------------------------------------------------- #
+def test_read_agent_tail_404_when_agent_missing(tmp_path):
+    """Unknown agent name → found=False so the route can 404."""
+    (tmp_path / "agents.json").write_text(json.dumps({"ts": 0, "agents": []}))
+    out = sr.read_agent_tail(tmp_path, "nonexistent")
+    assert out["found"] is False
+    assert out["events"] == []
+
+
+def test_read_agent_tail_no_log_file_returns_empty(tmp_path):
+    """Agent in snapshot but missing log_file → found, no events."""
+    (tmp_path / "agents.json").write_text(json.dumps({
+        "ts": 0,
+        "agents": [{"name": "a1", "log_file": "", "attempt": 1}],
+    }))
+    out = sr.read_agent_tail(tmp_path, "a1")
+    assert out["found"] is True
+    assert out["events"] == []
+
+
+def test_read_agent_tail_parses_assistant_text_and_tool_use(tmp_path):
+    """Stream-json assistant events surface as text/tool_use summaries."""
+    log_dir = tmp_path / "logs" / "p6" / "iter_00"
+    log_dir.mkdir(parents=True)
+    events_path = log_dir / "p6-porter.attempt1.events.jsonl"
+    events_path.write_text(
+        "\n".join([
+            json.dumps({"type": "system", "session_id": "abc"}),
+            json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Thinking about the boot."},
+                {"type": "tool_use", "name": "Bash",
+                 "input": {"command": "nvidia-smi"}},
+            ]}}),
+            json.dumps({"type": "user", "message": {"content": [
+                {"type": "tool_result", "content": "GPU 0: K100"}]}}),
+            json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Boot succeeded."}]}}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "agents.json").write_text(json.dumps({
+        "ts": 0,
+        "agents": [{
+            "name": "p6-porter",
+            "log_file": str(events_path).replace(".events.jsonl", ".log"),
+            "attempt": 1,
+        }],
+    }))
+    out = sr.read_agent_tail(tmp_path, "p6-porter")
+    assert out["found"] is True
+    types = [e["type"] for e in out["events"]]
+    # text + tool_use paired per assistant turn → expect both
+    assert "tool_use" in types
+    assert "text" in types
+    tool_evt = next(e for e in out["events"] if e["type"] == "tool_use")
+    assert tool_evt["name"] == "Bash"
+    assert tool_evt["input_brief"] == "nvidia-smi"
+
+
+def test_read_agent_tail_caps_at_max_events(tmp_path):
+    """Only the last N events are kept (browser-friendly payload)."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    events_path = log_dir / "a.events.jsonl"
+    lines = []
+    for i in range(100):
+        evt = {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": f"line {i}"}]}}
+        lines.append(json.dumps(evt))
+    events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (tmp_path / "agents.json").write_text(json.dumps({
+        "ts": 0,
+        "agents": [{"name": "a", "log_file": str(events_path).replace(".events.jsonl", ".log")}],
+    }))
+    out = sr.read_agent_tail(tmp_path, "a", max_events=5)
+    assert len(out["events"]) == 5
+    # Should be the LAST 5
+    assert out["events"][-1]["text"] == "line 99"
+
+
+def test_read_agent_tail_falls_back_to_raw_log_when_no_events_jsonl(tmp_path):
+    """If .events.jsonl sibling is missing, tail the raw .log as text lines."""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    log_path = log_dir / "a.log"
+    log_path.write_text("line1\nline2\nline3\n", encoding="utf-8")
+    (tmp_path / "agents.json").write_text(json.dumps({
+        "ts": 0,
+        "agents": [{"name": "a", "log_file": str(log_path)}],
+    }))
+    out = sr.read_agent_tail(tmp_path, "a", max_events=2)
+    assert out["found"] is True
+    assert len(out["events"]) == 2
+    assert out["events"][0]["type"] == "raw"
+    assert out["events"][0]["text"] == "line2"

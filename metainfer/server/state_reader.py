@@ -86,6 +86,158 @@ def read_agents(state_dir: Path) -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# Agent output tail
+# --------------------------------------------------------------------------- #
+def read_agent_tail(
+    state_dir: Path, agent_name: str, max_events: int = 50,
+) -> Dict[str, Any]:
+    """Tail of one agent's recent activity, parsed from its stream-json log.
+
+    The WebUI exposes this so the operator can see what an agent is currently
+    doing — not just "is it alive" (which ``agents.json`` already answers) but
+    "is it heading in the right direction". Without this, a stuck or
+    mis-directed agent looks identical to a productive one.
+
+    Source: ``logs/<phase>/iter_<NN>/<agent>.attempt<N>.events.jsonl`` written
+    by ``metainfer.orchestrator.subagent_manager`` (stream-json from ccb).
+    Each line is one stream event with ``type`` in {system, user, assistant}.
+
+    We extract the *meaningful* events — assistant text blocks and tool uses —
+    from the tail, skipping system / meta / result-only lines. This is enough
+    signal for the operator to spot a misdirected agent without flooding the
+    browser with raw stream-json noise.
+
+    Returns ``{agent_name, found, log_file?, attempt?, events: [...]}``.
+    ``found=False`` if the agent isn't in ``agents.json`` (caller 404s).
+    """
+    snap = _load_json(state_dir / "agents.json", {"ts": 0, "agents": []})
+    agents = snap.get("agents", []) if isinstance(snap, dict) else []
+    match = next((a for a in agents if a.get("name") == agent_name), None)
+    if match is None:
+        return {"agent_name": agent_name, "found": False, "events": []}
+
+    log_file = match.get("log_file") or ""
+    if not log_file:
+        return {
+            "agent_name": agent_name, "found": True, "log_file": "",
+            "attempt": match.get("attempt"), "events": [],
+        }
+
+    # Prefer the .events.jsonl sibling (structured) over the .log (raw).
+    # The orchestrator writes both with the same prefix; .events.jsonl is
+    # line-delimited stream-json, .log is the human-readable rendering.
+    events_path = Path(str(log_file).replace(".log", ".events.jsonl"))
+    if not events_path.exists():
+        # Fall back to raw log tail — last N lines as text blobs.
+        try:
+            raw = Path(log_file).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            raw = ""
+        lines = [ln for ln in raw.splitlines() if ln.strip()][-max_events:]
+        return {
+            "agent_name": agent_name, "found": True,
+            "log_file": log_file, "attempt": match.get("attempt"),
+            "events": [{"type": "raw", "text": ln} for ln in lines],
+        }
+
+    # Parse the JSONL, keep assistant + tool_use events from the tail.
+    # Stream-json schema (Anthropic):
+    #   {"type": "assistant", "message": {"content": [{type:"text",text:"..."},
+    #                                                 {type:"tool_use",name:"...",input:{}}]}}
+    #   {"type": "user", "message": {"content": [{type:"tool_result",content:"..."}]},
+    #    "tool_use_result": {...}}
+    parsed: List[Dict[str, Any]] = []
+    try:
+        with open(events_path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                evt = _stream_event_to_summary(d)
+                if evt is not None:
+                    parsed.append(evt)
+    except OSError:
+        pass
+
+    # Keep the last max_events meaningful events.
+    parsed = parsed[-max_events:]
+    return {
+        "agent_name": agent_name, "found": True,
+        "log_file": log_file, "attempt": match.get("attempt"),
+        "events": parsed,
+    }
+
+
+def _stream_event_to_summary(d: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Reduce one stream-json line to a display-friendly summary, or None
+    if the line carries no operator-relevant signal.
+
+    Returned shapes:
+      ``{"type": "text", "text": "..."}`` — assistant free-form text
+      ``{"type": "tool_use", "name": "Bash", "input_brief": "..."}`` — tool call
+      ``{"type": "tool_result", "name": "Bash", "brief": "..."}`` — tool output
+    """
+    etype = d.get("type")
+    if etype == "assistant":
+        msg = d.get("message") or {}
+        content = msg.get("content") or []
+        if isinstance(content, list) and content:
+            last = content[-1]
+            if isinstance(last, dict):
+                if last.get("type") == "text":
+                    return {"type": "text", "text": str(last.get("text", ""))[:500]}
+                if last.get("type") == "tool_use":
+                    name = str(last.get("name", "?"))
+                    inp = last.get("input") or {}
+                    # Brief: for Bash, the command; for Edit/Write, the path;
+                    # for Read, the path. Other tools: json first 200 chars.
+                    brief = _tool_input_brief(name, inp)
+                    return {"type": "tool_use", "name": name, "input_brief": brief}
+        return None
+    if etype == "user":
+        msg = d.get("message") or {}
+        content = msg.get("content") or []
+        if isinstance(content, list) and content:
+            last = content[-1]
+            if isinstance(last, dict) and last.get("type") == "tool_result":
+                # tool_result content can be string or list of blocks.
+                rc = last.get("content")
+                if isinstance(rc, list) and rc:
+                    txt = ""
+                    for blk in rc:
+                        if isinstance(blk, dict) and blk.get("type") == "text":
+                            txt = str(blk.get("text", ""))
+                            break
+                else:
+                    txt = str(rc or "")
+                return {"type": "tool_result", "brief": txt[:300]}
+        return None
+    return None
+
+
+def _tool_input_brief(name: str, inp: Any) -> str:
+    """Pull the most identifying bit out of a tool_use input for one-glance display."""
+    if not isinstance(inp, dict):
+        return ""
+    if name in ("Bash",):
+        return str(inp.get("command", ""))[:200]
+    if name in ("Read", "Write", "Edit"):
+        return str(inp.get("file_path", ""))
+    if name in ("Glob",):
+        return str(inp.get("pattern", ""))
+    if name in ("Grep",):
+        return str(inp.get("pattern", ""))
+    try:
+        return json.dumps(inp)[:200]
+    except (TypeError, ValueError):
+        return ""
+
+
+# --------------------------------------------------------------------------- #
 # Write helpers (very limited)
 # --------------------------------------------------------------------------- #
 # The WebUI is read-only by design — but the restart flow needs to stamp

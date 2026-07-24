@@ -259,6 +259,24 @@ def build_router(plugin):
         entry = _task_or_404(task_id)
         return _sr.read_agents(_state_dir_for(entry))
 
+    @router.get("/{task_id}/agents/{agent_name}/tail")
+    def task_agent_tail(task_id: str, agent_name: str, max_events: int = 50) -> Dict[str, Any]:
+        """Tail of one agent's recent stream-json activity.
+
+        Lets the operator see what an agent is currently doing (text
+        responses, tool calls) without SSHing in to read the raw log.
+        Returns 404 if the agent isn't in agents.json (finished agents
+        not in the current snapshot, or wrong name).
+        """
+        entry = _task_or_404(task_id)
+        out = _sr.read_agent_tail(_state_dir_for(entry), agent_name, max_events)
+        if not out.get("found"):
+            raise HTTPException(
+                status_code=404,
+                detail=f"agent {agent_name!r} not in current agents.json snapshot",
+            )
+        return out
+
     @router.get("/{task_id}/token-budget")
     def task_token_budget(task_id: str) -> Dict[str, Any]:
         entry = _task_or_404(task_id)

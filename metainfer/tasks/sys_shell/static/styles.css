@@ -664,14 +664,16 @@ body {
 }
 .agents-panel .agents-tail-row > td {
   padding: 0;
-  background: var(--bg-subtle, #fafafa);
+  background: var(--bg-elev);
   border-bottom: 1px solid var(--border-soft);
 }
 .agents-panel .agents-tail {
   padding: var(--sp-2) var(--sp-3);
-  max-height: 22rem;
+  max-height: 16rem;
   overflow-y: auto;
   font-size: var(--fs-xs);
+  background: var(--bg);
+  border-left: 2px solid var(--border);
 }
 .agents-panel .agents-tail-header {
   font-size: var(--fs-xs);
@@ -709,8 +711,9 @@ body {
   flex-shrink: 0;
 }
 .agents-panel .evt-tag.tool { color: var(--accent-2); }
-.agents-panel .evt-tag.text { color: var(--accent, #555); }
+.agents-panel .evt-tag.text { color: var(--accent); }
 .agents-panel .evt-tag.result { color: var(--muted); }
+.agents-panel .evt-tag.raw { color: var(--muted); }
 .agents-panel .evt-tool-name {
   font-family: var(--fs-mono);
   font-weight: 500;

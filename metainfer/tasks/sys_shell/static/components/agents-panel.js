@@ -66,7 +66,7 @@ function AgentRow({ agent, taskId }) {
     if (!taskId || !agent.name) return;
     setLoadingTail(true);
     try {
-      const r = await getAgentTail(taskId, agent.name, 50);
+      const r = await getAgentTail(taskId, agent.name, 10);
       setTail(r);
       setTailErr(null);
     } catch (e) {

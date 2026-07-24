@@ -270,6 +270,14 @@ class LocalLauncher:
             log_fp.close()
             raise
         env = dict(os.environ)
+        # Pin METAINFER_ROOT to the WebUI's resolved root so the
+        # orchestrator (and its sub-agent grandchildren) compute the same
+        # root as the WebUI. Without this, paths.root_dir() in the
+        # orchestrator would fall back to its own cwd-at-import — which
+        # is state_dir (because we set cwd=str(state_dir) below) — and
+        # produce a wildly wrong root, diverging from the WebUI and from
+        # worker daemons started with an explicit METAINFER_ROOT.
+        env["METAINFER_ROOT"] = str(_paths.root_dir())
         # Make sure the orchestrator subprocess can import the metainfer
         # package even when launched from a dev checkout (where the
         # package isn't pip-installed). PYTHONPATH is the parent's

@@ -661,6 +661,16 @@ class SubAgentManager:
     def _build_env(self, spec: AgentSpec) -> Dict[str, str]:
         env = dict(os.environ)
         env.update(spec.env_overrides)
+        # Pin METAINFER_ROOT to the orchestrator's resolved root for every
+        # sub-agent. Without this, an agent whose parent shell didn't have
+        # METAINFER_ROOT set falls back to guessing (e.g. hard-coding the
+        # install path) — and ends up writing claims/inbox under a different
+        # tree than the worker daemons are watching. The orchestrator knows
+        # the authoritative root via paths.root_dir() (which honors the env
+        # var or falls back to cwd-captured-at-import); we re-publish that
+        # exact value so agents never have to guess.
+        from metainfer.server import paths as _paths
+        env["METAINFER_ROOT"] = str(_paths.root_dir())
         # Keep the agent from going interactive
         env.setdefault("DISABLE_INTERACTIVITY", "1")
         # bypassPermissions under EUID=0 normally trips a hard exit

@@ -1,0 +1,25 @@
+.opt-operator .tabs { display: flex; gap: 0.4rem; margin-bottom: 0.8rem; }
+.opt-operator .tab { padding: 0.3rem 0.8rem; border: 1px solid var(--border, #ccc); border-radius: 4px; background: transparent; cursor: pointer; }
+.opt-operator .tab.active { background: var(--accent, #2f6fd0); color: #fff; }
+.opt-operator .overview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 0.8rem; }
+.opt-operator .card { border: 1px solid var(--border, #ccc); border-radius: 6px; padding: 0.6rem 0.8rem; }
+.opt-operator .card h3 { margin: 0 0 0.4rem; font-size: 0.95rem; }
+.opt-operator .phase-nodes { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.opt-operator .phase-pill { padding: 0.2rem 0.5rem; border: 1px solid var(--border, #ccc); border-radius: 999px; font-size: 0.8rem; }
+.opt-operator .phase-pill.active { background: var(--accent, #2f6fd0); color: #fff; }
+.opt-operator .phase-pill.done { opacity: 0.6; }
+.opt-operator .lineage-bars { display: flex; align-items: flex-end; gap: 2px; height: 48px; margin-top: 0.4rem; }
+.opt-operator .bar { width: 14px; background: var(--accent, #2f6fd0); }
+.opt-operator .gpu-grid { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.opt-operator .gpu-slot { border: 1px solid var(--border, #ccc); border-radius: 4px; padding: 0.3rem 0.5rem; font-size: 0.8rem; }
+.opt-operator .gpu-slot.held { background: #fbe9e7; }
+.opt-operator .gpu-slot.free { background: #e8f5e9; }
+.opt-operator .iter-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.opt-operator .iter-table th, .opt-operator .iter-table td { border: 1px solid var(--border, #ddd); padding: 0.25rem 0.4rem; text-align: left; }
+.opt-operator .kv { list-style: none; margin: 0; padding: 0; }
+.opt-operator .kv li { display: flex; justify-content: space-between; padding: 0.2rem 0; border-bottom: 1px dashed var(--border, #ddd); }
+.opt-operator .conf.pass { color: #1b7f3b; }
+.opt-operator .conf.fail { color: #b3261e; }
+.opt-operator .digest { font-family: monospace; font-size: 0.8rem; }
+.opt-operator .muted { color: var(--muted, #777); }
+.opt-operator .runtime-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; }

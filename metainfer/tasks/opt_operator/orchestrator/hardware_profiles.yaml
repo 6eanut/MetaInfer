@@ -1,0 +1,15 @@
+# Hardware profiles for opt_operator build targets.
+#
+# `arch` is the target DCU architecture for HIP compilation; Triton targets the
+# same device via ROCm/torch. `flops` is a nominal peak for reporting a util
+# estimate when the contract provides a `metric` — it is informational only and
+# never gates anything.
+default: K100
+
+profiles:
+  K100:
+    vendor: HYGON
+    arch: gfx928
+    hipcc: hipcc
+    flops: 1.9e14
+    note: K100 DCU / DTK

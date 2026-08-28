@@ -1,0 +1,112 @@
+# Question bank for the `opt-operator` task type (operator optimization, HIP/Triton → K100).
+# Flat keys become top-level fields in requirements.json; read via
+# metainfer.orchestrator.requirements.req_field.
+
+- key: input_mode
+  question: "Do you have a kernel source to optimize, or only a spec?"
+  header: "Input mode"
+  required: true
+  multi: false
+  default: "spec"
+  options:
+    - label: "I have a kernel source"
+      description: "Provide the HIP/Triton source; it is certified as the baseline champion then optimized."
+    - label: "Spec only (from scratch)"
+      description: "Describe the operator via a contract; the task builds a baseline from the reference library or generates one."
+
+- key: kernel_language
+  question: "Which kernel language / stack?"
+  header: "Stack"
+  required: true
+  multi: false
+  default: "triton"
+  options:
+    - label: "HIP"
+      description: "HIP C++ for the K100 DCU (gfx928)"
+    - label: "Triton"
+      description: "System Triton + ROCm/torch (same comparison logic as HIP)"
+
+- key: kernel_source
+  question: "Kernel source file (HIP .hip or Triton .py). Required when input mode is 'I have a kernel source'."
+  header: "Kernel src"
+  required: false
+  form: file
+
+- key: shape_mode
+  question: "Optimize for a specific shape, or general across the shape-sweep range?"
+  header: "Shape mode"
+  required: true
+  multi: false
+  default: "general"
+  options:
+    - label: "Targeted (specific shape)"
+      description: "Specialize (constexpr / unrolled / fixed tile) for the given shapes; benchmark their neighborhood."
+    - label: "General (any shape)"
+      description: "Write general code that stays fast across the full shape-sweep range."
+
+- key: target_shapes
+  question: "Exact shapes to specialize for (used when shape mode is targeted), e.g. M=4096,N=4096,K=4096 or one per line."
+  header: "Target shapes"
+  required: false
+  default: ""
+  form: textarea
+
+- key: operator_contract
+  question: "Operator contract (inline YAML, file path, or pasted text). Describes inputs/outputs/dtypes/shape-sweep; used in both input modes."
+  header: "Contract"
+  required: true
+  default: ""
+  form: textarea
+
+- key: reference
+  question: "Optional correctness reference (a forward(**inputs)->outputs implementation). If omitted, the reference library is consulted, then a reference is generated and auto-reviewed."
+  header: "Reference"
+  required: false
+  default: ""
+  form: file
+
+- key: num_gpus
+  question: "Number of GPUs to use. 0 = auto-detect all idle local GPUs."
+  header: "GPUs"
+  required: false
+  multi: false
+  default: "0"
+  options:
+    - label: "0 (auto)"
+      description: "Use every idle GPU found; validation tasks dispatch to whichever slot is free."
+    - label: "1"
+      description: "Single GPU"
+    - label: "2"
+      description: "Two GPUs"
+    - label: "4"
+      description: "Four GPUs"
+
+- key: constraints
+  question: "Any optimization constraints (no vendor libs, deterministic, must preserve bit-exactness, etc.)?"
+  header: "Constraints"
+  required: false
+  default: "No vendor libraries; deterministic; respect the contract numerics tolerances."
+  form: textarea
+
+- key: max_iterations
+  question: "Max optimization cycles (each = plan/implement/conformance/review/profile/plan)?"
+  header: "Max iters"
+  required: false
+  multi: false
+  default: "20"
+  options:
+    - label: "6"
+      description: "Short run"
+    - label: "10"
+      description: "Quick prototype"
+    - label: "20"
+      description: "Balanced (recommended)"
+    - label: "50"
+      description: "Long-running"
+
+- key: token_budget_max_cost_usd
+  question: "Optional max LLM token cost (USD) for the whole run."
+  header: "Budget USD"
+  required: false
+  form: number
+  default: 0

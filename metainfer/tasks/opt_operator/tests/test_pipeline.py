@@ -181,3 +181,58 @@ def test_finishes_and_sets_run_status(tmp_path):
     assert run.finished is True
     assert run.final_status == "success"
     assert run.current_phase == "finished"
+
+
+def test_implement_no_source_skips_gracefully(tmp_path):
+    # B_implement returns no source every cycle. This used to crash the whole
+    # run with an unhandled PipelineError; it must instead skip each cycle,
+    # keep the genesis champion, and finish normally.
+    calls = []
+
+    def runner(phase, tier, prompt, iter_dir, n):
+        calls.append((phase, tier, n))
+        if phase == "S_baseline":
+            return {"language": "triton", "source": "// baseline"}
+        if phase == "A_plan":
+            return {"approach": "x", "detail": "x", "done": False}
+        if phase == "B_implement":
+            return {}          # no candidate source produced
+        if phase == "D_review":
+            return {"guidance": "g"}
+        if phase == "F_perf_plan":
+            return {"next_plan": "", "done": False}
+        return {}
+
+    pipe, store, ledger, _ = build_pipeline(
+        tmp_path, runner=(runner, calls), cfg=PipelineConfig(max_iterations=3))
+    pipe.run()   # must not raise
+    chain = ledger.lineage()
+    assert len(chain) == 1 and chain[0].iteration == 0   # genesis champion kept
+    assert store.load_run().finished
+    # S_baseline + 3 no-candidate optimization cycles, each recorded as failed
+    iters = store.load_all_iterations()
+    assert len(iters) == 4
+    assert sum(1 for i in iters if i.get("status") == "failed") == 3
+    # the skip path never reached D_review / F_perf_plan
+    assert not [c for c in calls if c[0] in ("D_review", "F_perf_plan")]
+
+
+def test_conformance_launch_crash_skips_gracefully(tmp_path):
+    # The candidate source builds but crashes when conformance launches it
+    # (e.g. a Triton JIT/import error). This must skip the cycle, not kill the
+    # run; only genesis (baseline) remains in the ledger.
+    class CrashBackend(FakeBackend):
+        def conformance(self, contract, oracle, build, job_id):
+            self.conformance_calls += 1
+            if self.conformance_calls > 1:   # candidate launch (baseline == call 1)
+                raise RuntimeError("candidate failed to launch")
+            return super().conformance(contract, oracle, build, job_id)
+
+    runner, calls = make_runner(stop_after_cycle=3)
+    pipe, store, ledger, calls = build_pipeline(
+        tmp_path, backend=CrashBackend(), runner=(runner, calls),
+        initial_source="// src", initial_language="triton",
+        cfg=PipelineConfig(max_iterations=3))
+    pipe.run()   # must not raise
+    assert len(ledger.lineage()) == 1        # only genesis
+    assert store.load_run().finished

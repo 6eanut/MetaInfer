@@ -16,7 +16,7 @@ import math
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
-from ._compare import max_abs_rel_error, shape_of
+from ._compare import max_abs_rel_error, shape_of, within_tol
 from .contract import CaseSpec, OperatorContract
 
 
@@ -84,7 +84,10 @@ def _check_case(
         a, r = max_abs_rel_error(candidate_out[name], oracle_out[name])
         max_abs = max(max_abs, a)
         max_rel = max(max_rel, r)
-        if a > abs_tol and r > rel_tol:
+        # Pass/fail is per-element (a single element must violate BOTH
+        # tolerances); the report keeps the global maxima for visibility.
+        if not within_tol(candidate_out[name], oracle_out[name],
+                          abs_tol=abs_tol, rel_tol=rel_tol):
             ok = False
             detail = f"{name}: abs={a:.3g} rel={r:.3g}"
 

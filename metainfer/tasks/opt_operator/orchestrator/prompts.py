@@ -28,6 +28,41 @@ def _contract_summary(contract) -> str:
     return "\n".join(lines)
 
 
+# Runner-facing ABI every emitted *Triton* kernel must satisfy. The runner loads
+# the staged source as a module and calls ``launch(*inputs_cuda)``; ``launch``
+# returns the single output CUDA tensor. Inputs arrive in ``contract.inputs``
+# order, already on CUDA in the contract dtypes.
+def _triton_source_abi(contract) -> str:
+    in_sig = ", ".join(t.name for t in contract.inputs)
+    out = contract.outputs[0] if contract.outputs else None
+    out_name = out.name if out else "C"
+    out_dtype_hint = out.dtype if out else "the contract output dtype"
+    return (
+        f"SOURCE ABI (you MUST satisfy — the conformance/perf runner imports your "
+        f"source as a module and calls `launch`):\n"
+        f"- Write ONE complete Python module using torch + triton. No bare C/C++.\n"
+        f"- Define your `@triton.jit` kernel(s) inside the module.\n"
+        f"- Define a module-level function `launch` whose positional parameters are "
+        f"EXACTLY the contract inputs IN ORDER, each already a CUDA torch tensor "
+        f"of the matching dtype:\n"
+        f"    def launch({in_sig}):  ...\n"
+        f"  Derive M/N/K from the input tensor shapes at runtime.\n"
+        f"- `launch` must RETURN the single output tensor "
+        f"({out_name}, dtype {out_dtype_hint}, CUDA, shape [M,N]) — do NOT store "
+        f"to a global/output arg.\n"
+        f"- int8 x int8 GEMM: accumulate in int32, then multiply the fp32 scale "
+        f"factors (a_scale per row x b_scale per column) in fp32, then cast the "
+        f"final value to the output dtype with `.to(...)`. Match the reference's "
+        f"numerics within the contract tolerances across the whole shape-sweep.\n"
+        f"- Return JSON: {{\"language\": \"triton\", \"source\": \"<full module source>\"}}"
+    )
+
+
+def _hip_note() -> str:
+    return ("Only Triton is currently executable on this run. If you would emit HIP, "
+            "emit the Triton equivalent instead.\n\n")
+
+
 def baseline_prompt(contract, oracle, ctx: Dict[str, Any]) -> str:
     """S_baseline: certify / generate the initial naive champion (mode B)."""
     return (
@@ -37,7 +72,7 @@ def baseline_prompt(contract, oracle, ctx: Dict[str, Any]) -> str:
         f"The reference defines `forward(**inputs) -> outputs`; your kernel must "
         f"reproduce that numerics within the contract tolerances across the full "
         f"shape-sweep. Prefer simplicity and correctness over speed for the baseline.\n\n"
-        f"Return JSON: {{\"language\": \"hip\"|\"triton\", \"source\": \"<kernel source>\"}}"
+        f"{_hip_note()}{_triton_source_abi(contract)}"
     )
 
 
@@ -75,7 +110,7 @@ def implement_prompt(contract, plan, ctx: Dict[str, Any]) -> str:
         f"Produce complete, compilable kernel source implementing the plan. "
         f"Preserve exact output semantics; the conformance gate will compare "
         f"against the frozen oracle.\n\n"
-        f"Return JSON: {{\"language\": \"hip\"|\"triton\", \"source\": \"<kernel source>\"}}"
+        f"{_hip_note()}{_triton_source_abi(contract)}"
     )
 
 
@@ -87,7 +122,7 @@ def repair_prompt(contract, plan, conformance_failures, ctx: Dict[str, Any]) -> 
         f"Contract: {contract.name} ({contract.language}).\n"
         f"Failures:\n{fails}\n\n"
         f"Original plan:\n{plan}\n\n"
-        f"Return JSON: {{\"language\": \"hip\"|\"triton\", \"source\": \"<corrected kernel source>\"}}"
+        f"{_hip_note()}{_triton_source_abi(contract)}"
     )
 
 

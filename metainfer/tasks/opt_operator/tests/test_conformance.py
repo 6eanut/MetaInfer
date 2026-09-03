@@ -6,6 +6,7 @@ import pytest
 
 from metainfer.tasks.opt_operator.orchestrator.conformance import conformance_report
 from metainfer.tasks.opt_operator.orchestrator.contract import OperatorContract
+from metainfer.tasks.opt_operator.orchestrator._compare import within_tol
 from metainfer.tasks.opt_operator.tests._helpers import _fill, contract_dict
 
 
@@ -97,3 +98,52 @@ def test_multi_case_all_must_pass():
     report = conformance_report(c, oracle, cand)
     assert not report.passed
     assert sum(1 for r in report.results if r.passed) == 3
+
+
+# --- Per-element gate semantics ----------------------------------------------
+# A case must FAIL only when a *single element* violates both abs_tol AND
+# rel_tol. The global max-abs and global max-rel can land on different elements
+# (a large-magnitude element with a big abs error, plus a near-zero element with
+# a big *relative* error, e.g. fp16-subnormal noise). Coupling the two global
+# maxima wrongly rejects such a correct candidate. These tests pin that fix.
+
+def test_within_tol_passes_when_maxima_on_different_elements():
+    # element0: abs err 30 (>abs_tol 10) but rel 0.03 (<rel_tol 0.05) -> ok
+    # element1: abs err 0.001 (<abs_tol 10) but rel 1.0 (>rel_tol)    -> ok
+    # (rel_tol violation only counts if abs ALSO exceeds abs_tol)
+    assert within_tol([1030.0, 0.002], [1000.0, 0.001], abs_tol=10.0, rel_tol=0.05)
+
+
+def test_within_tol_fails_when_single_element_violates_both():
+    # element0: abs err 300 (>10) AND rel 0.3 (>0.05) on the SAME element.
+    assert not within_tol([1300.0, 0.002], [1000.0, 0.001], abs_tol=10.0, rel_tol=0.05)
+
+
+def test_conformance_passes_when_maxima_on_different_elements():
+    c = make_contract(shapes={"B": 1, "S": 1, "H": 2},
+                      numerics={"abs_tol": 10.0, "rel_tol": 0.05})
+    case = list(c.generate_cases())[0]
+    oracle = {case.id: {"Y": [[[1000.0, 0.001]]]}}
+    cand = {case.id: {"Y": [[[1030.0, 0.002]]]}}
+    report = conformance_report(c, oracle, cand)
+    assert report.passed
+    r = report.result(case.id)
+    # The report still surfaces the global maxima for visibility...
+    assert r.max_abs_err > 10.0
+    assert r.max_rel_err > 0.05
+    # ...but no single element violates both tolerances, so the case passes.
+    assert r.passed
+    assert r.detail == ""
+
+
+def test_conformance_fails_when_single_element_violates_both():
+    c = make_contract(shapes={"B": 1, "S": 1, "H": 2},
+                      numerics={"abs_tol": 10.0, "rel_tol": 0.05})
+    case = list(c.generate_cases())[0]
+    oracle = {case.id: {"Y": [[[1000.0, 0.001]]]}}
+    cand = {case.id: {"Y": [[[1300.0, 0.002]]]}}  # element0: abs 300 & rel 0.3
+    report = conformance_report(c, oracle, cand)
+    assert not report.passed
+    r = report.result(case.id)
+    assert not r.passed
+    assert r.detail != ""

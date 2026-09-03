@@ -207,28 +207,19 @@ class Pipeline:
             self._close_iteration(rec)
             return
 
-        # B_implement + C_conformance — cheap model lands the plan; repair loop
-        self._set_phase(n, "B_implement")
-        candidate_source, candidate_language, candidate_build = \
-            self._implement(n, self._plan, rec)
-
-        self._set_phase(n, "C_conformance")
-        report = self.backend.conformance(self.contract, self.oracle,
-                                          candidate_build, self.cfg.job_id)
-        failures = _conformance_failures(report)
-        repairs = 0
-        while not report.passed and repairs < self.cfg.max_repairs:
-            repairs += 1
-            self._set_phase(n, "C_conformance")
-            resp = self._agent(
-                n, "B_implement", tier_for_phase("B_implement"),
-                prompts.repair_prompt(self.contract, self._plan, failures, {}))
-            candidate_source = resp.get("source")
-            candidate_language = resp.get("language") or candidate_language
-            candidate_build = self._build_and_check(candidate_source, candidate_language)
-            report = self.backend.conformance(self.contract, self.oracle,
-                                              candidate_build, self.cfg.job_id)
-            failures = _conformance_failures(report)
+        # B_implement + C_conformance — cheap model lands the plan; repair loop.
+        # A candidate that cannot be *built* at all (implement/repair returned
+        # no source, or the source would not build/launch under conformance) is
+        # recorded as a failed iteration and skipped: the incumbent champion is
+        # kept and the loop continues to the next iteration. One bad candidate
+        # must never crash the whole run.
+        landed = self._land_candidate(n, rec)
+        if landed is None:
+            rec.status = "failed"
+            rec.ended_at = time.time()
+            self._close_iteration(rec)
+            return
+        candidate_source, candidate_language, candidate_build, report = landed
         rec.candidate_source = candidate_source
         rec.candidate_language = candidate_language
         rec.candidate_digest = candidate_build.digest
@@ -272,6 +263,55 @@ class Pipeline:
     # ------------------------------------------------------------------ #
     # Phases: implement (with repair)
     # ------------------------------------------------------------------ #
+
+    def _land_candidate(self, n: int, rec: IterationRecord):
+        """Implement the plan and drive it to a conformance-checked build.
+
+        Runs the initial :meth:`_implement`, then up to ``max_repairs``
+        conformance repairs. Returns ``(source, language, build, report)``;
+        ``report`` may or may not have passed (promotion is decided by the
+        caller via :meth:`_should_promote`).
+
+        Returns ``None`` only when *no* candidate build could be produced — the
+        implement/repair agent returned no source, or the source would not
+        build/launch under conformance. The caller then skips the iteration and
+        keeps the incumbent champion; a bad candidate must never crash the run.
+        """
+        self._set_phase(n, "B_implement")
+        try:
+            source, language, build = self._implement(n, self._plan, rec)
+        except PipelineError as exc:
+            rec.notes.append(f"B_implement: {exc}")
+            return None
+        self._set_phase(n, "C_conformance")
+        try:
+            report = self.backend.conformance(self.contract, self.oracle,
+                                              build, self.cfg.job_id)
+        except Exception as exc:
+            rec.notes.append(f"C_conformance launch failed: {exc}")
+            return None
+        failures = _conformance_failures(report)
+        repairs = 0
+        while not report.passed and repairs < self.cfg.max_repairs:
+            repairs += 1
+            self._set_phase(n, "C_conformance")
+            try:
+                resp = self._agent(
+                    n, "B_implement", tier_for_phase("B_implement"),
+                    prompts.repair_prompt(self.contract, self._plan, failures, {}))
+                source = resp.get("source")
+                language = resp.get("language") or language
+                if not source:
+                    rec.notes.append("B_implement repair returned no source")
+                    return None
+                build = self._build_and_check(source, language)
+                report = self.backend.conformance(self.contract, self.oracle,
+                                                  build, self.cfg.job_id)
+                failures = _conformance_failures(report)
+            except Exception as exc:
+                rec.notes.append(f"B_implement repair failed: {exc}")
+                return None
+        return source, language, build, report
 
     def _implement(self, n: int, plan: str, rec: IterationRecord):
         resp = self._agent(

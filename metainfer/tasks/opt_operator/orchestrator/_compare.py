@@ -63,6 +63,30 @@ def allclose(a: Any, b: Any, rtol: float = 1e-3, atol: float = 1e-5) -> bool:
     return True
 
 
+def within_tol(a: Any, b: Any, abs_tol: float, rel_tol: float) -> bool:
+    """True iff *every* element of ``a`` is within tolerance of ``b``.
+
+    Per-element numpy-style semantics: an element passes unless its absolute
+    error exceeds ``abs_tol`` **and** its relative error exceeds ``rel_tol``
+    simultaneously. The case passes only if no element violates both.
+
+    This is deliberately *not* "global max-abs and global max-rel both exceed":
+    those two maxima can land on different elements (a large-magnitude element
+    with a big absolute error plus a near-zero element with a big *relative*
+    error), which would wrongly reject a correct candidate.
+    """
+    fa, fb = to_flat_scalars(a), to_flat_scalars(b)
+    if len(fa) != len(fb):
+        return False
+    for x, y in zip(fa, fb):
+        if math.isnan(x) or math.isnan(y):
+            return False
+        abs_err = abs(x - y)
+        if abs_err > abs_tol and abs_err > rel_tol * abs(y):
+            return False
+    return True
+
+
 def max_abs_rel_error(a: Any, b: Any) -> Tuple[float, float]:
     """Return (max_abs, max_rel) elementwise errors between ``a`` and ``b``.
 

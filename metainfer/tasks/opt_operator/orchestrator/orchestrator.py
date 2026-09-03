@@ -296,8 +296,16 @@ def _make_pool(req: Dict[str, Any], workspace_dir: Path) -> GpuPool:
 
 
 def _make_production_runner(manager, model_map: Dict[str, Optional[str]], req):
-    """AgentRunner wrapping SubAgentManager; maps tier → AgentSpec.model."""
+    """AgentRunner wrapping SubAgentManager; maps tier → AgentSpec.model.
+
+    Agent time budgets are read from the requirements (``agent_timeout_s`` /
+    ``agent_stuck_timeout_s``) so a run can give an implementer enough wall-clock
+    and no-output grace to author + GPU-probe a kernel without being killed
+    mid-flight. Defaults stay conservative for other uses.
+    """
     from .pipeline import AgentRunner
+    agent_timeout_s = req_field_int(req, "agent_timeout_s", default=600)
+    stuck_timeout_s = req_field_int(req, "agent_stuck_timeout_s", default=120)
 
     def runner(phase: str, tier: str, prompt: str, iter_dir: Path,
                n: int) -> Dict[str, Any]:
@@ -308,12 +316,13 @@ def _make_production_runner(manager, model_map: Dict[str, Optional[str]], req):
         prompt_file.write_text(prompt, encoding="utf-8")
         spec = AgentSpec(name=name, role=phase, prompt_file=prompt_file,
                          workdir=iter_dir, log_dir=iter_dir,
-                         timeout_s=600, stuck_timeout_s=120, model=model)
+                         timeout_s=agent_timeout_s,
+                         stuck_timeout_s=stuck_timeout_s, model=model)
         manager.launch(spec)
         result = manager.result(name)
-        if result is None or not result.stdout:
+        if result is None or not result.final_text:
             return {"error": "agent produced no output"}
-        return _extract_json(result.stdout)
+        return _extract_json(result.final_text)
 
     return runner
 

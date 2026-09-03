@@ -36,8 +36,39 @@ Timer = Callable[[BuildResult, OperatorContract, CaseSpec, GpuLease, int], float
 
 def default_timer(build: BuildResult, contract: OperatorContract, case: CaseSpec,
                   lease: GpuLease, reps: int) -> float:
-    """Stub timer — a real orchestrator wires a hipprof invocation here."""
-    raise ProfilerError("hipprof timing requires a real K100/ROCm environment")
+    """Time a Triton kernel over one case via CUDA events (median of ``reps``).
+
+    Inputs are regenerated deterministically per case, the kernel is warmed up to
+    force JIT, then launch latency is recorded per rep with CUDA events. Returns
+    median latency in nanoseconds. Requires torch/triton on a K100/ROCm runtime.
+    """
+    import statistics  # noqa: PLC0415
+    try:
+        import torch  # noqa: PLC0415
+    except Exception as exc:  # pragma: no cover — env-specific
+        raise ProfilerError("torch/ROCm required to time a kernel") from exc
+
+    from .kernel_adapter import triton_runner
+    from .oracle import NumpyReferenceExecutor
+
+    inputs = NumpyReferenceExecutor().generate_inputs(contract, case.dims)
+    try:
+        for _ in range(2):
+            triton_runner(build, contract, case, inputs)
+        torch.cuda.synchronize()
+    except Exception as exc:  # noqa: BLE001 — surface as a ProfilerError
+        raise ProfilerError(f"kernel failed to run while timing: {exc}") from exc
+
+    latencies_ns: list = []
+    for _ in range(max(1, reps)):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        triton_runner(build, contract, case, inputs)
+        end.record()
+        torch.cuda.synchronize()
+        latencies_ns.append(start.elapsed_time(end) * 1e6)  # ms -> ns
+    return float(statistics.median(latencies_ns))
 
 
 def profile_case(

@@ -34,7 +34,11 @@ from metainfer.orchestrator._bootstrap import (
     write_pid_file,
 )
 from metainfer.orchestrator.iteration import IterationWorkspace
-from metainfer.orchestrator.requirements import req_field, req_field_int
+from metainfer.orchestrator.requirements import (
+    req_field,
+    req_field_float,
+    req_field_int,
+)
 from metainfer.orchestrator.state import StateStore
 from metainfer.orchestrator.subagent_manager import AgentSpec
 
@@ -255,6 +259,10 @@ def run_with_requirements(
     cfg = PipelineConfig(
         max_iterations=max_iterations or req_field_int(req, "max_iterations", default=20),
         job_id=task_id,
+        sample_seed=req_field_int(req, "sample_seed"),
+        weight_power=req_field_float(req, "weight_power", 1.0) or 1.0,
+        score_gate=req_field_float(req, "score_gate", 1.0) or 1.0,
+        reps=req_field_int(req, "perf_reps", 10) or 10,
     )
     pipe = Pipeline(
         store=store, workspace=workspace, backend=backend, agent_runner=runner,

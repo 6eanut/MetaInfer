@@ -79,5 +79,18 @@ class RealBackend:
                 reps: int) -> Dict[str, PerfResult]:
         return profile_cases(self.pool, contract, build, job_id=job_id, reps=reps)
 
+    def oracle_outputs(self, contract: OperatorContract, oracle: FrozenOracle,
+                       job_id: str) -> Dict[str, Dict]:
+        """Per-case oracle outputs for the adversarial correctness self-review.
+
+        The frozen reference runs on CPU (numpy executor) so this needs no GPU
+        lease; it only yields the tensors the adversarial review then perturbs to
+        prove the conformance gate is not a rubber stamp."""
+        out: Dict[str, Dict] = {}
+        for case in contract.generate_cases():
+            out[case.id] = self.executor.run(
+                oracle.reference_source, contract, case.dims)
+        return out
+
 
 __all__ = ["BackendError", "RealBackend"]

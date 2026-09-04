@@ -20,7 +20,8 @@ def _contract():
 
 
 def _seed_ledger(state_dir):
-    ledger = ChampionLedger(state_dir / "champion_ledger.jsonl")
+    # Authoritative pool file; ChampionLedger is the derived lineage view.
+    ledger = ChampionLedger(state_dir / "kernel_pool.jsonl")
     ledger.append(LedgerEntry(
         iteration=0, kernel_digest="k0", language="triton", contract_digest="RMSNorm",
         parent_iteration=None,
@@ -36,14 +37,14 @@ def _seed_state_dir(tmp_path):
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     state_dir.joinpath("run.json").write_text(json.dumps({
-        "task_id": "t", "current_phase": "E_perf_test",
+        "task_id": "t", "current_phase": "verify",
         "current_iteration": 2, "finished": False,
     }), encoding="utf-8")
     _seed_ledger(state_dir)
     (state_dir / "iterations").mkdir()
     (state_dir / "iterations" / "002.json").write_text(json.dumps({
-        "iteration": 2, "phase": "E_perf_test", "status": "success",
-        "promoted": True, "candidate_language": "triton",
+        "iteration": 2, "phase": "admit_to_pool", "status": "success",
+        "outcome": "admitted", "admitted": True, "candidate_language": "triton",
         "conformance": {"passed": True, "contract_name": "RMSNorm", "results": []},
         "perf": {"S8H4": {"latency_ns": 80.0}},
     }), encoding="utf-8")
@@ -57,19 +58,19 @@ def _seed_state_dir(tmp_path):
 def test_read_run(tmp_path):
     state_dir = _seed_state_dir(tmp_path)
     run = _state_readers.read_run(state_dir)
-    assert run["current_phase"] == "E_perf_test"
+    assert run["current_phase"] == "verify"
     assert run["current_iteration"] == 2
 
 
 def test_read_state_graph(tmp_path):
     state_dir = _seed_state_dir(tmp_path)
     g = _state_readers.read_state_graph(state_dir)
-    assert g["current"] == "E_perf_test"
+    assert g["current"] == "verify"
     by_id = {n["id"]: n for n in g["nodes"]}
-    assert by_id["E_perf_test"]["state"] == "current"
-    assert by_id["S_baseline"]["state"] == "done"
+    assert by_id["verify"]["state"] == "current"
+    assert by_id["harness_setup"]["state"] == "done"
     assert by_id["finished"]["state"] == "pending"
-    assert g["active_edge"]["to"] == "E_perf_test"
+    assert g["active_edge"]["to"] == "verify"
 
 
 def test_read_lineage(tmp_path):
@@ -84,7 +85,7 @@ def test_read_lineage(tmp_path):
 def test_read_overview(tmp_path):
     state_dir = _seed_state_dir(tmp_path)
     ov = _state_readers.read_overview(state_dir)
-    assert ov["run"]["current_phase"] == "E_perf_test"
+    assert ov["run"]["current_phase"] == "verify"
     assert ov["reference"]["origin"] == "generated"
     assert ov["reference"]["op_id"] == "RMSNorm"
     assert ov["summary"]["promotions"] == 1
@@ -102,7 +103,8 @@ def test_read_iterations(tmp_path):
 def test_read_conformance(tmp_path):
     state_dir = _seed_state_dir(tmp_path)
     conf = _state_readers.read_conformance(state_dir, 2)
-    assert conf["promoted"] is True
+    assert conf["admitted"] is True
+    assert conf["outcome"] == "admitted"
     assert conf["conformance"]["passed"] is True
     assert _state_readers.read_conformance(state_dir, 99) is None
 

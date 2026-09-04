@@ -3,7 +3,7 @@
 Backs the overview (macro: phase graph + champion lineage + reference origin +
 GPU pool + summary) and the per-iteration drill-in (conformance + latency). Reads
 only — never writes — and never caches; everything is derived from the SSOT files
-(run.json, champion_ledger.jsonl, system_oracle/*/oracle.json, iterations/*.json).
+(run.json, kernel_pool.jsonl, system_oracle/*/oracle.json, iterations/*.json).
 """
 
 from __future__ import annotations
@@ -52,7 +52,8 @@ def _oracle_info(state_dir: Path) -> Dict[str, Any]:
 
 
 def read_lineage(state_dir: Path) -> List[Dict[str, Any]]:
-    ledger = ChampionLedger(state_dir / "champion_ledger.jsonl")
+    # Authoritative kernel pool; ChampionLedger is the derived lineage view.
+    ledger = ChampionLedger(state_dir / "kernel_pool.jsonl")
     try:
         entries = ledger.lineage()
     except Exception:  # noqa: BLE001 — a corrupt ledger shouldn't 500 the overview
@@ -139,7 +140,8 @@ def read_conformance(state_dir: Path, n: int) -> Optional[Dict[str, Any]]:
         "iteration": n,
         "conformance": rec.get("conformance"),
         "perf": rec.get("perf"),
-        "promoted": rec.get("promoted", False),
+        "outcome": rec.get("outcome", ""),
+        "admitted": rec.get("admitted", False),
         "candidate_digest": rec.get("candidate_digest"),
     }
 

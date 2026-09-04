@@ -1,19 +1,27 @@
-"""Optimization loop: S_baseline self-certification + A→…→F iterations.
+"""Pool-evolution optimization loop (OPT_KERNEL_SPEC FR-4/5/6/7).
 
-The pipeline wires the contract, frozen oracle, GPU pool, ledger, backend (build /
-conformance / profile) and an LLM agent runner into a deterministic phase loop::
+The pipeline wires the contract, frozen oracle, GPU pool, kernel pool, twin
+harnesses (correctness + benchmark), backend and an agent runner into a
+deterministic *pool-evolution* loop::
 
-    S_baseline → A_plan → B_implement → C_conformance → D_review
-        → E_perf_test → F_perf_plan → (loop to A_plan) … → finished
+    harness_setup (genesis + adversarial harness self-review)
+        -> select_kernel (quality-weighted, seeded) -> optimize
+            -> verify (twin harnesses) -> [fail] -> repair (<= max_repairs)
+                -> [admit_to_pool | discarded]
+        -> select_kernel -> ... -> finished
 
-Model tiering follows :data:`phases.STRONG_PHASES` / :data:`phases.CHEAP_PHASES`:
-strong models plan/review/analyze; cheap models implement/repair/write. The tier
-is passed to the agent runner, which in production maps it onto ``AgentSpec.model``.
+Unlike the old single-champion A…F chain, kernels accumulate in a **pool**
+(:class:`KernelPool`, authoritative ``kernel_pool.jsonl``). Every admitted
+kernel carries its own benchmark evidence; the champion, per-kernel speedups,
+quality scores and lineage are all *derived* from the pool at read time. Each
+round picks a kernel to improve by quality-weighted probability (seeded and
+reproducible), so high-quality kernels are improved most often but exploration
+is never fully starved.
 
-Promotion happens only in :meth:`Pipeline._perf_test` — a candidate that is
-conformance-clean and beats the incumbent per-shape within a noise margin is
-appended to the :class:`ChampionLedger`. Everything else is deterministic and
-replayable from ``run.json`` + the ledger.
+An ``optimize`` round never crashes the whole run: a candidate that yields no
+source, fails to build/launch, or still fails correctness after ``max_repairs``
+repairs is recorded as ``failed`` / ``discarded`` and the loop moves on to the
+next selected kernel.
 
 The ``Backend`` and ``agent_runner`` are injected so the loop is testable with
 pure-Python fakes (no GPU, no numpy, no LLM).
@@ -21,10 +29,9 @@ pure-Python fakes (no GPU, no numpy, no LLM).
 
 from __future__ import annotations
 
-import hashlib
-import json
+import random
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol
 
@@ -32,18 +39,15 @@ from metainfer.orchestrator.iteration import IterationWorkspace
 from metainfer.orchestrator.state import StateStore
 
 from . import prompts
-from .contract import OperatorContract
-from .iteration_record import IterationRecord
-from .ledger import CaseMetric, ChampionLedger, LedgerEntry
-from .oracle import FrozenOracle
-from .phases import (
-    CHEAP_PHASES,
-    PHASE_ORDER,
-    STRONG_PHASES,
-    next_phase,
-    tier_for_phase,
-)
+from .adversarial import review_benchmark, review_correctness
 from .conformance import ConformanceReport
+from .contract import OperatorContract
+from .harness import BenchmarkHarness, CorrectnessHarness
+from .iteration_record import IterationRecord
+from .ledger import ChampionLedger
+from .oracle import FrozenOracle
+from .phases import tier_for_phase
+from .pool import KernelPool, PoolEntry, PoolError
 from .profiler import PerfResult
 
 
@@ -57,18 +61,27 @@ class PipelineError(RuntimeError):
 
 @dataclass
 class PipelineConfig:
-    max_iterations: int = 20
-    noise_factor: float = 0.10        # perf promotion threshold (beats by this margin)
-    regression_factor: float = 0.10   # regression threshold (worse by this margin = no promote)
-    max_repairs: int = 3              # B_implement conformance repair attempts
+    max_iterations: int = 20       # outer round budget
+    max_repairs: int = 3           # verify-correctness repair attempts per round
+    weight_power: float = 1.0      # selection weight ~ quality^weight_power
+    score_gate: float = 1.0        # admission: quality >= gate vs baseline
+    sample_seed: Optional[int] = None   # fixed -> reproducible sampling
     lease_timeout_s: float = 300.0
-    perf_reps: int = 10
+    warmup: int = 2                # benchmark harness口径 (recorded as meta)
+    reps: int = 10
+    statistic: str = "median"      # "median" | "mean"
     job_id: str = "opt_operator"
 
 
 class Backend(Protocol):
     """Build / conformance / profile seam. Production impl wires build.py +
-    kernel_adapter.py + conformance.py + profiler.py; tests inject fakes."""
+    kernel_adapter.py + conformance.py + profiler.py; tests inject fakes.
+
+    A backend MAY also expose ``oracle_outputs(contract, oracle, job_id)``
+    returning per-case oracle outputs; when present the pipeline runs the
+    adversarial correctness review at harness_setup (negative-case self-proof).
+    Its absence only skips that optional review, never fails a run.
+    """
 
     def build(self, source: str, language: str, contract: OperatorContract,
               kernel_dir: Path):
@@ -116,9 +129,18 @@ class Pipeline:
         self.initial_source = initial_source
         self.initial_language = initial_language
         self.cfg = cfg or PipelineConfig()
-        self._champ: Optional[LedgerEntry] = None
-        self._champ_perf: Dict[str, float] = {}
-        self._plan = ""
+        # The authoritative pool is behind the ledger facade (pool file).
+        self._pool: KernelPool = ledger.pool
+        # Twin harnesses carry the reproducibility口径 for every verification.
+        self._corr = CorrectnessHarness(contract, oracle)
+        self._bench = BenchmarkHarness(contract, warmup=self.cfg.warmup,
+                                       reps=self.cfg.reps,
+                                       statistic=self.cfg.statistic)
+        seed = self.cfg.sample_seed
+        if seed is None:
+            seed = int(self.oracle.digest[:8], 16)
+        self._rng = random.Random(seed)
+        self._seed = seed
         self.done = False
 
     # ------------------------------------------------------------------ #
@@ -127,43 +149,45 @@ class Pipeline:
 
     def run(self, *, is_resume: bool = False) -> None:
         run = self.store.load_run()
-        start_cycle = run.current_iteration
-        if is_resume and self.ledger.current_champion() is not None:
-            self._load_champion()
-            start_cycle = run.current_iteration
+        if self._pool.read_all():
+            # Pool already has genesis + admissions (restart / resume): keep the
+            # champion state and continue from the last completed round. Only the
+            # *pool file* is authoritative here — never re-run harness_setup.
             self.done = run.finished
+            start_round = run.current_iteration
+            if self.done:
+                self._finish()
+                return
         else:
-            self._s_baseline()
-            start_cycle = 0
+            self._harness_setup()
+            start_round = 0
 
-        if self.done:
-            self._finish()
-            return
-
-        n = start_cycle + 1
+        n = start_round + 1
         while n <= self.cfg.max_iterations:
-            self._run_cycle(n)
+            self._run_round(n)
             if self.done:
                 break
             n += 1
         self._finish()
 
     # ------------------------------------------------------------------ #
-    # S_baseline — self-certify the initial champion
+    # harness_setup — genesis + adversarial harness self-review (once)
     # ------------------------------------------------------------------ #
 
-    def _s_baseline(self) -> None:
-        self._set_phase(0, "S_baseline")
+    def _harness_setup(self) -> None:
+        self._set_phase(0, "harness_setup")
         source, language = self.initial_source, self.initial_language
         if not source:
             # Mode B without a library baseline: strong agent generates a naive
-            # correct kernel, which we then build + certify.
-            resp = self._agent(0, "S_baseline", tier_for_phase("S_baseline"),
-                               prompts.baseline_prompt(self.contract, self.oracle, {}))
+            # correct kernel, which we then build + certify into the pool.
+            resp = self._agent(0, "harness_setup",
+                               tier_for_phase("harness_setup"),
+                               prompts.baseline_prompt(self.contract,
+                                                       self.oracle, {}))
             source = resp.get("source")
             language = resp.get("language") or self.contract.language
             if not source:
-                raise PipelineError("S_baseline agent returned no baseline source")
+                raise PipelineError("harness_setup agent returned no baseline source")
 
         build = self._build_and_check(source, language)
         report = self.backend.conformance(self.contract, self.oracle, build,
@@ -173,211 +197,243 @@ class Pipeline:
                 f"baseline failed conformance: {_conformance_summary(report)}")
 
         perf = self.backend.profile(self.contract, build, self.cfg.job_id,
-                                    self.cfg.perf_reps)
-        metrics = {
-            cid: CaseMetric(latency_ns=r.latency_ns, speedup=1.0)
-            for cid, r in perf.items()
-        }
-        self._promote(build, metrics, parent=None)
+                                    self.cfg.reps)
+        genesis = self._admit(
+            PoolEntry(
+                iteration=0,
+                kernel_digest=build.digest,
+                language=build.language,
+                contract_digest=self.contract.name,
+                parent_iteration=None,
+                case_latency_ns={cid: p.latency_ns for cid, p in perf.items()},
+                source_path=build.artifact,
+                conformance_digest=build.digest,
+            ),
+            note="genesis baseline",
+        )
+        self._bench.baseline_digest = genesis.kernel_digest
+
+        reviews = self._run_harness_reviews()
         self._close_iteration(IterationRecord(
-            iteration=0, phase="S_baseline", status="success",
+            iteration=0, phase="harness_setup", status="success",
             candidate_source=source, candidate_language=language,
-            candidate_digest=build.digest, conformance=report.as_dict(),
-            perf=_perf_dict(perf), promoted=True,
+            candidate_digest=build.digest, admitted=True, outcome="admitted",
+            conformance=report.as_dict(), perf=_perf_dict(perf),
+            correctness_meta=self._corr.meta,
+            benchmark_meta=self._bench.meta, reviews=reviews,
+            notes=[f"seed={self._seed}", f"genesis digest={build.digest[:12]}…"],
         ))
 
+    def _run_harness_reviews(self) -> Dict[str, Any]:
+        """Snapshot the twin-harness self-review into a leaves-on-record dict.
+
+        The benchmark review (methodology authority) always runs from the harness
+        meta. The adversarial correctness review needs per-case oracle *outputs*;
+        it runs only when the backend can produce them (production GPU path),
+        otherwise it is recorded as skipped so the loop stays testable.
+        """
+        bench_review = review_benchmark(self._bench.meta,
+                                        self._corr.shape_ids).as_dict()
+        oracle_outputs = getattr(self.backend, "oracle_outputs", None)
+        if oracle_outputs is None:
+            corr_review = {
+                "kind": "correctness",
+                "passed": None,
+                "checks": [{"name": "oracle_outputs", "passed": False,
+                            "detail": "backend lacks oracle_outputs; "
+                                      "adversarial review skipped"}],
+                "negative_evidence": [],
+                "message": "skipped (no oracle outputs capability)",
+            }
+        else:
+            try:
+                outputs = oracle_outputs(self.contract, self.oracle,
+                                         self.cfg.job_id)
+                corr_review = review_correctness(self.contract, outputs).as_dict()
+            except Exception as exc:  # noqa: BLE001 — a review failure is recorded, not fatal
+                corr_review = {"kind": "correctness", "passed": False,
+                               "checks": [], "negative_evidence": [],
+                               "message": f"adversarial review raised: {exc}"}
+        reviews = {"correctness": corr_review, "benchmark": bench_review}
+        self.store.append_timeline("harness_review", {
+            "iteration": 0,
+            "correctness_passed": corr_review.get("passed"),
+            "benchmark_passed": bench_review.get("passed"),
+        })
+        return reviews
+
     # ------------------------------------------------------------------ #
-    # One optimization cycle: A → B → C → D → E → F
+    # One optimization round: select -> optimize -> verify(+repair) -> settle
     # ------------------------------------------------------------------ #
 
-    def _run_cycle(self, n: int) -> None:
-        rec = IterationRecord(iteration=n, phase="A_plan", started_at=time.time())
+    def _run_round(self, n: int) -> None:
+        rec = IterationRecord(iteration=n, phase="optimize", started_at=time.time())
 
-        # A_plan — strong model strategy
-        self._set_phase(n, "A_plan")
-        plan_resp = self._agent(
-            n, "A_plan", tier_for_phase("A_plan"),
-            prompts.plan_prompt(self.contract, self.oracle, self._champ,
-                                self._champ_perf, {}))
-        self._plan = plan_resp.get("approach", "")
-        rec.plan = {"approach": self._plan,
-                    "detail": plan_resp.get("detail", "")}
-        if plan_resp.get("done"):
-            self.done = True
-            self._close_iteration(rec)
-            return
+        # select_kernel — seeded quality-weighted sample from the pool.
+        self._set_phase(n, "select_kernel")
+        base = self._pool.sample_kernel(self._rng, weight_power=self.cfg.weight_power)
+        if base is None:
+            # A fresh pool has genesis, so this only fires on a corrupt/empty
+            # store — treat as a hard invariant, not a recoverable round.
+            raise PipelineError("select_kernel: pool is empty")
+        rec.selected_iteration = base.iteration
+        rec.selected_digest = base.kernel_digest
+        rec.notes.append(
+            f"selected pool kernel iteration={base.iteration} "
+            f"digest={base.kernel_digest[:12]}…")
 
-        # B_implement + C_conformance — cheap model lands the plan; repair loop.
-        # A candidate that cannot be *built* at all (implement/repair returned
-        # no source, or the source would not build/launch under conformance) is
-        # recorded as a failed iteration and skipped: the incumbent champion is
-        # kept and the loop continues to the next iteration. One bad candidate
-        # must never crash the whole run.
-        landed = self._land_candidate(n, rec)
-        if landed is None:
-            rec.status = "failed"
-            rec.ended_at = time.time()
-            self._close_iteration(rec)
+        # optimize — agent improves the selected kernel into a candidate.
+        self._set_phase(n, "optimize")
+        base_source = _read_source(base)
+        base_lat = self._pool.rep_latency_for(base)
+        opt = self._agent(
+            n, "optimize", tier_for_phase("optimize"),
+            prompts.optimize_prompt(
+                self.contract, base_source, base_lat,
+                self._pool.quality(base),
+                {"selected_iteration": base.iteration}))
+        source = opt.get("source")
+        language = opt.get("language") or self.contract.language
+        if not source:
+            self._settle(rec, n, outcome="failed", note="optimize returned no source")
             return
-        candidate_source, candidate_language, candidate_build, report = landed
-        rec.candidate_source = candidate_source
-        rec.candidate_language = candidate_language
-        rec.candidate_digest = candidate_build.digest
+        rec.candidate_source = source
+        rec.candidate_language = language
+
+        # verify (correctness harness) with bounded repair; returns a build only
+        # if the candidate is conformance-clean, else None.
+        result = self._verify_and_repair(n, rec, source, language)
+        if result is None:
+            self._settle(rec, n, outcome="discarded",
+                         note="correctness failed after repairs / no build")
+            return
+        build, report = result
+        rec.candidate_digest = build.digest
         rec.conformance = report.as_dict()
 
-        # D_review — strong model guidance (not a gate)
-        self._set_phase(n, "D_review")
-        review = self._agent(
-            n, "D_review", tier_for_phase("D_review"),
-            prompts.review_prompt(self.contract, report.as_dict(),
-                                  self._champ_perf, {}))
-        rec.guidance = review.get("guidance")
+        # benchmark harness — profile every case (same shape set as correctness).
+        try:
+            perf = self._bench.run(self.backend, build, self.cfg.job_id)
+        except Exception as exc:  # noqa: BLE001 — a profiling failure discards, never crashes
+            rec.notes.append(f"benchmark failed: {exc}")
+            self._settle(rec, n, outcome="discarded", note="benchmark failed")
+            return
+        rec.perf = _perf_dict(perf)
+        lat = {cid: p.latency_ns for cid, p in perf.items()}
 
-        # E_perf_test — profile + promote
-        self._set_phase(n, "E_perf_test")
-        promoted = False
-        new_perf: Dict[str, PerfResult] = {}
-        if report.passed:
-            new_perf = self.backend.profile(self.contract, candidate_build,
-                                            self.cfg.job_id, self.cfg.perf_reps)
-            metrics, promoted = self._should_promote(new_perf)
-            if promoted:
-                self._promote(candidate_build, metrics, parent=self._champ)
-        rec.perf = _perf_dict(new_perf)
-        rec.promoted = promoted
-
-        # F_perf_plan — strong model analysis + stop decision
-        self._set_phase(n, "F_perf_plan")
-        plan2 = self._agent(
-            n, "F_perf_plan", tier_for_phase("F_perf_plan"),
-            prompts.perf_plan_prompt(self.contract, _perf_dict(new_perf),
-                                     self._champ_perf, {}))
-        rec.notes.append(plan2.get("next_plan", ""))
-        if plan2.get("done"):
-            self.done = True
-
+        # Admission gate — candidate is correct and not a gross regression vs the
+        # baseline. Per-shape specialization is allowed (champion is derived); we
+        # only keep a *representative* floor so a globally-worse kernel can't flood
+        # the pool.
+        candidate = PoolEntry(
+            iteration=n,
+            kernel_digest=build.digest,
+            language=build.language,
+            contract_digest=self.contract.name,
+            parent_iteration=base.iteration,
+            case_latency_ns=lat,
+            source_path=build.artifact,
+            conformance_digest=build.digest,
+        )
+        quality = self._pool.quality(candidate)
+        rec.quality = quality
+        rec.speedup_vs_baseline = quality
+        if quality >= self.cfg.score_gate:
+            self._set_phase(n, "admit_to_pool")
+            admitted = self._admit(candidate,
+                                   note=f"round {n} (parent iter {base.iteration})")
+            rec.admitted = True
+            rec.outcome = "admitted"
+            self.store.append_timeline("admit", {
+                "iteration": n, "kernel_digest": build.digest,
+                "parent_iteration": base.iteration,
+                "quality": round(quality, 4),
+            })
+        else:
+            self._set_phase(n, "discarded")
+            rec.outcome = "discarded"
+            rec.notes.append(f"quality {quality:.3f} < gate {self.cfg.score_gate}")
+            self.store.append_timeline("discarded", {
+                "iteration": n, "kernel_digest": build.digest,
+                "quality": round(quality, 4), "reason": "below_score_gate",
+            })
         rec.status = "success"
         rec.ended_at = time.time()
         self._close_iteration(rec)
 
-    # ------------------------------------------------------------------ #
-    # Phases: implement (with repair)
-    # ------------------------------------------------------------------ #
+    def _verify_and_repair(self, n: int, rec: IterationRecord, source: str,
+                           language: str):
+        """Drive a candidate to conformance-clean, repairing up to max_repairs.
 
-    def _land_candidate(self, n: int, rec: IterationRecord):
-        """Implement the plan and drive it to a conformance-checked build.
-
-        Runs the initial :meth:`_implement`, then up to ``max_repairs``
-        conformance repairs. Returns ``(source, language, build, report)``;
-        ``report`` may or may not have passed (promotion is decided by the
-        caller via :meth:`_should_promote`).
-
-        Returns ``None`` only when *no* candidate build could be produced — the
-        implement/repair agent returned no source, or the source would not
-        build/launch under conformance. The caller then skips the iteration and
-        keeps the incumbent champion; a bad candidate must never crash the run.
+        Returns ``(build, report)`` when conformance passes; None when the
+        candidate could not be built/launched or is still failing after repairs.
+        Never raises: bad candidates discard the round, not the run.
         """
-        self._set_phase(n, "B_implement")
+        self._set_phase(n, "verify")
         try:
-            source, language, build = self._implement(n, self._plan, rec)
-        except PipelineError as exc:
-            rec.notes.append(f"B_implement: {exc}")
-            return None
-        self._set_phase(n, "C_conformance")
-        try:
+            build = self._build_and_check(source, language)
             report = self.backend.conformance(self.contract, self.oracle,
                                               build, self.cfg.job_id)
-        except Exception as exc:
-            rec.notes.append(f"C_conformance launch failed: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            rec.notes.append(f"verify build/launch failed: {exc}")
             return None
         failures = _conformance_failures(report)
         repairs = 0
         while not report.passed and repairs < self.cfg.max_repairs:
             repairs += 1
-            self._set_phase(n, "C_conformance")
+            self._set_phase(n, "repair")
+            rec.repairs = repairs
             try:
                 resp = self._agent(
-                    n, "B_implement", tier_for_phase("B_implement"),
-                    prompts.repair_prompt(self.contract, self._plan, failures, {}))
-                source = resp.get("source")
+                    n, "repair", tier_for_phase("repair"),
+                    prompts.repair_prompt(self.contract, failures, {}))
+                source = resp.get("source") or source
                 language = resp.get("language") or language
                 if not source:
-                    rec.notes.append("B_implement repair returned no source")
+                    rec.notes.append("repair returned no source")
                     return None
                 build = self._build_and_check(source, language)
                 report = self.backend.conformance(self.contract, self.oracle,
                                                   build, self.cfg.job_id)
                 failures = _conformance_failures(report)
-            except Exception as exc:
-                rec.notes.append(f"B_implement repair failed: {exc}")
+            except Exception as exc:  # noqa: BLE001
+                rec.notes.append(f"repair {repairs} failed: {exc}")
                 return None
-        return source, language, build, report
+        if not report.passed:
+            return None
+        return build, report
 
-    def _implement(self, n: int, plan: str, rec: IterationRecord):
-        resp = self._agent(
-            n, "B_implement", tier_for_phase("B_implement"),
-            prompts.implement_prompt(self.contract, plan, {}))
-        source = resp.get("source")
-        language = resp.get("language") or self.contract.language
-        if not source:
-            raise PipelineError("B_implement returned no candidate source")
-        build = self._build_and_check(source, language)
-        return source, language, build
+    def _settle(self, rec: IterationRecord, n: int, *, outcome: str,
+                note: str) -> None:
+        """Close a round that produced no admitted candidate (failed/discarded)."""
+        if outcome == "failed":
+            rec.status = "failed"
+            rec.phase = "optimize"
+        else:
+            rec.status = "success"
+            rec.phase = "discarded"
+        rec.outcome = outcome
+        rec.notes.append(note)
+        self.store.append_timeline(outcome, {
+            "iteration": n, "reason": note,
+        })
+        rec.ended_at = time.time()
+        self._close_iteration(rec)
+
+    # ------------------------------------------------------------------ #
+    # Pool admission / helpers
+    # ------------------------------------------------------------------ #
+
+    def _admit(self, entry: PoolEntry, *, note: str) -> PoolEntry:
+        try:
+            return self._pool.admit(entry)
+        except PoolError as exc:
+            raise PipelineError(f"pool admit failed: {exc}") from exc
 
     def _build_and_check(self, source: str, language: str):
         kernel_dir = self.workspace.root / "candidates"
         kernel_dir.mkdir(parents=True, exist_ok=True)
         return self.backend.build(source, language, self.contract, kernel_dir)
-
-    # ------------------------------------------------------------------ #
-    # Promotion + ledger
-    # ------------------------------------------------------------------ #
-
-    def _should_promote(self, new_perf: Dict[str, PerfResult]):
-        noise = self.cfg.noise_factor
-        reg = self.cfg.regression_factor
-        metrics: Dict[str, CaseMetric] = {}
-        promoted = False
-        for cid, r in new_perf.items():
-            incumbent = self._champ_perf.get(cid)
-            if incumbent is None:
-                speedup = 1.0
-                promoted = True
-            else:
-                speedup = incumbent / r.latency_ns if r.latency_ns else 1.0
-                if r.latency_ns < incumbent * (1 - noise):
-                    promoted = True
-                if r.latency_ns > incumbent * (1 + reg):
-                    return {}, False   # regression anywhere kills the promotion
-            metrics[cid] = CaseMetric(latency_ns=r.latency_ns, speedup=speedup)
-        return metrics, promoted
-
-    def _promote(self, build, metrics: Dict[str, CaseMetric], parent: Optional[LedgerEntry]):
-        nxt_iter = 0 if parent is None else parent.iteration + 1
-        entry = LedgerEntry(
-            iteration=nxt_iter,
-            kernel_digest=build.digest,
-            language=build.language,
-            contract_digest=self.oracle.contract["name"],
-            parent_iteration=parent.iteration if parent else None,
-            case_metrics=metrics,
-            conformance_digest=build.digest,
-        )
-        self.ledger.append(entry)
-        self._champ = entry
-        self._champ_perf = {cid: m.latency_ns for cid, m in metrics.items()}
-        self.store.append_timeline("promote", {
-            "iteration": nxt_iter,
-            "kernel_digest": build.digest,
-            "speedup": {c: m.speedup for c, m in metrics.items()},
-        })
-
-    def _load_champion(self) -> None:
-        champ = self.ledger.current_champion()
-        if champ is None:
-            raise PipelineError("no champion to resume from")
-        self._champ = champ
-        self._champ_perf = {cid: m.latency_ns for cid, m in champ.case_metrics.items()}
 
     # ------------------------------------------------------------------ #
     # Agent / bookkeeping
@@ -416,6 +472,18 @@ class Pipeline:
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+
+def _read_source(entry: PoolEntry) -> str:
+    """Best-effort read of an admitted kernel's staged source for re-optimization."""
+    if entry.source_path:
+        try:
+            p = Path(entry.source_path)
+            if p.is_file():
+                return p.read_text(encoding="utf-8")
+        except OSError:
+            pass
+    return ""   # caller prompts with "<source unavailable>" + digest
+
 
 def _conformance_summary(report: ConformanceReport) -> str:
     return ", ".join(

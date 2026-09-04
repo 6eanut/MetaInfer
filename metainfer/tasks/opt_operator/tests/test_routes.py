@@ -22,10 +22,10 @@ from metainfer.tasks.opt_operator.tests._helpers import contract_dict
 def _seed(state_dir):
     state_dir.mkdir(parents=True, exist_ok=True)
     state_dir.joinpath("run.json").write_text(json.dumps({
-        "task_id": "t", "current_phase": "A_plan", "current_iteration": 1,
+        "task_id": "t", "current_phase": "optimize", "current_iteration": 1,
         "finished": False,
     }), encoding="utf-8")
-    ledger = ChampionLedger(state_dir / "champion_ledger.jsonl")
+    ledger = ChampionLedger(state_dir / "kernel_pool.jsonl")
     ledger.append(LedgerEntry(
         iteration=0, kernel_digest="k0", language="triton", contract_digest="RMSNorm",
         parent_iteration=None, case_metrics={"c": CaseMetric(latency_ns=100.0)}))
@@ -34,7 +34,8 @@ def _seed(state_dir):
     write_oracle_artifacts(state_dir / "system_oracle" / "run1", oracle)
     (state_dir / "iterations").mkdir()
     (state_dir / "iterations" / "001.json").write_text(json.dumps({
-        "iteration": 1, "phase": "A_plan", "status": "success", "promoted": False,
+        "iteration": 1, "phase": "admit_to_pool", "status": "success",
+        "outcome": "discarded", "admitted": False,
     }), encoding="utf-8")
 
 
@@ -62,7 +63,7 @@ def test_overview(client):
     r = client.get("/api/opt-operator/t/overview")
     assert r.status_code == 200
     data = r.json()
-    assert data["run"]["current_phase"] == "A_plan"
+    assert data["run"]["current_phase"] == "optimize"
     assert data["reference"]["origin"] == "library"
     assert len(data["lineage"]) == 1
     assert data["summary"]["promotions"] == 0
@@ -72,7 +73,7 @@ def test_state_graph(client):
     r = client.get("/api/opt-operator/t/state-graph")
     assert r.status_code == 200
     data = r.json()
-    assert data["current"] == "A_plan"
+    assert data["current"] == "optimize"
 
 
 def test_lineage(client):

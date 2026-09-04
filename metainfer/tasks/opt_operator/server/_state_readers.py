@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from ..orchestrator import phases as _phases
 from ..orchestrator.ledger import ChampionLedger
+from ..orchestrator.pool import KernelPool, rep_latency
 
 
 def _load_json(path: Path, default: Any = None) -> Any:
@@ -23,6 +24,31 @@ def _load_json(path: Path, default: Any = None) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (ValueError, OSError):
         return default
+
+
+def _iso(ts: float) -> Optional[str]:
+    if not ts:
+        return None
+    try:
+        import datetime as _dt
+        return _dt.datetime.fromtimestamp(
+            ts, _dt.timezone.utc).isoformat(timespec="seconds")
+    except Exception:  # noqa: BLE001 — a bad ts shouldn't 500 the overview
+        return None
+
+
+def _iteration_index(state_dir: Path) -> Dict[int, Dict[str, Any]]:
+    """Map iteration number -> its persisted record (iterations/<NNN>.json)."""
+    iters_dir = state_dir / "iterations"
+    if not iters_dir.exists():
+        return {}
+    out: Dict[int, Dict[str, Any]] = {}
+    for p in sorted(iters_dir.glob("*.json")):
+        data = _load_json(p, None)
+        it = data.get("iteration") if isinstance(data, dict) else None
+        if isinstance(it, int) and data is not None:
+            out[it] = data
+    return out
 
 
 def read_run(state_dir: Path) -> Dict[str, Any]:
@@ -116,6 +142,98 @@ def read_overview(state_dir: Path) -> Dict[str, Any]:
     }
 
 
+def read_pool(state_dir: Path) -> Dict[str, Any]:
+    """Full pool view — every admitted kernel, not just the champion's ancestry.
+
+    Each row carries its derived quality / speedup-vs-baseline plus the round's
+    benchmark 口径 (statistic/reps/warmup/shape count) so a score is never a
+    bare number: the harness that produced it is annotated alongside. All
+    derived at read time from kernel_pool.jsonl + iterations/*.json.
+    """
+    pool = KernelPool(state_dir / "kernel_pool.jsonl")
+    try:
+        entries = pool.read_all()
+    except Exception:  # noqa: BLE001 — a corrupt pool shouldn't 500 the UI
+        return {"pool": [], "baseline_rep_latency_ns": None, "pool_size": 0}
+    if not entries:
+        return {"pool": [], "baseline_rep_latency_ns": None, "pool_size": 0}
+    recs = _iteration_index(state_dir)
+    baseline = pool.baseline()
+    baseline_rep = rep_latency(baseline) if baseline else None
+    champ = pool.champion()
+    champ_iter = champ.iteration if champ else None
+    lineage_iters = {e.iteration for e in pool.lineage()}
+    rows: List[Dict[str, Any]] = []
+    for e in entries:
+        rec = recs.get(e.iteration) or {}
+        bmeta = rec.get("benchmark_meta") or {}
+        quality = pool.quality(e)
+        rows.append({
+            "iteration": e.iteration,
+            "kernel_digest": (e.kernel_digest or "")[:16],
+            "language": e.language,
+            "parent_iteration": e.parent_iteration,
+            "admitted_at": _iso(e.admitted_at),
+            "note": e.note,
+            "case_count": len(e.case_latency_ns),
+            "rep_latency_ns": rep_latency(e),
+            "quality": quality,
+            "speedup_vs_baseline": quality,
+            "is_champion": e.iteration == champ_iter,
+            "on_lineage": e.iteration in lineage_iters,
+            # benchmark harness 口径 for this kernel's score
+            "statistic": bmeta.get("statistic"),
+            "reps": bmeta.get("reps"),
+            "warmup": bmeta.get("warmup"),
+            "shape_count": len(bmeta.get("shape_ids") or []),
+        })
+    # Top-quality first for the pool-top view; stable on iteration ties.
+    rows.sort(key=lambda r: (-(r["quality"] or 0.0), r["iteration"]))
+    return {"pool": rows, "baseline_rep_latency_ns": baseline_rep,
+            "pool_size": len(rows)}
+
+
+def read_harness_reviews(state_dir: Path) -> Dict[str, Any]:
+    """The harness self-proof (FR-2/3): did the correctness gate catch every
+    adversarially-wrong candidate, and is the benchmark methodology sound?
+
+    Surfaces the harness_setup review record (the first round record carrying a
+    ``reviews`` dict). Negative-case evidence is the *trust* story — a gate that
+    flagged every injected error is one we believe. Caliber checks (shape set,
+    warmup, reps, statistic, baseline) are listed item-by-item.
+    """
+    recs = _iteration_index(state_dir)
+    setup_rec: Optional[Dict[str, Any]] = None
+    for n in sorted(recs):
+        if recs[n].get("reviews"):
+            setup_rec = recs[n]
+            break
+    if not setup_rec:
+        return {"present": False}
+    reviews = setup_rec.get("reviews") or {}
+    corr = reviews.get("correctness") or {}
+    bench = reviews.get("benchmark") or {}
+    negatives = corr.get("negative_evidence") or []
+    return {
+        "present": True,
+        "iteration": setup_rec.get("iteration"),
+        "correctness": {
+            "passed": corr.get("passed"),
+            "message": corr.get("message"),
+            "checks": corr.get("checks") or [],
+            "negatives_total": len(negatives),
+            "negatives_caught": sum(1 for e in negatives
+                                    if e.get("harness_caught")),
+            "negative_evidence": negatives,
+        },
+        "benchmark": {
+            "passed": bench.get("passed"),
+            "message": bench.get("message"),
+            "checks": bench.get("checks") or [],
+        },
+    }
+
+
 def read_iterations(state_dir: Path) -> List[Dict[str, Any]]:
     iters_dir = state_dir / "iterations"
     if not iters_dir.exists():
@@ -147,4 +265,5 @@ def read_conformance(state_dir: Path, n: int) -> Optional[Dict[str, Any]]:
 
 
 __all__ = ["read_run", "read_state_graph", "read_lineage", "read_overview",
-           "read_iterations", "read_iteration", "read_conformance"]
+           "read_pool", "read_harness_reviews", "read_iterations",
+           "read_iteration", "read_conformance"]

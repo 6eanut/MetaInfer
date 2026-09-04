@@ -52,6 +52,14 @@ def build_router(plugin) -> APIRouter:
     def lineage(task_id: str) -> List[Dict[str, Any]]:
         return _state_readers.read_lineage(_state_dir(task_id))
 
+    @router.get("/pool")
+    def pool(task_id: str) -> Dict[str, Any]:
+        return _state_readers.read_pool(_state_dir(task_id))
+
+    @router.get("/harness")
+    def harness(task_id: str) -> Dict[str, Any]:
+        return _state_readers.read_harness_reviews(_state_dir(task_id))
+
     @router.get("/iterations")
     def iterations(task_id: str) -> List[Dict[str, Any]]:
         return _state_readers.read_iterations(_state_dir(task_id))

@@ -44,15 +44,17 @@ async function getJson(url) {
 }
 
 function useData(taskId) {
-  const [data, setData] = useState({ overview: null, iterations: [] });
+  const [data, setData] = useState({ overview: null, iterations: [], pool: null, harness: null });
   const refresh = useCallback(async () => {
     if (!taskId) return;
     const base = `/api/${PLUGIN_TYPE}/${encodeURIComponent(taskId)}`;
-    const [ov, it] = await Promise.all([
+    const [ov, it, pl, hr] = await Promise.all([
       withTimeout(getJson(`${base}/overview`).catch((e) => { console.warn("overview:", e); return null; })),
       withTimeout(getJson(`${base}/iterations`).catch((e) => { console.warn("iterations:", e); return []; })),
+      withTimeout(getJson(`${base}/pool`).catch((e) => { console.warn("pool:", e); return null; })),
+      withTimeout(getJson(`${base}/harness`).catch((e) => { console.warn("harness:", e); return null; })),
     ]);
-    setData({ overview: ov, iterations: it || [] });
+    setData({ overview: ov, iterations: it || [], pool: pl, harness: hr });
   }, [taskId]);
   useEffect(() => { refresh(); }, [refresh]);
   useEffect(() => {
@@ -294,12 +296,99 @@ function ReferenceCard({ ov }) {
     </div>`;
 }
 
-function OverviewTab({ ov }) {
+// ---------------------------------------------- pool top + harness trust (R2)
+
+function caliberChip(r) {
+  // 口径标注: which benchmark harness produced this kernel's latency numbers.
+  if (!r) return null;
+  const parts = [];
+  if (r.statistic) parts.push(r.statistic);
+  if (r.reps != null) parts.push(`reps ${r.reps}`);
+  if (r.warmup != null) parts.push(`warmup ${r.warmup}`);
+  if (r.shape_count != null) parts.push(`${r.shape_count} shapes`);
+  if (!parts.length) return null;
+  return html`<span class="oo-chip idle" title="benchmark 口径"><span class="sw"></span>${parts.join(" · ")}</span>`;
+}
+
+function PoolPanel({ pool }) {
+  const rows = (pool && pool.pool) || [];
+  const base = pool && pool.baseline_rep_latency_ns;
+  if (!rows.length) {
+    return html`<div class="oo-panel"><div class="oo-panel-h"><h3><span class="tick">▸</span>Kernel 池</h3><span class="oo-hint muted">admitted pool</span></div><div class="muted">尚无入池 kernel——等待 harness_setup 把基线入池。</div></div>`;
+  }
+  return html`
+    <div class="oo-panel">
+      <div class="oo-panel-h"><h3><span class="tick">▸</span>Kernel 池 <span class="oo-chip accent"><span class="sw"></span>${pool.pool_size}</span></h3>
+        <span class="oo-hint muted">按评分降序</span></div>
+      <div class="oo-pool">
+        ${rows.map((r) => {
+          const lat = fmtLatency(r.rep_latency_ns);
+          const sp = r.speedup_vs_baseline;
+          const fast = sp != null && sp > 1.001;
+          return html`<div class=${"oo-pool-row" + (r.is_champion ? " champ" : "")} key=${r.iteration}>
+            <div class="oo-pool-iter mono">#${r.iteration}</div>
+            <div class="oo-pool-name">
+              <span class=${"oo-chip " + (r.is_champion ? "ok" : r.on_lineage ? "accent" : "idle")}><span class="sw"></span>${r.language || "—"}${r.is_champion ? " · champion" : r.on_lineage ? " · 溯源" : " · 旁支"}</span>
+              <div class="oo-pool-meta muted mono">${r.kernel_digest || "—"}${r.admitted_at ? " · " + r.admitted_at : ""}</div>
+              ${r.note ? html`<div class="oo-pool-note">${r.note}</div>` : ""}
+            </div>
+            <div class="oo-pool-q">
+              <span class=${"num " + (fast ? "oo-improve" : sp != null ? "oo-regress" : "")}>${sp != null ? sp.toFixed(2) + "×" : "—"}</span>
+              <span class="muted oo-pool-sub">vs 基线</span>
+            </div>
+            <div class="oo-pool-lat num">${lat.v} ${lat.u}</div>
+            ${caliberChip(r) || html`<span class="oo-chip idle"><span class="sw"></span>n/a</span>`}
+          </div>`;
+        })}
+      </div>
+      ${base != null ? html`<div class="muted oo-pool-base">基线（genesis）代表延迟 = ${fmtLatency(base).v} ${fmtLatency(base).u}</div>` : ""}
+    </div>`;
+}
+
+function HarnessTrustPanel({ harness }) {
+  if (!harness || !harness.present) {
+    return html`<div class="oo-panel"><div class="oo-panel-h"><h3><span class="tick">▸</span>Harness 可信度</h3></div><div class="muted">尚未完成 harness 自证（等 harness_setup 对抗审校）。</div></div>`;
+  }
+  const c = harness.correctness || {};
+  const b = harness.benchmark || {};
+  const neg = c.negative_evidence || [];
+  return html`
+    <div class="oo-panel">
+      <div class="oo-panel-h"><h3><span class="tick">▸</span>Harness 可信度</h3></div>
+      <div class="oo-trust-chips">
+        <span class=${"oo-chip " + (c.passed ? "ok" : "err")}><span class="sw"></span>correctness ${c.passed ? "可信" : "不可信"}</span>
+        <span class=${"oo-chip " + (b.passed ? "ok" : "err")}><span class="sw"></span>benchmark ${b.passed ? "可信" : "不可信"}</span>
+      </div>
+      <ul class="oo-kv">
+        <li><span class="k">正确性对抗自证</span><span class="v num">${c.negatives_caught ?? 0}/${c.negatives_total ?? 0} 错例被抓</span></li>
+      </ul>
+      ${(neg || []).length ? html`
+        <div style="margin:6px 0"><div class="muted" style="font-size:11px;margin-bottom:4px">负向用例证据（证明 harness 非 rubber-stamp）</div>
+          <div class="oo-neg-list">
+            ${neg.map((e, i) => html`<div class=${"oo-neg " + (e.harness_caught ? "ok" : "err")} key=${i}>
+              <span class=${"oo-chip " + (e.harness_caught ? "ok" : "err")}><span class="sw"></span>${e.harness_caught ? "被抓" : "漏网"}</span>
+              <span class="oo-neg-name mono">${e.name}</span>
+              <span class="muted">${e.constructed || ""}${e.detail ? " — " + e.detail : ""}</span>
+            </div>`)}
+          </div></div>` : ""}
+      ${(b.checks || []).length ? html`
+        <div style="margin-top:8px"><div class="muted" style="font-size:11px;margin-bottom:4px">benchmark 口径核查（warmup/reps/统计/形状集/基线）</div>
+          <div class="oo-conf-grid">
+            ${(b.checks || []).map((chk) => html`<div class=${"oo-conf-row " + (chk.passed ? "ok" : "err")} key=${chk.name}>
+              <span class="cid">${chk.name}</span>
+              ${chk.passed ? html`<span class="mark">通过</span>` : html`<span class="err-detail">${chk.detail || "未通过"}</span>`}
+            </div>`)}
+          </div></div>` : ""}
+    </div>`;
+}
+
+function OverviewTab({ ov, pool, harness }) {
   return html`
     <div class="oo-panel">
       <div class="oo-panel-h"><h3><span class="tick">▸</span>阶段流转</h3><span class="oo-hint oo-chip accent"><span class="sw"></span>强=规划/审查 · 便宜=实现</span></div>
       <${PhaseStepper} graph=${ov && ov.state_graph} />
     </div>
+    <${PoolPanel} pool=${pool} />
     <div class="oo-layout-main">
       <div class="oo-col">
         <div class="oo-panel">
@@ -310,6 +399,7 @@ function OverviewTab({ ov }) {
       <div class="oo-col">
         <${SummaryCard} ov=${ov} />
         <${ReferenceCard} ov=${ov} />
+        <${HarnessTrustPanel} harness=${harness} />
         <div class="oo-panel">
           <div class="oo-panel-h"><h3><span class="tick">▸</span>GPU 池</h3></div>
           <${GpuPool} pool=${ov && ov.gpu_pool} />
@@ -369,14 +459,23 @@ function IterationCard({ it }) {
     <span class=${"oo-chip " + (ok && confPassed ? "ok" : failed ? "err" : ok ? "warn" : "idle")}>
       <span class="sw"></span>${it.status || "running"}
     </span>`;
+  // 采纳演化：a round closes as admitted / discarded / failed (not the old
+  // boolean promote). Show the settled outcome so adopted kernels stand out.
+  const outcome = it.outcome || (it.admitted ? "admitted" : failed ? "failed" : "");
+  const oChip = outcome === "admitted" ? { cls: "ok", txt: "已采纳 · 入池" }
+    : outcome === "discarded" ? { cls: "warn", txt: "未达标 · 丢弃" }
+    : outcome === "failed" ? { cls: "err", txt: "候选失败" }
+    : null;
+  const sp = it.speedup_vs_baseline != null ? it.speedup_vs_baseline : it.quality;
   return html`
     <div class=${"oo-iter-card " + (confPassed ? "good" : failed ? "fail" : "")}>
       <div class="oo-iter-head" onClick=${() => setOpen(!open)}>
         <span class="oo-iter-num">#${it.iteration}</span>
         <span class="muted" style="flex:1">${it.phase || ""}</span>
+        ${oChip ? html`<span class=${"oo-chip " + oChip.cls}><span class="sw"></span>${oChip.txt}</span>` : ""}
         ${badge}
-        ${it.promoted ? html`<span class="oo-chip ok"><span class="sw"></span>已晋升</span>` : ""}
         ${it.candidate_language ? html`<span class="oo-chip idle">${it.candidate_language}</span>` : ""}
+        ${sp != null ? html`<span class=${"oo-chip " + (sp > 1 ? "ok" : sp < 1 ? "err" : "idle")}><span class="sw"></span>${(sp >= 0 ? sp.toFixed(2) + "×" : "—")} vs 基线</span>` : ""}
         <span class="muted">${open ? "▾" : "▸"}</span>
       </div>
       ${open ? html`
@@ -386,8 +485,9 @@ function IterationCard({ it }) {
             <div style="margin-bottom:8px"><div class="muted" style="font-size:11px;margin-bottom:4px">正确性（conformance）</div>
               <${ConformanceBody} conformance=${it.conformance} /></div>` : ""}
           ${it.perf ? html`
-            <div><div class="muted" style="font-size:11px;margin-bottom:4px">每 case 延迟</div>
+            <div style="margin-bottom:8px"><div class="muted" style="font-size:11px;margin-bottom:4px">每 case 延迟（口径：benchmark 元信息见迭代记录）</div>
               <${PerfTable} perf=${it.perf} /></div>` : ""}
+          ${it.repairs != null ? html`<div class="muted" style="font-size:11px;margin-top:4px">repair 次数：${it.repairs}</div>` : ""}
           ${it.guidance ? html`<div class="muted" style="font-size:11px;margin-top:8px">审查意见：${it.guidance}</div>` : ""}
         </div>` : ""}
     </div>`;
@@ -400,13 +500,15 @@ function IterationsTab({ iterations }) {
   const total = iterations.length;
   const okCount = iterations.filter((i) => i.status === "success").length;
   const failedCount = iterations.filter((i) => i.status === "failed").length;
-  const promotedCount = iterations.filter((i) => i.promoted).length;
+  const admittedCount = iterations.filter((i) => i.outcome === "admitted" || i.admitted).length;
+  const discardedCount = iterations.filter((i) => i.outcome === "discarded").length;
   return html`
     <div class="oo-stats" style="margin-bottom:0">
       <${StatTile} k="总迭代" v=${total} />
       <${StatTile} cls="good" k="成功" v=${okCount} />
-      ${failedCount ? html`<${StatTile} cls="bad" k="失败/跳过" v=${failedCount} />` : ""}
-      <${StatTile} cls="accent" k="其中晋升" v=${promotedCount} />
+      <${StatTile} cls="accent" k="已采纳(入池)" v=${admittedCount} />
+      ${discardedCount ? html`<${StatTile} cls="warn" k="未达标(丢弃)" v=${discardedCount} />` : ""}
+      ${failedCount ? html`<${StatTile} cls="bad" k="失败" v=${failedCount} />` : ""}
     </div>
     <div class="oo-iter-rows">
       ${iterations.slice().reverse().map((it) => html`<${IterationCard} it=${it} key=${it.iteration} />`)}
@@ -416,7 +518,7 @@ function IterationsTab({ iterations }) {
 // --------------------------------------------------------------- main view
 
 export default function OptOperatorDetailView({ taskId, run, timeline, agents, loadState, lastErr }) {
-  const { overview, iterations, refresh } = useData(taskId);
+  const { overview, iterations, pool, harness, refresh } = useData(taskId);
 
   useEffect(() => {
     if (!taskId) return;
@@ -450,7 +552,7 @@ export default function OptOperatorDetailView({ taskId, run, timeline, agents, l
           </button>`;
         })}
       </div>
-      ${tab === "overview" ? html`<div style="display:flex;flex-direction:column;gap:12px"><${OverviewTab} ov=${overview} /></div>` : ""}
+      ${tab === "overview" ? html`<div style="display:flex;flex-direction:column;gap:12px"><${OverviewTab} ov=${overview} pool=${pool} harness=${harness} /></div>` : ""}
       ${tab === "iterations" ? html`<${IterationsTab} iterations=${iterations} />` : ""}
       ${tab === "runtime" ? html`
         <div class="oo-runtime-grid">

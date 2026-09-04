@@ -1,25 +1,27 @@
-"""Append-only champion lineage ledger (chained digests).
+"""Champion lineage view over the authoritative kernel pool (derived).
 
-The ledger records every **promotion** of a candidate to champion for one run.
-Entries are appended to a JSONL file and cryptographically chained (each entry's
-digest covers the previous entry's digest + its own content), so:
+**SSOT note:** the append-only authority for admitted kernels is
+``kernel_pool.jsonl`` written by :class:`pool.KernelPool` (see OPT_KERNEL_SPEC
+FR-4 / §4). The pool records *every* admitted kernel with its benchmark
+evidence; the "champion chain" that used to be a standalone ledger is now a
+**derived view** over that pool. This module keeps the historical
+:class:`ChampionLedger` name and method surface (``append`` /
+``read_all`` / ``current_champion`` / ``lineage``) as a thin facade so callers
+and the chained-digest tamper guarantee are preserved, but the underlying file
+is the pool and champion/lineage/speedups are recomputed at read time — nothing
+is dual-written.
 
-- **Append-only** — a run's history is immutable; cold restart replays the file.
-- **Traceable** — the current champion and its full lineage (parent chain) are
-  derived purely from the file, no secondary store (SSOT).
-
-Each entry also links the evidence it was promoted on (per-case latency/speedup,
-report + conformance digests) so the WebUI lineage curve and per-iteration speedup
-are read straight from here.
+:class:`LedgerEntry` / :class:`CaseMetric` are retained as the compatibility
+shape returned to older callers (notably the pipeline's incumbent tracking).
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from .pool import KernelPool, PoolEntry, PoolError
 
 
 class LedgerError(ValueError):
@@ -29,7 +31,7 @@ class LedgerError(ValueError):
 @dataclass(frozen=True)
 class CaseMetric:
     latency_ns: float
-    speedup: Optional[float] = None    # vs the prior champion / baseline
+    speedup: Optional[float] = None    # derived vs the kernel's parent
 
     def as_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -49,7 +51,6 @@ class LedgerEntry:
     digest: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
-        # asdict recursively converts the nested CaseMetric dataclasses too.
         return asdict(self)
 
     @classmethod
@@ -77,101 +78,117 @@ class LedgerEntry:
             raise LedgerError(f"bad LedgerEntry: {exc}") from exc
 
 
-def _chain_digest(prev: Optional[str], payload: str) -> str:
-    blob = (prev or "") + "\n" + payload
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+# --------------------------------------------------------------------------- #
+# Pool <-> Ledger conversion
+# --------------------------------------------------------------------------- #
+
+def _to_pool(entry: "LedgerEntry") -> PoolEntry:
+    return PoolEntry(
+        iteration=entry.iteration,
+        kernel_digest=entry.kernel_digest,
+        language=entry.language,
+        contract_digest=entry.contract_digest,
+        parent_iteration=entry.parent_iteration,
+        case_latency_ns={k: m.latency_ns for k, m in entry.case_metrics.items()},
+        conformance_digest=entry.conformance_digest,
+        perf_report_digest=entry.report_digest,
+        prev_digest=None,
+        digest="",
+    )
 
 
-def _payload(entry: "LedgerEntry") -> str:
-    return json.dumps({
-        "iteration": entry.iteration,
-        "kernel_digest": entry.kernel_digest,
-        "language": entry.language,
-        "contract_digest": entry.contract_digest,
-        "parent_iteration": entry.parent_iteration,
-        "case_metrics": {k: v.as_dict() for k, v in entry.case_metrics.items()},
-        "report_digest": entry.report_digest,
-        "conformance_digest": entry.conformance_digest,
-    }, sort_keys=True)
+def _from_pool(entry: PoolEntry,
+               parent_lat: Optional[Dict[str, float]]) -> "LedgerEntry":
+    metrics: Dict[str, CaseMetric] = {}
+    for cid, lat in entry.case_latency_ns.items():
+        speedup = None
+        if parent_lat and cid in parent_lat and parent_lat[cid]:
+            speedup = parent_lat[cid] / lat if lat else None
+        metrics[cid] = CaseMetric(latency_ns=lat, speedup=speedup)
+    return LedgerEntry(
+        iteration=entry.iteration,
+        kernel_digest=entry.kernel_digest,
+        language=entry.language,
+        contract_digest=entry.contract_digest,
+        parent_iteration=entry.parent_iteration,
+        case_metrics=metrics,
+        report_digest=entry.perf_report_digest,
+        conformance_digest=entry.conformance_digest,
+        prev_digest=entry.prev_digest,
+        digest=entry.digest,
+    )
 
 
-def compute_digest(entry: "LedgerEntry") -> str:
-    """The entry's digest given its fields (before ``digest`` is set)."""
-    return _chain_digest(entry.prev_digest, _payload(entry))
-
+# --------------------------------------------------------------------------- #
+# ChampionLedger facade
+# --------------------------------------------------------------------------- #
 
 class ChampionLedger:
-    """Append-only lineage ledger backed by a JSONL file."""
+    """Derived champion/lineage view over the authoritative kernel pool.
+
+    Construct with the **pool file path** (``kernel_pool.jsonl``). Appends are
+    delegated to :class:`KernelPool.admit` (the single write path).
+    """
 
     def __init__(self, path: Path) -> None:
-        self.path = Path(path)
+        self._pool = KernelPool(Path(path))
+
+    @property
+    def pool(self) -> KernelPool:
+        """Expose the underlying authoritative store for pool-aware callers."""
+        return self._pool
 
     def read_all(self) -> List[LedgerEntry]:
-        if not self.path.exists():
-            return []
-        out: List[LedgerEntry] = []
-        with open(self.path, encoding="utf-8") as f:
-            for lineno, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                entry = LedgerEntry.from_dict(json.loads(line))
-                # verify chain integrity
-                expect = compute_digest(entry)
-                if expect != entry.digest:
-                    raise LedgerError(f"ledger corruption at line {lineno}: digest mismatch")
-                if (entry.prev_digest or "") != (out[-1].digest if out else ""):
-                    raise LedgerError(f"ledger corruption at line {lineno}: broken chain")
-                out.append(entry)
-        return out
+        try:
+            entries = self._pool.read_all()
+        except PoolError as exc:
+            raise LedgerError(str(exc)) from exc
+        return _convert_chain(entries)
 
     def current_champion(self) -> Optional[LedgerEntry]:
-        entries = self.read_all()
-        return entries[-1] if entries else None
+        try:
+            champ = self._pool.champion()
+        except PoolError as exc:
+            raise LedgerError(str(exc)) from exc
+        if champ is None:
+            return None
+        return _from_pool(champ, _parent_latency(self._pool, champ))
 
     def lineage(self) -> List[LedgerEntry]:
-        """Champion lineage from genesis to current (via parent_iteration chain)."""
-        entries = self.read_all()
-        by_iter = {e.iteration: e for e in entries}
-        # find genesis
-        start = self.current_champion()
-        if start is None:
-            return []
-        chain: List[LedgerEntry] = []
-        seen = set()
-        cur: Optional[LedgerEntry] = start
-        while cur is not None and cur.iteration not in seen:
-            seen.add(cur.iteration)
-            chain.append(cur)
-            pid = cur.parent_iteration
-            cur = by_iter.get(pid)
-        return list(reversed(chain))
+        try:
+            chain = self._pool.lineage()
+        except PoolError as exc:
+            raise LedgerError(str(exc)) from exc
+        return _convert_chain(chain)
 
     def append(self, entry: LedgerEntry) -> LedgerEntry:
-        """Append one promotion. Returns the finalized entry (with digest set)."""
-        entries = self.read_all()
-        prev = entries[-1].digest if entries else None
-        finalized = LedgerEntry(
-            iteration=entry.iteration,
-            kernel_digest=entry.kernel_digest,
-            language=entry.language,
-            contract_digest=entry.contract_digest,
-            parent_iteration=entry.parent_iteration,
-            case_metrics=entry.case_metrics,
-            report_digest=entry.report_digest,
-            conformance_digest=entry.conformance_digest,
-            prev_digest=prev,
-            digest="",
-        )
-        final_digest = compute_digest(finalized)
-        finalized = LedgerEntry(
-            **{**finalized.as_dict(), "digest": final_digest}
-        )
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(finalized.as_dict()) + "\n")
-        return finalized
+        """Admit one kernel into the pool. Returns the finalized LedgerEntry."""
+        finalized = self._pool.admit(_to_pool(entry))
+        return _from_pool(finalized, _parent_latency(self._pool, finalized))
 
 
-__all__ = ["LedgerError", "CaseMetric", "LedgerEntry", "ChampionLedger",
-           "compute_digest"]
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+
+def _convert_chain(entries: List[PoolEntry]) -> List[LedgerEntry]:
+    by_iter = {e.iteration: e for e in entries}
+    parent_lat: Dict[int, Dict[str, float]] = {}
+    for e in entries:
+        if e.parent_iteration is not None and e.parent_iteration in by_iter:
+            parent_lat[e.iteration] = by_iter[e.parent_iteration].case_latency_ns
+    return [_from_pool(e, parent_lat.get(e.iteration)) for e in entries]
+
+
+def _parent_latency(pool: KernelPool, entry: PoolEntry):
+    if entry.parent_iteration is None:
+        return None
+    try:
+        parent = next(e for e in pool.read_all()
+                      if e.iteration == entry.parent_iteration)
+        return parent.case_latency_ns
+    except StopIteration:
+        return None
+
+
+__all__ = ["LedgerError", "CaseMetric", "LedgerEntry", "ChampionLedger"]

@@ -14,6 +14,7 @@ from typing import Dict, Optional
 from .build import BuildProfile, build_kernel
 from .conformance import ConformanceReport, conformance_report
 from .contract import OperatorContract
+from .harness import BenchmarkHarness, CorrectnessHarness
 from .kernel_adapter import make_adapter, triton_runner
 from .oracle import FrozenOracle
 from .profiler import PerfResult, profile_cases
@@ -25,11 +26,29 @@ class BackendError(RuntimeError):
 
 class RealBackend:
     def __init__(self, pool, executor, default_language: str = "triton",
-                 lease_timeout_s: float = 300.0) -> None:
+                 lease_timeout_s: float = 300.0, *,
+                 warmup: int = 2, statistic: str = "median",
+                 reps: int = 10) -> None:
         self.pool = pool
         self.executor = executor
         self.default_language = default_language
         self.lease_timeout_s = lease_timeout_s
+        self.warmup = warmup
+        self.statistic = statistic
+        self.reps = reps
+
+    # -- twin-harness construction (口径 annotation / adversarial review) -- #
+
+    def make_correctness_harness(self, contract: OperatorContract,
+                                 oracle: FrozenOracle) -> CorrectnessHarness:
+        return CorrectnessHarness(contract, oracle)
+
+    def make_benchmark_harness(self, contract: OperatorContract,
+                               baseline_digest: Optional[str] = None
+                               ) -> BenchmarkHarness:
+        return BenchmarkHarness(contract, baseline_digest=baseline_digest,
+                                warmup=self.warmup, reps=self.reps,
+                                statistic=self.statistic)
 
     def build(self, source: str, language: str, contract: OperatorContract,
               kernel_dir: Path):

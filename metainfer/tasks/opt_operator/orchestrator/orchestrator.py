@@ -166,7 +166,9 @@ def _task_subdirs(state_dir: Path, workspace_dir: Path) -> Dict[str, Path]:
         "logs_root": state_dir / "logs",
         "iterations_state": state_dir / "iterations",
         "system_oracle_dir": state_dir / "system_oracle",
-        "ledger_path": state_dir / "champion_ledger.jsonl",
+        # Authoritative append-only kernel pool (see OPT_KERNEL_SPEC §4). The
+        # ChampionLedger is a derived lineage view over this file.
+        "pool_path": state_dir / "kernel_pool.jsonl",
         "guidance_path": state_dir / "guidance.json",
         "pid_file": state_dir / "orchestrator.pid",
     }
@@ -236,7 +238,7 @@ def run_with_requirements(
     store = StateStore(state_dir)
     run, is_resume = store.init_or_resume(task_id)
     workspace = IterationWorkspace(workspace_dir, paths["logs_root"])
-    ledger = ChampionLedger(paths["ledger_path"])
+    ledger = ChampionLedger(paths["pool_path"])
     pool = _make_pool(req, workspace_dir)
     backend = RealBackend(pool, executor, contract.language)
     model_map = _model_map(req, model_strong, model_cheap, model)

@@ -15,7 +15,10 @@ MetaInfer 的 **opt-kernel（= `opt-operator` task）** 负责：给定一个**�
 
 ## 1. 端到端期望流程（用户视角）
 
-### 阶段 A · 需求理解与确认（交互式，人机往返）
+### 阶段 A · 需求理解与确认（交互式，人机往返，**发生在 task 创建期、run 之前**）
+
+> **已实现（R1）**：确认是**创建期对话**（`opt-operator-conversation.js` wizard + 后端 `converse.py` 的 interpret/settle）——opt-operator 引导、用户在对话框用自然语言描述 → 逐项解读/引导缺项 → 收敛后呈**可编辑解读卡**，用户点「确认」后前端组装扁平 answers + `raw_request`(对话转写留痕) 走现有 `POST /tasks → launcher.start()` 起真实 run。**run 一启动即无 pending 确认**；`raw_request` 仅作 historical provenance，运行时不再读驱动。
+
 1. 用户用**自然语言**提出需求：目标算子 + 目标硬件 +（可选）细粒度约束，例如"在 K100(gfx928) 上做一个 GEMM，要求 M=4096,N=4096,K=4096 时性能最好"。
 2. opt-kernel **理解**这段自然语言 → 回给用户**简单、结构化**的解读（如：算子/问题域、目标硬件、关注的具体 shape 范围、约束）。
 3. 用户确认；若有纠正 → 回到 2 继续修正，**直到用户认可需求被正确理解**。
@@ -63,7 +66,9 @@ MetaInfer 的 **opt-kernel（= `opt-operator` task）** 负责：给定一个**�
 
 优先级：**P0 = 本次迭代必须做完且正确**；P1 = 紧随其后；P2 = 可后置/锦上添花。验收标准是"你能证明它做到了"的最低门槛。
 
-### FR-0 需求输入与确认（阶段 A）—— **P1，当前缺失，是最大错位之一**
+> **实现进度（截至 R2）**：FR-0/1 已由 R1 创建期对话满足；FR-2/3 已由 R0 双 harness 对抗审校 + `negative_evidence` 留痕满足；FR-4/5/6/7 已由 R0 kernel 池 + 加权采样 + 3 次内循环 + resume 满足。各 FR 正文仍保留"目标态"描述作为后续增强的参照。
+
+### FR-0 需求输入与确认（阶段 A）—— **已由 R1 创建期对话满足**（原 P1，曾是最缺失项）
 - 现状：form.yaml 是一次性结构化表单，**没有**"结构化回显 → 用户纠正 → 再确认"的往返。
 - 要做的：支持"用户给自然语言/一段话 + 关键字段表单"开始 → 系统给出**结构化解读卡**（算子、硬件、shape 口径、误差、baseline 来源、GPU、约束）→ 用户在界面上**逐项确认或纠正** → 直到用户点"确认无误"才真正起 run。
 - 验收：界面存在"解读 → 可逐项改 → 确认/拒绝"三态；确认后生成的 requirements/契约与用户最后一次改动**完全一致**；用户拒绝时不启动迭代。
@@ -85,7 +90,7 @@ MetaInfer 的 **opt-kernel（= `opt-operator` task）** 负责：给定一个**�
 - 需要**对抗/审查 agent** 逐项核上述关键点，结论留痕。
 - 验收：harness 元信息（预热次数/重复次数/统计口径）在 run 记录与 WebUI 可见、可复核。
 
-### FR-4 kernel 池 + 评分 + 加权概率选择（阶段 C 环节 1）—— **P0 重构，当前是最大错位之二**
+### FR-4 kernel 池 + 评分 + 加权概率选择（阶段 C 环节 1）—— **已由 R0 落地**（原 P0，曾是最错位项）
 - 现状：`ledger.py::ChampionLedger` 只保留**单条 champion 链**（贪心跟随最好），**没有多 kernel 并存、没有概率采样**。
 - 要做的：引入 **kernel 池**语义——
   - 入池条件：correctness 过 且 性能（相对 baseline）≥ 门槛（可配）。
@@ -112,15 +117,21 @@ MetaInfer 的 **opt-kernel（= `opt-operator` task）** 负责：给定一个**�
 
 ## 4. 状态机与落盘（SSOT，对齐根 CLAUDE.md）
 
-> 当前 `phases.py` 的线性机 `S_baseline→A…→F→finished` 偏"实现流水线"视角；新目标机偏"池化演化 + 人机确认 + harness 审校"视角。二者需要**重新映射**，而不是各自为政。
+> **已实现（R0/R1）**：`phases.py` 已从线性流水线 `S_baseline→A…→F→finished` 重映射为"池化演化 + harness 审校"机。**需求确认不在 run 内** —— 它以 R1 的**创建期对话**完成（见 §1 阶段 A），run 前即产出冻结的 requirements.json 作为唯一事实来源；因此 run 状态机**不含任何 confirm/interpret 相位**（那段逻辑只活在 `orchestrator/converse.py`，供创建器对话用）。
 
-建议的目标状态机（仍是给 WebUI 与 resume 用的单一机）：
+已实现的目标状态机（给 WebUI 与 resume 用的单一机，`phases.py::_PHASES`）：
 ```
-await_confirm(需求确认,可回退到interpret) → harness_setup(4步,含对抗审校)
-  → select_kernel(池内加权挑) → optimize → verify(双harness)
-       →[fail]→ repair(≤3次) → verify
-       →[pass&提升]→ admit_to_pool → select_kernel → … → finished
+harness_setup(一次性: 基线入池为genesis + correctness/benchmark 双harness 对抗自审, STRONG)
+  → select_kernel(池内按评分加权概率采样, 固定seed)
+    → optimize → verify(双harness: correctness gate + benchmark 全shape)
+       →[correctness不过 或 评分低于门槛]→ repair(≤3次, 依harness结构化反馈修) → verify
+       →[过 且 ≥门槛]→ admit_to_pool
+       →[≤3次后仍不过/低于门槛]→ discarded
+  → admit_to_pool|discarded → select_kernel … → finished(预算耗尽, 从select_kernel停)
 ```
+节点：`harness_setup`(STRONG) / `select_kernel` `optimize` `verify` `repair` `admit_to_pool` `discarded`(CHEAP) / `finished`(终态)。
+入池条件 = correctness 全 case 过 **且** 相对 baseline 评分 ≥ 门槛（不要求每 shape 都超 incumbent）；champion 每次从池内按需求口径现算选出（派生，不单存）。
+
 落盘规则（**新字段先定权威，禁双写**）：
 | 事实 | 权威源建议 | 派生 |
 |---|---|---|
@@ -128,8 +139,8 @@ await_confirm(需求确认,可回退到interpret) → harness_setup(4步,含对�
 | 池内 kernel + 评分 | 新 `kernel_pool.jsonl`（append-only，存入池证据：digest/harness结论/评分/血缘） | 当前 champion = 池内最高分（派生，不单存） |
 | harness 审校结论 | 对应 phase 的 iteration/记录 | WebUI 展示（派生） |
 | 每轮 select/optimize/verify/repair | `iterations/NNN.json` + `timeline.jsonl` | WebUI 血缘/流水（派生） |
-- 若保留 `ledger.py`，把它理解为"池的高分链/血缘视图"，**池才是权威，链是派生**，别让两个文件互相写。
-- 冷重启只能从权威文件重建。
+- **已落地**：`kernel_pool.jsonl` 是唯一权威（append-only）；`ledger.py::ChampionLedger` 已降为**只读派生**的池血缘视图（沿用旧方法名 `read_all/lineage/…` 但内部改读池文件），**池写、链读，无双向写**。
+- 冷重启只能从 `kernel_pool.jsonl` 权威重建池与 champion。
 
 ---
 
@@ -143,7 +154,7 @@ await_confirm(需求确认,可回退到interpret) → harness_setup(4步,含对�
 
 ### 5.2 总览页（run 进行中/结束后）
 建议以"**一张演化图讲清来龙去脉**"为目标：
-- 状态 stepper：确认 → harness → 选 → 优化 → 验证 → 入池（当前到哪、是否卡住）。
+- 状态 stepper（run 内，§4 节点，**不含创建期确认**）：harness_setup → select → optimize → verify → [admit_to_pool|discarded]（当前到哪、是否卡住）。
 - **kernel 池视图**：每个池内 kernel 的评分/提速/何时入池/血缘，一眼看出"现在最好的几个是谁、怎么来的"。
 - **有意思的部分要突出**：① 每次被采纳的 kernel 相比前代/基线**提升多少、改了哪**；② harness 被对抗审校出的问题与修复（这是"可信度"的卖点）；③ 当前最优(champion)相对基线的整体提速。
 - **没意思的不要堆首屏**：agent 原始日志、过程噪音、失败的中间试探默认折叠，需用户点开。
@@ -159,21 +170,25 @@ await_confirm(需求确认,可回退到interpret) → harness_setup(4步,含对�
 
 ---
 
-## 6. 与现有代码的映射 / 改造要点
+## 6. 与现有代码的映射 / 改造要点（R0/R1/R2 已落成）
 
-| 现有文件 | 现状 | 本次要去到 |
-|---|---|---|
-| `orchestrator/pipeline.py` | 单 champion 贪心 A→F 循环 | 改为"池化演化"驱动；select→optimize→verify→repair 编排；保留 injectable Backend/agent_runner 便于测试 |
-| `orchestrator/ledger.py` | append-only 单链 | 承载/映射为池的高分血缘视图，或新增 `kernel_pool`，**池权威、链派生** |
-| `orchestrator/oracle.py`+`reference_lib.py` | 参考自证+收编 | 升级为 FR-2/FR-3 的对抗审校留痕；明确 correctness 与 benchmark 两 harness 生命周期 |
-| `orchestrator/contract.py` | shape-sweep DSL 已有 | 对接 FR-0 确认后的契约；保证 case 矩阵覆盖"用户关心范围" |
-| `orchestrator/backend.py`+`kernel_adapter.py`+`conformance.py`+`profiler.py` | 构建/符合/测速缝隙已分好 | 收敛到"双 harness"两个入口；benchmark 权威参数(预热/重复/统计量)要可配置可留痕 |
-| `orchestrator/phases.py` | 线性 S/A…/F 机 | 重映射为"确认→harness→池化演化"机（见 §4），graph_payload 同步 |
-| `server/_state_readers.py` + `routes.py` | 只读派生 overview/lineage/… | 新增池/确认/对抗结论的只读端点；**保持只读不写、不缓存、纯派生** |
-| `static/opt-operator-detail.js`+`.css` | 单链 dark dashboard | 演进为池视图 + 确认交互 + 有意思/没意思分层（§5） |
-| `form.yaml` | 一次性采集 | 演进为"起始问题 + 解读卡确认"（FR-0），字段新增先在 form 声明、reader 用 `req_field` |
+| 文件 | R0/R1/R2 后的真实状态 |
+|---|---|
+| `orchestrator/pool.py`（新） | **权威 SSOT** `kernel_pool.jsonl`（append-only）+ `PoolEntry`/`sample_kernel`(评分加权, 固定seed)/`champion()`/`quality()`(派生现算) |
+| `orchestrator/ledger.py` | 降为**只读派生**的池血缘视图（`ChampionLedger` 内部改读 pool，方法名兼容） |
+| `orchestrator/harness.py`（新） | 收敛出 `CorrectnessHarness` / `BenchmarkHarness` 两对象 + 元信息(预热/重复/统计量/shape集/基线) |
+| `orchestrator/adversarial.py`（新） | 对抗审校：负向用例扰动 → 断言 harness 测出 fail → `negative_evidence`/`ReviewCheck` 留痕 |
+| `orchestrator/oracle.py`+`reference_lib.py` | 参考冻结(SHA-256)+对抗审校留痕；correctness/benchmark 两 harness 生命周期明确 |
+| `orchestrator/backend.py`+`conformance.py`+`profiler.py` | 收敛为两个 harness 入口；预热/重复/统计量**可配置 + 入 harness 元信息** |
+| `orchestrator/contract.py` | shape-sweep DSL 对接确认后契约；case 矩阵覆盖"用户关心范围" |
+| `orchestrator/converse.py`（新） | 创建期对话引擎：interpret/settle 抽槽位、缺项引导、收敛产出扁平 answers+`raw_request` |
+| `orchestrator/phases.py` | 已重映射为池化演化机（§4 节点），graph_payload 渲染 stepper |
+| `server/_state_readers.py`+`routes.py` | 只读派生：`read_pool`/`read_harness_reviews`/`read_lineage`/…；`/pool` `/harness` 端点；只读不写、不缓存、纯派生 |
+| `static/opt-operator-detail.js`+`.css` | 池 top 视图 + Harness 可信度(negative_evidence) + 口径 chip + 有意思/没意思分层 + stepper |
+| `static/opt-operator-conversation.js`（新） | 创建期引导对话 wizard + 解读卡确认/驳回 |
+| `form.yaml` | `__meta__` 标记开启对话承载；字段作为解读卡底层槽位 |
 
-改造铁律：**两端同步动**——改写入侧字段/阶段名/状态值，必须同步 reader 与前端；新增字段先定权威源。
+改造铁律（持续生效）：**两端同步动**——改写入侧字段/阶段名/状态值，必须同步 reader 与前端；新增字段先定权威源；champion/血缘/提速等派生量每次现算、不落盘。
 
 ---
 
@@ -186,7 +201,9 @@ await_confirm(需求确认,可回退到interpret) → harness_setup(4步,含对�
 
 ---
 
-## 8. 分阶段路线（建议）
+## 8. 分阶段路线（建议，R0–R2 已完成）
+
+> 历史路线——R0/R1/R2 均已实现并测试覆盖（见 §3 进度、§6 落成映射）。此后若继续，参照本段思路推进 R3+ 或补 P2 增强。
 
 - **R0（P0 收敛，先改"池化演化"内核）**：FR-4/5/6/7——把单 champion 贪心改为 kernel 池 + 加权采样 + 3 次内循环修复 + 落账；补负向用例证明 harness 非 rubber-stamp。让"优化机制符合预期"先成立。双 harness 与对抗审校(FR-2/3)在本阶段按"自证/审查留痕"收敛，不追求 UI 完美。
 - **R1（阶段 A 交互式确认）**：FR-0/1——解读卡 + 逐项确认/纠正 + 运行参数同屏，进入真正的"先确认再优化"。WebUI 出确认界面。

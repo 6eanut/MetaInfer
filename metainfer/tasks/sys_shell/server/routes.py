@@ -34,6 +34,27 @@ from metainfer.server._helpers import (
 from metainfer.server.registry import get as _get_web_plugin
 
 
+def _converse_engine(task_type: str):
+    """Resolve a task type's create-time conversation engine module, or None.
+
+    Convention: a conversational task ships a ``converse`` module at
+    ``metainfer.tasks.<package>.orchestrator.converse`` (the package dir name
+    equals the task type id, e.g. ``opt-operator`` → ``…opt_operator…
+    .orchestrator.converse``). The engine is stateless and pure; the shell
+    stays type-agnostic and just calls ``interpret(schema, …)`` and
+    ``settle(schema, answers, transcript)``.
+    """
+    if not task_type or not task_type.replace("-", "_").replace("_", "").isalnum():
+        return None
+    try:
+        import importlib
+        pkg = task_type.replace("-", "_")
+        return importlib.import_module(
+            f"metainfer.tasks.{pkg}.orchestrator.converse")
+    except Exception:  # noqa: BLE001 — no engine / not importable
+        return None
+
+
 def _plugin_view_hint(task_type: str) -> Dict[str, Any]:
     """Return the frontend detail-view hint fields for a task type.
 
@@ -70,6 +91,56 @@ def build_router(plugin):
         if schema is None:
             raise HTTPException(404, f"unknown task type: {task_type}")
         return schema
+
+    # -- create-time conversation (pre-task; drives the New-run chat wizard) --
+    # A conversational task type (form.yaml ``conversational: true``) ships a
+    # conversation engine at ``metainfer.tasks.<type>.orchestrator.converse``
+    # exposing ``interpret(schema, *, request, answers, transcript)``. This
+    # generic endpoint turns the wizard's free-text into structured answers +
+    # guidance + an editable interpretation card — all BEFORE a task exists.
+    @router.post("/converse")
+    async def converse(request: Request) -> Dict[str, Any]:
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001 — malformed JSON
+            raise HTTPException(400, "request body must be valid JSON")
+        if not isinstance(body, dict):
+            raise HTTPException(400, "request body must be a JSON object")
+        ttype = body.get("type")
+        if not ttype:
+            raise HTTPException(400, "missing 'type'")
+        schema = _forms.load_form_schema(ttype)
+        if schema is None:
+            raise HTTPException(404, f"unknown task type: {ttype}")
+        engine = _converse_engine(ttype)
+        if engine is None or not callable(getattr(engine, "interpret", None)):
+            raise HTTPException(501, f"task type {ttype!r} has no conversation engine")
+        answers = body.get("answers") if isinstance(body.get("answers"), dict) else {}
+        transcript = (body.get("transcript")
+                      if isinstance(body.get("transcript"), list) else None)
+        import dataclasses as _dc
+        settle = body.get("settle") is True
+        if settle:
+            # Settle mode: engine validates the final answers are complete and
+            # emits the flat answers + raw_request transcript the create-task
+            # path stores. Formatting stays authoritative on the server.
+            if not callable(getattr(engine, "settle", None)):
+                raise HTTPException(501, f"task type {ttype!r} cannot settle")
+            try:
+                return engine.settle(schema, answers, transcript)
+            except ValueError as exc:
+                raise HTTPException(400, str(exc))
+            except Exception as exc:  # noqa: BLE001 — surfaced to the wizard
+                raise HTTPException(500, f"settle failed: {exc!r}")
+        request_text = body.get("request") or ""
+        if not isinstance(request_text, str):
+            raise HTTPException(400, "request must be a string")
+        try:
+            out = engine.interpret(schema, request=request_text, answers=answers,
+                                   transcript=transcript)
+        except Exception as exc:  # noqa: BLE001 — surfaced to the wizard
+            raise HTTPException(500, f"converse failed: {exc!r}")
+        return _dc.asdict(out)
 
     # -- task listing / creation (no {task_id} in path) ------------------------
     @router.get("/tasks")

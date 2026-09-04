@@ -44,6 +44,51 @@ export async function createTask(payload) {
   return data;
 }
 
+export async function converse(type, request, answers, transcript) {
+  // Create-time conversational requirement confirmation. A task type whose
+  // form.yaml declares `__meta__.conversational: true` runs its New-run flow
+  // as a chat driven by this endpoint. Each turn sends the running dialogue
+  // transcript + accumulated answers; the task's engine (pure, no LLM)
+  // returns an Interpretation { answers, card, missing, conflict, complete,
+  // assistant, transcript } the wizard renders.
+  const r = await fetch("/api/sys-shell/converse", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      type,
+      request: request || "",
+      answers: answers || {},
+      transcript: transcript || [],
+    }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(`converse: ${r.status}`);
+    err.detail = data.detail || data;
+    throw err;
+  }
+  return data;
+}
+
+export async function converseSettle(type, answers, transcript) {
+  // Final step after the wizard user confirms the interpretation card.
+  // Validates the answers are complete and returns { answers, raw_request }
+  // where raw_request is the formatted dialogue transcript — exactly the
+  // payload POST /tasks stores for a conversational task.
+  const r = await fetch("/api/sys-shell/converse", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type, settle: true, answers: answers || {}, transcript: transcript || [] }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(`converse settle: ${r.status}`);
+    err.detail = data.detail || data;
+    throw err;
+  }
+  return data;
+}
+
 export async function deleteTask(taskId, purge = false) {
   const r = await fetch(
     `/api/sys-shell/${encodeURIComponent(taskId)}?purge=${purge ? "1" : "0"}`,

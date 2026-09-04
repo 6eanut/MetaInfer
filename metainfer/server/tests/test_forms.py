@@ -120,6 +120,44 @@ def test_list_task_types_includes_registered_plugins():
 # Field type inference
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# __meta__ schema marker (create-time conversational forms)
+# --------------------------------------------------------------------------- #
+
+def test_split_meta_pulls_marker_out_of_fields():
+    raw = [
+        {"__meta__": {"conversational": True,
+                      "conversation_module": "app/opt-operator-conversation"}},
+        {"key": "input_mode", "header": "Input mode"},
+        {"key": "operator_contract", "header": "Contract"},
+    ]
+    fields, meta = forms._split_meta(raw)
+    assert meta == {"conversational": True,
+                    "conversation_module": "app/opt-operator-conversation"}
+    assert [f["key"] for f in fields] == ["input_mode", "operator_contract"]
+
+
+def test_split_meta_empty_when_no_marker():
+    fields, meta = forms._split_meta([{"key": "a"}])
+    assert fields == [{"key": "a"}]
+    assert meta == {}
+
+
+def test_split_meta_requires_mapping():
+    with pytest.raises(ValueError):
+        forms._split_meta([{"__meta__": "not a mapping"}])
+
+
+def test_opt_operator_schema_is_conversational():
+    schema = forms.load_form_schema("opt-operator")
+    assert schema is not None
+    assert schema["conversational"] is True
+    # the marker is not emitted as a phantom field
+    assert "__meta__" not in [f["key"] for f in schema["fields"]]
+    # the real required field is still there to validate against
+    assert "operator_contract" in [f["key"] for f in schema["fields"]]
+
+
 def test_infer_field_type_explicit_form_wins():
     out = forms._infer_field_type({"form": "select", "multi": True})
     assert out == "select"

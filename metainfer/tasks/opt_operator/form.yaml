@@ -1,6 +1,15 @@
 # Question bank for the `opt-operator` task type (operator optimization, HIP/Triton → K100).
 # Flat keys become top-level fields in requirements.json; read via
 # metainfer.orchestrator.requirements.req_field.
+#
+# `__meta__` is a reserved, non-field entry: the shell strips it from the field
+# list and merges it onto the form schema (see metainfer.server.forms). The
+# New-run view renders opt-operator's chat wizard instead of the flat form when
+# `conversational: true`, and `conversation_module` names the wizard to load.
+- __meta__:
+    conversational: true
+    conversation_module: "app/opt-operator-conversation"
+    conversation_opening: "Describe the operator you want to optimise for the K100 (HIP/Triton)."
 
 - key: input_mode
   question: "Do you have a kernel source to optimize, or only a spec?"

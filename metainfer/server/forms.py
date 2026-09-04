@@ -97,6 +97,28 @@ def _normalize_field(entry: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _split_meta(raw: Any, *, origin: str = "form.yaml"):
+    """Separate optional schema-level meta from real fields.
+
+    A raw-list entry ``- __meta__: {…}`` (a dict whose sole key is
+    ``__meta__``) is not a field: it is popped out and merged onto the schema
+    so a task can advertise things like ``conversational: true`` to the
+    New-run view without polluting the field list. Returns
+    ``(field_entries, schema_meta)``.
+    """
+    schema_meta: Dict[str, Any] = {}
+    field_entries: List[Any] = []
+    for e in raw:
+        if isinstance(e, dict) and set(e.keys()) == {"__meta__"}:
+            m = e["__meta__"]
+            if not isinstance(m, dict):
+                raise ValueError(f"{origin}: __meta__ must be a mapping")
+            schema_meta.update(m)
+        else:
+            field_entries.append(e)
+    return field_entries, schema_meta
+
+
 def _form_yaml_for_task_type(task_type: str) -> Optional[Path]:
     """Resolve the form.yaml path for a task type.
 
@@ -127,7 +149,8 @@ def load_form_schema(task_type: str) -> Optional[Dict[str, Any]]:
         raw = yaml.safe_load(f) or []
     if not isinstance(raw, list):
         raise ValueError(f"{yaml_path}: expected a list of field entries")
-    fields = [_normalize_field(e) for e in raw]
+    field_entries, schema_meta = _split_meta(raw, origin=yaml_path)
+    fields = [_normalize_field(e) for e in field_entries]
     # Label/description come from the WebPlugin (single source of truth
     # per task type), NOT from a central dict here.
     from .registry import get as _get_plugin
@@ -139,6 +162,7 @@ def load_form_schema(task_type: str) -> Optional[Dict[str, Any]]:
         "label": label,
         "description": description,
         "fields": fields,
+        **schema_meta,
     }
 
 

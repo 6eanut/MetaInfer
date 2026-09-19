@@ -10,14 +10,14 @@
 //       because the iframe is same-origin with the WebUI).
 
 import { html } from "htm/preact";
-import { useCallback, useEffect, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import {
   getTimeline, getAgents, controlTask,
 } from "app/api";
 import { AgentsPanel } from "app/agents-panel";
 import { Timeline } from "app/timeline";
 import { CalcIterations } from "app/calc-iterations";
-import { labelFor } from "app/utils";
+import { labelFor, takeTimelineBatch } from "app/utils";
 
 const STEPS = [
   { id: "s1_analyze", label: "S1: Analyze code (2 agents)" },
@@ -27,7 +27,7 @@ const STEPS = [
 ];
 
 export function CalcVizView({ taskId, run, status }) {
-  const [timeline, setTimeline] = useState({ events: [], since: 0 });
+  const [timeline, setTimeline] = useState({ events: [] });
   const [agents, setAgents] = useState({ ts: 0, agents: [] });
   const [summary, setSummary] = useState(null);
   const [batchSize, setBatchSize] = useState(1);
@@ -43,11 +43,18 @@ export function CalcVizView({ taskId, run, status }) {
       new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), ms)),
     ]);
 
+  // See task-detail.js: the cursor must be a ref so the memoized poll reads
+  // the current value, and refreshes must not overlap or the same batch is
+  // appended twice.
+  const cursorRef = useRef(0);
+  const inflightRef = useRef(false);
+
   const refresh = useCallback(async () => {
-    if (!taskId) return;
+    if (!taskId || inflightRef.current) return;
+    inflightRef.current = true;
     try {
       const [tl, ag, sm] = await Promise.all([
-        withTimeout(getTimeline(taskId, timeline.since || 0))
+        withTimeout(getTimeline(taskId, cursorRef.current))
           .catch(() => ({ events: [] })),
         withTimeout(getAgents(taskId)).catch(() => ({ ts: 0, agents: [] })),
         withTimeout(
@@ -55,14 +62,17 @@ export function CalcVizView({ taskId, run, status }) {
             .then((r) => r.ok ? r.json() : null)
         ).catch(() => null),
       ]);
-      setTimeline((prev) => ({
-        events: prev.events.concat((tl && tl.events) || []),
-        since: Date.now() / 1000,
-      }));
+      const { fresh, since } = takeTimelineBatch(tl && tl.events, cursorRef.current);
+      cursorRef.current = since;
+      if (fresh.length) {
+        setTimeline((prev) => ({ events: prev.events.concat(fresh) }));
+      }
       setAgents(ag || { ts: 0, agents: [] });
       setSummary(sm);
     } catch (e) {
       console.error("calc refresh:", e);
+    } finally {
+      inflightRef.current = false;
     }
   }, [taskId]);
 
@@ -80,7 +90,8 @@ export function CalcVizView({ taskId, run, status }) {
   }, [taskId]);
 
   useEffect(() => {
-    setTimeline({ events: [], since: 0 });
+    cursorRef.current = 0;
+    setTimeline({ events: [] });
     setAgents({ ts: 0, agents: [] });
     setSummary(null);
     setIterations(null);

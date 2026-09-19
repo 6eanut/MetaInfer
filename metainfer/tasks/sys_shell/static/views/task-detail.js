@@ -16,13 +16,13 @@
 // to a minimal "no detail view" body so the shell stays usable for debugging.
 
 import { html } from "htm/preact";
-import { useCallback, useEffect, useState } from "preact/hooks";
+import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 import {
   getRun, getTimeline, getAgents, controlTask,
 } from "app/api";
 import { ConfirmActionModal } from "app/confirm-action-modal";
 import { BudgetBar } from "app/budget-bar";
-import { labelFor } from "app/utils";
+import { labelFor, takeTimelineBatch } from "app/utils";
 
 const withTimeout = (p, ms = 8000) =>
   Promise.race([
@@ -59,37 +59,55 @@ export function TaskDetailView({ taskId, taskType, run, status, onChange, label,
   // Shell-fetches only what the shell chrome needs. Everything that's
   // task-specific (iterations, charts, state-graph, retrospective) is
   // fetched by the plugin body itself via its own runtime-api.
-  const [timeline, setTimeline] = useState({ events: [], since: 0 });
+  const [timeline, setTimeline] = useState({ events: [] });
   const [agents, setAgents] = useState({ ts: 0, agents: [] });
   const [loadState, setLoadState] = useState("loading"); // loading | ok | error
   const [lastErr, setLastErr] = useState(null);
   const [showReset, setShowReset] = useState(false);
 
+  // The timeline cursor lives in a ref, not in state: `refreshAll` is
+  // memoized on `taskId` alone, so a state-held cursor would stay frozen at
+  // its first-render value inside the closure — every poll would re-request
+  // the whole timeline from `since=0` and append it again, growing the events
+  // array (and the per-render work) without bound. The cursor advances to the
+  // newest *event* timestamp rather than `Date.now()` so it can't skip an
+  // event when the browser clock runs ahead of the orchestrator's.
+  const cursorRef = useRef(0);
+  // One refresh at a time: the 5s interval, the SSE-driven `onChange` tick and
+  // the post-control refresh can overlap. Without this guard two in-flight
+  // polls would read the same cursor and append the same batch twice.
+  const inflightRef = useRef(false);
+
   const refreshAll = useCallback(async () => {
-    if (!taskId) return;
+    if (!taskId || inflightRef.current) return;
+    inflightRef.current = true;
     setLastErr(null);
     try {
       const [tl, ag] = await Promise.all([
-        withTimeout(getTimeline(taskId, timeline.since || 0))
+        withTimeout(getTimeline(taskId, cursorRef.current))
           .catch((e) => { console.warn("timeline:", e); return { events: [] }; }),
         withTimeout(getAgents(taskId))
           .catch((e) => { console.warn("agents:", e); return { ts: 0, agents: [] }; }),
       ]);
-      setTimeline((prev) => ({
-        events: prev.events.concat((tl && tl.events) || []),
-        since: Date.now() / 1000,
-      }));
+      const { fresh, since } = takeTimelineBatch(tl && tl.events, cursorRef.current);
+      cursorRef.current = since;
+      if (fresh.length) {
+        setTimeline((prev) => ({ events: prev.events.concat(fresh) }));
+      }
       setAgents(ag || { ts: 0, agents: [] });
       setLoadState("ok");
     } catch (e) {
       console.error("refreshAll failed:", e);
       setLastErr(String(e));
       setLoadState("error");
+    } finally {
+      inflightRef.current = false;
     }
   }, [taskId]);
 
   useEffect(() => {
-    setTimeline({ events: [], since: 0 });
+    cursorRef.current = 0;
+    setTimeline({ events: [] });
     setAgents({ ts: 0, agents: [] });
     setLoadState("loading");
     setLastErr(null);

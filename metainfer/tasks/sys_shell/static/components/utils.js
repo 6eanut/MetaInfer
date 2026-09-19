@@ -37,6 +37,21 @@ export function escapeHtml(s) {
   })[c]);
 }
 
+// Timeline batching. The events feed is polled incrementally: each request
+// asks for events `since` the last cursor, and the result is appended to what
+// the view already holds. The endpoint filters with `ts >= since`, so the
+// newest event of one batch comes back again on the next; this drops that
+// boundary event and advances the cursor to the newest timestamp actually
+// seen. Returning an empty `fresh` lets the caller skip a render. Pure, so it
+// is unit-tested without a DOM (see components/utils.test.mjs).
+export function takeTimelineBatch(batch, cursor = 0) {
+  const events = Array.isArray(batch) ? batch : [];
+  const ts = (ev) => (ev && Number(ev.ts)) || 0;
+  const since = events.reduce((m, ev) => Math.max(m, ts(ev)), cursor || 0);
+  const fresh = cursor > 0 ? events.filter((ev) => ts(ev) > cursor) : events;
+  return { fresh, since };
+}
+
 // Phase label cache — populated by state-graph fetches. The backend is the
 // source of truth for labels (reads phases.py), so the frontend just caches.
 const _phaseLabels = new Map();
